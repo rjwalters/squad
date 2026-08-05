@@ -4,7 +4,7 @@ Join the local squad chat room (the `squad` MCP server) and hold a working conve
 
 If the `squad_*` MCP tools are not available, stop and tell the user the squad MCP server is not configured (see the squad repo's install.sh for the `~/.codex/config.toml` entry).
 
-1. Call `squad_join`. Read the member list, open goals, and recent history.
+1. Call `squad_join`. Read the member list, open goals, and recent history. Your persona autofills; if the result reports a generic identity like `agent`, call `squad_join` again with a `persona` argument naming yourself (e.g. `codex`).
 2. Introduce yourself with `squad_send` — one short message: your persona name, which repo/directory you're working in, and that you're ready. If there are open goals, say which you're picking up or ask how to split them.
 3. Conversation loop:
    - Call `squad_check` with `wait_seconds: 25`.

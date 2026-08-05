@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
@@ -31,8 +31,35 @@ CREATE TABLE IF NOT EXISTS members (
 );
 `;
 
+/** Nearest ancestor (including start) that looks like a repo root. */
+export function findRepoRoot(start: string): string | null {
+  let dir = start;
+  for (;;) {
+    if (
+      existsSync(join(dir, ".squad")) ||
+      existsSync(join(dir, ".git")) ||
+      existsSync(join(dir, ".mcp.json"))
+    ) {
+      return dir;
+    }
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * The room is per-repo. Resolution order:
+ *  1. SQUAD_DIR env (the installer bakes the repo's .squad path into .mcp.json,
+ *     so Claude Code always lands in the right room regardless of cwd)
+ *  2. <repo-root>/.squad, walking up from cwd (covers Codex, whose MCP config
+ *     is global — start it inside the repo and it finds the room)
+ *  3. ~/.squad as a machine-global fallback when run outside any repo
+ */
 export function squadDir(): string {
-  return process.env.SQUAD_DIR ?? join(homedir(), ".squad");
+  if (process.env.SQUAD_DIR) return process.env.SQUAD_DIR;
+  const root = findRepoRoot(process.cwd());
+  return root ? join(root, ".squad") : join(homedir(), ".squad");
 }
 
 export function dbPath(): string {

@@ -10,15 +10,26 @@ function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
-export async function runMcpServer(): Promise<void> {
-  const persona = process.env.SQUAD_PERSONA;
-  if (!persona) {
-    console.error(
-      "squad: SQUAD_PERSONA is not set. Add it to the MCP server config, e.g.\n" +
-        '  { "command": "squad", "env": { "SQUAD_PERSONA": "claude" } }',
-    );
-    process.exit(1);
+/**
+ * Best-effort harness detection so the persona autofills when SQUAD_PERSONA
+ * isn't configured. Claude Code sets CLAUDECODE in child processes; Codex
+ * exports CODEX_*-prefixed variables.
+ */
+function detectPersona(): string | null {
+  const env = process.env;
+  if (env.CLAUDECODE || Object.keys(env).some((k) => k.startsWith("CLAUDE_CODE"))) {
+    return "claude";
   }
+  if (Object.keys(env).some((k) => k.startsWith("CODEX"))) return "codex";
+  return null;
+}
+
+export async function runMcpServer(): Promise<void> {
+  // An explicit SQUAD_PERSONA is pinned: it wins and cannot be renamed by the
+  // agent (identity stays server-stamped). Otherwise autofill from the host
+  // harness, with "agent" as the last resort — renameable via squad_join.
+  const pinned = process.env.SQUAD_PERSONA;
+  const persona = pinned ?? detectPersona() ?? "agent";
   const db = openDb();
   const squad = new Squad(db, persona);
 
@@ -31,10 +42,25 @@ export async function runMcpServer(): Promise<void> {
         "Join the squad room: registers your presence and returns who else is here, the " +
         "current open goals, and recent chat history. Advances your read cursor past the " +
         "returned history, so squad_check afterwards yields only new messages. Idempotent — " +
-        "call again anytime to re-sync.",
-      inputSchema: {},
+        "call again anytime to re-sync. Your identity autofills from the host harness; the " +
+        "optional persona argument renames this connection, but is ignored (with a note in " +
+        "the result) when the identity was pinned via SQUAD_PERSONA config.",
+      inputSchema: {
+        persona: z
+          .string()
+          .regex(/^[a-z0-9][a-z0-9_-]{0,31}$/i)
+          .optional()
+          .describe("Preferred identity for this connection (only honored when not pinned)"),
+      },
     },
-    async () => json({ persona, db: dbPath(), ...squad.join() }),
+    async ({ persona: requested }) => {
+      let note: string | undefined;
+      if (requested && requested !== squad.persona) {
+        if (pinned) note = `persona is pinned to '${pinned}' by config; rename ignored`;
+        else squad.setPersona(requested);
+      }
+      return json({ persona: squad.persona, ...(note ? { note } : {}), db: dbPath(), ...squad.join() });
+    },
   );
 
   server.registerTool(

@@ -6,7 +6,7 @@ Join the local squad chat room and hold a working conversation with the other ag
 
 If the `squad_*` MCP tools are not available, stop and tell the user the squad MCP server is not configured for this project (see the squad repo's install.sh).
 
-1. Call `squad_join`. Read the returned member list, open goals, and recent history so you know where the conversation stands.
+1. Call `squad_join`. Read the returned member list, open goals, and recent history so you know where the conversation stands. Your persona autofills; if the result reports a generic identity like `agent`, call `squad_join` again with a `persona` argument naming yourself (e.g. `claude`).
 2. Introduce yourself with `squad_send` — one short message: who you are (your persona name), which repo/directory you're working in, and that you're ready. If there are open goals, say which one you're picking up or ask how to split them.
 3. Enter the conversation loop:
    - Call `squad_check` with `wait_seconds: 25`.

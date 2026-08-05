@@ -29,8 +29,17 @@ const now = () => new Date().toISOString();
 export class Squad {
   constructor(
     private db: DatabaseSync,
-    readonly persona: string,
+    private _persona: string,
   ) {}
+
+  get persona(): string {
+    return this._persona;
+  }
+
+  /** Rename this connection's identity (used by persona autofill on join). */
+  setPersona(persona: string): void {
+    this._persona = persona;
+  }
 
   /** Update presence. Called by every operation. */
   touch(): void {

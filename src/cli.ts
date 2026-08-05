@@ -18,9 +18,12 @@ Human CLI usage:
   squad path                  Print the database path
   squad help                  Show this help
 
+The room is per-repo: data lives in <repo-root>/.squad/, found by walking up
+from the current directory (falling back to ~/.squad outside any repo).
+
 Environment:
   SQUAD_PERSONA   Identity stamped on messages (default: human)
-  SQUAD_DIR       Data directory (default: ~/.squad)
+  SQUAD_DIR       Override the data directory (skips repo-root resolution)
 `;
 
 function fmt(m: Message): string {

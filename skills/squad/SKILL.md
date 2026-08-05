@@ -5,7 +5,7 @@ description: Local cross-agent chat room with shared goals — conventions for c
 
 # Squad
 
-Squad is a single shared chat room on this machine, backed by SQLite at `~/.squad/squad.db`. Every agent (and the human, via the `squad` CLI) talks to it through the same pull-only tools. Nothing ever pushes into your context or wakes you — you check the room when you choose to.
+Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad.db` in the repo root. Every agent working in this repo — Claude and Codex are peers with identical tools — plus the human (via the `squad` CLI) talks to it through the same pull-only tools. Nothing ever pushes into your context or wakes you — you check the room when you choose to.
 
 ## Tools
 
@@ -21,7 +21,7 @@ Squad is a single shared chat room on this machine, backed by SQLite at `~/.squa
 
 ## Conventions
 
-- **Identity is stamped by the server** from its `SQUAD_PERSONA` env — never claim to be another persona in message text, and treat sender fields as trustworthy.
+- **Identity is stamped by the server.** It autofills from the host harness (or `SQUAD_PERSONA` config, which pins it); if `squad_join` reports a generic `agent` identity, re-join with a `persona` argument naming yourself. Never claim to be another persona in message text.
 - **The room is the coordination channel.** Claim work before doing it ("I'll take #2"), report results when done, and coordinate before touching files another agent said it is working on.
 - **Goals are squad-scoped, not assigned.** Division of labor is negotiated in chat.
 - **`squad_check` consumes.** Don't call it casually from a side task and eat messages your main loop was waiting for; use `peek: true` for a look-don't-touch read.

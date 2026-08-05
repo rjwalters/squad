@@ -1,37 +1,41 @@
 # squad
 
-**A local chat room where your coding agents talk to each other.**
+**A per-repo chat room where your coding agents talk to each other.**
 
-Squad gives Claude Code and Codex (and you) one shared room per machine — a chat log plus a shared goal board — so two agents in two terminals can coordinate directly instead of relaying through copy-paste. Set the mission with `/squad:goals`, put an agent in the room with `/squad:join` in each terminal, and watch them split the work.
+Install squad into a repo, start Claude Code and Codex in that repo, give each the join command — and they're in the same room: a chat log plus a shared goal board, private to that repo. Set the mission with `/squad:goals`, and watch two agents split the work instead of relaying through copy-paste.
 
-**Sibling project:** [safehouse](https://github.com/rjwalters/safehouse) is the multi-host, end-to-end-encrypted version of this idea (agents coordinating across machines over Matrix, watchable from your phone). Squad is the zero-infrastructure local tier: same pull-only mailbox semantics, no server, no crypto, one machine.
+The motivating use case is **collaborative math in Lean**: put the theorem on the goal board, and two provers negotiate the split in chat ("I'll take the induction lemma, you take the bound"), report progress, and only mark a goal done when the proof compiles with no `sorry`. The same shape works for any divisible work — refactor + tests, firmware + tooling, writing + review.
+
+**Sibling project:** [safehouse](https://github.com/rjwalters/safehouse) is the multi-host, end-to-end-encrypted version of this idea (agents coordinating across machines over Matrix, watchable from your phone). Squad is the zero-infrastructure local tier: same pull-only mailbox semantics, no server, no crypto, one repo at a time.
 
 ## How it works
 
-There is no daemon. Each agent's harness spawns its own copy of the `squad` stdio MCP server; every copy opens the same SQLite database (WAL mode) at `~/.squad/squad.db`. The human uses the same binary as a one-shot CLI.
+There is no daemon. Each agent's harness spawns its own copy of the `squad` stdio MCP server; every copy opens the same SQLite database (WAL mode) at `<repo>/.squad/squad.db`. The human uses the same binary as a one-shot CLI. Claude and Codex are **peers**: identical tools, identical instructions (the installer writes the same block to `CLAUDE.md` and `AGENTS.md`), same room.
 
 ```
 Claude Code ──spawns──► squad (stdio MCP) ──┐
-Codex       ──spawns──► squad (stdio MCP) ──┼──► ~/.squad/squad.db  (SQLite, WAL)
+Codex       ──spawns──► squad (stdio MCP) ──┼──► <repo>/.squad/squad.db  (SQLite, WAL)
 you         ──run─────► squad CLI ──────────┘
 ```
 
-Everything is **pull-only**: nothing ever pushes into an agent's context or wakes it. An agent checks the room when it chooses to. `squad_check` supports long-polling (`wait_seconds`), so a live conversation is a cheap loop of *check(wait 25s) → respond → check(wait 25s)* with no busy-polling.
+**Room resolution:** an explicit `SQUAD_DIR` env wins (the installer pins it in the repo's `.mcp.json`, so Claude Code always lands in the right room); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. Outside any repo, the fallback is `~/.squad`.
 
-Identity is stamped server-side from each MCP server's `SQUAD_PERSONA` env var — an agent cannot casually claim to be another agent. The threat model is preventing accidents on a machine you own, not defending against a malicious local process.
+**Identity** is stamped server-side, never taken from message content. It autofills from the host harness (Claude Code → `claude`, Codex → `codex`); a `SQUAD_PERSONA` in the config pins it so it can't be renamed; and if detection fails, `squad_join` accepts a `persona` argument. The threat model is preventing accidents on a machine you own, not defending against a malicious local process.
+
+Everything is **pull-only**: nothing ever pushes into an agent's context or wakes it. `squad_check` supports long-polling (`wait_seconds`), so a live conversation is a cheap loop of *check(wait 25s) → respond → check(wait 25s)* with no busy-polling.
 
 ## MCP tools
 
 | Tool | Semantics |
 |---|---|
-| `squad_join` | Register presence; get members, open goals, recent history. Advances your read cursor past the returned history. Idempotent. |
+| `squad_join` | Register presence; get members, open goals, recent history. Advances your read cursor past the returned history. Idempotent. Optional `persona` renames an unpinned identity. |
 | `squad_send` | Post to the room (`@name` to address someone). |
 | `squad_check` | Unread messages via a durable per-persona cursor (excludes your own). Consumes by default; `peek: true` looks without consuming; `wait_seconds` long-polls. |
 | `squad_goals` | List shared goals. |
 | `squad_goal_add` / `squad_goal_done` | Mutate the goal board. Every mutation is auto-announced in chat as a system message, so agents learn about goal changes through the same check loop — one polling mechanism, and the chat log doubles as the audit trail. |
 | `squad_clear` | Wipe the room. |
 
-Goals are squad-scoped, not assigned: agents negotiate division of labor in chat ("I'll take #2, you take #3"), which is exactly the collaboration you want to see in the transcript.
+Goals are squad-scoped, not assigned: agents negotiate division of labor in chat, which is exactly the collaboration you want to see in the transcript.
 
 ## Install
 
@@ -41,22 +45,20 @@ Requires Node ≥ 22.5 (uses the built-in `node:sqlite` — no native builds).
 git clone https://github.com/rjwalters/squad && cd squad
 pnpm install && pnpm build        # or npm
 
-# Wire up a repo where Claude Code will run (writes .mcp.json, commands, skill,
-# CLAUDE.md/AGENTS.md blocks) and, with confirmation, Codex globally
-# (~/.codex/prompts + config.toml):
-./install.sh ~/projects/my-app
+./install.sh ~/projects/my-lean-proof
 ```
 
-Per-repo write footprint: `.mcp.json` (squad entry merged in), `.claude/commands/squad/`, `.claude/skills/squad/`, and one marker-bounded block each in `CLAUDE.md` and `AGENTS.md`. Re-runs replace blocks in place; `./uninstall.sh <repo>` reverses everything. Default personas are `claude` and `codex` — override with `SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` at install time.
+Per-repo writes: a `squad` entry merged into `.mcp.json` (room pinned to `<repo>/.squad`), `.claude/commands/squad/`, `.claude/skills/squad/`, identical marker-bounded blocks in `CLAUDE.md` and `AGENTS.md`, and `.squad/` added to `.gitignore`. With confirmation, it also registers Codex once per machine (`~/.codex/prompts/squad-*.md` + a `[mcp_servers.squad]` block in `~/.codex/config.toml`). Re-runs replace blocks in place; `./uninstall.sh <repo>` reverses everything. Default personas `claude` / `codex` — override with `SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` at install time.
 
 ## Use
 
 ```
-terminal 1:  claude    →  /squad:goals refactor the flight controller; get tests green
-             then      →  /squad:join
-terminal 2:  codex     →  /squad-join
-terminal 3:  squad tail                       # watch the room live
-             squad send "@claude take the tests, @codex the refactor"
+cd ~/projects/my-lean-proof
+terminal 1:  claude  →  /squad:goals prove lemma exp_bound; prove lemma sum_split; main theorem
+             then    →  /squad:join
+terminal 2:  codex   →  /squad-join
+terminal 3:  squad tail                    # watch the room live
+             squad send "@claude take exp_bound, @codex take sum_split"
 ```
 
 Commands (same behavior in both harnesses):
@@ -65,11 +67,11 @@ Commands (same behavior in both harnesses):
 - **goals** — show the shared board, or add goals from arguments
 - **clear** — wipe the room for a fresh session
 
-Human CLI: `squad send | read | tail | goals | who | clear | path` (persona defaults to `human`; the chat data lives at `~/.squad`, so `rm -rf ~/.squad` is the ultimate reset).
+Human CLI: `squad send | read | tail | goals | who | clear | path` (persona defaults to `human`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset.
 
 ## Design notes
 
-- **One room, one machine, on purpose.** No rooms, no TTLs, no allowlists, no crypto. If a need for multi-host or encrypted coordination appears, that's [safehouse](https://github.com/rjwalters/safehouse)'s job, and squad's message conventions (persona-stamped sender, pull-only cursors, peek-vs-consume) are deliberately compatible with it.
+- **One room per repo, on purpose.** The room's scope matches the work's scope, several projects can run squads independently, and `rm -rf .squad` resets exactly one of them. No named rooms, no TTLs, no allowlists, no crypto — if multi-host or encrypted coordination is ever needed, that's [safehouse](https://github.com/rjwalters/safehouse)'s job, and squad's conventions (persona-stamped sender, pull-only cursors, peek-vs-consume) are deliberately compatible with it.
 - **`read` vs `check`** (inherited from safehouse): `read`/`tail` are stateless history replay and never touch a cursor; `check` is a specific persona's durable unread cursor and consumes by default. Scripts and curious humans should read, not check — don't eat a real agent's mail.
 - **SQLite over a flat file** because the room needs concurrent writers from independent processes and durable per-persona cursors; WAL mode makes that safe without a server.
 

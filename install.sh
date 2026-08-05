@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Install squad into a target repo (Claude Code side) and, with consent,
-# wire up Codex globally (~/.codex). Safe to re-run; marker-bounded edits
-# are replaced in place.
+# Install squad into a target repo. Claude Code and Codex are peers: both get
+# the same MCP tools, the same room (<repo>/.squad/), and equivalent join/goals
+# commands. Safe to re-run; marker-bounded edits are replaced in place.
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -16,14 +16,20 @@ usage() {
 usage: ./install.sh [options] [target-repo]
 
 Installs into the target repo (default .):
-  .mcp.json                        squad MCP server entry (merged, persona "$CLAUDE_PERSONA")
+  .mcp.json                        squad MCP entry for Claude Code, with the
+                                   room pinned to <repo>/.squad (persona "$CLAUDE_PERSONA")
   .claude/commands/squad/*.md      /squad:join, /squad:goals, /squad:clear
   .claude/skills/squad/SKILL.md    conventions + tool reference
-  CLAUDE.md / AGENTS.md            marker-bounded pointer blocks
+  CLAUDE.md / AGENTS.md            identical marker-bounded blocks — Claude and
+                                   Codex read the same instructions
+  .gitignore                       adds .squad/ (the room is ephemeral local state)
 
-Global, with confirmation (skip with --no-codex):
-  ~/.codex/prompts/squad-*.md      Codex slash-command prompts
-  ~/.codex/config.toml             [mcp_servers.squad] entry (persona "$CODEX_PERSONA")
+Global, with confirmation (skip with --no-codex) — Codex's MCP config lives in
+~/.codex/config.toml, so its half is registered once per machine:
+  ~/.codex/prompts/squad-*.md      /squad-join, /squad-goals prompts
+  ~/.codex/config.toml             [mcp_servers.squad] (persona "$CODEX_PERSONA"); the server
+                                   finds each repo's room from Codex's working
+                                   directory, so start codex inside the repo
 
 options:
   -y            non-interactive; assumes yes (including the Codex global writes
@@ -85,37 +91,62 @@ cp "$SRC"/skills/squad/SKILL.md "$TARGET/.claude/skills/squad/"
 echo "installed .claude/commands/squad/ and .claude/skills/squad/"
 
 # --- target repo: .mcp.json merge ------------------------------------------
-node - "$TARGET/.mcp.json" "$SRC/dist/index.js" "$CLAUDE_PERSONA" <<'EOF'
+node - "$TARGET/.mcp.json" "$SRC/dist/index.js" "$CLAUDE_PERSONA" "$TARGET/.squad" <<'EOF'
 const fs = require("fs");
-const [file, serverPath, persona] = process.argv.slice(2);
+const [file, serverPath, persona, squadDir] = process.argv.slice(2);
 let cfg = {};
 if (fs.existsSync(file)) cfg = JSON.parse(fs.readFileSync(file, "utf8"));
 cfg.mcpServers ??= {};
 cfg.mcpServers.squad = {
   command: "node",
   args: [serverPath],
-  env: { SQUAD_PERSONA: persona },
+  env: { SQUAD_PERSONA: persona, SQUAD_DIR: squadDir },
 };
 fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
 console.log(`merged squad server into ${file}`);
 EOF
 
-# --- target repo: CLAUDE.md + AGENTS.md blocks -----------------------------
+# --- target repo: gitignore the room ---------------------------------------
+if ! grep -qxF ".squad/" "$TARGET/.gitignore" 2>/dev/null; then
+  echo ".squad/" >> "$TARGET/.gitignore"
+  echo "added .squad/ to .gitignore"
+fi
+
+# --- target repo: CLAUDE.md + AGENTS.md blocks (identical — both agents are
+# peers and read the same conventions) ---------------------------------------
 read -r -d '' BLOCK <<EOF || true
-This repository has [squad](https://github.com/rjwalters/squad) installed — a
-local cross-agent chat room (with a shared goal board) that lets Claude and
-Codex collaborate on this machine. Use the \`squad_*\` MCP tools; conventions
-live in \`.claude/skills/squad/SKILL.md\`. Commands: \`/squad:join\` to enter
-the room, \`/squad:goals\` to view or add shared goals, \`/squad:clear\` to
-reset. A quick \`squad_check\` (with \`peek: true\`) at the start of a session
-shows whether another agent left you a message.
+## Squad — cross-agent collaboration
+
+This repo has [squad](https://github.com/rjwalters/squad) installed: a chat
+room private to this repo (SQLite at \`.squad/squad.db\`) shared by every agent
+working here — Claude and Codex are peers with identical tools. Use it to
+split work, hand off results, and track shared goals (e.g. divide the lemmas
+of a Lean proof and claim them in chat).
+
+Tools (all pull-based; nothing ever wakes you):
+- \`squad_join\` — register, get members + open goals + recent history
+- \`squad_send\` — post to the room; \`@name\` addresses a teammate
+- \`squad_check\` — your unread messages (consumes; \`peek: true\` to look
+  without consuming; \`wait_seconds: 25\` long-polls for live conversation)
+- \`squad_goals\` / \`squad_goal_add\` / \`squad_goal_done\` — shared goal
+  board; every change is auto-announced in chat
+- \`squad_clear\` — wipe the room (destructive; needs explicit user intent)
+
+Conventions: claim a goal in chat before working on it; report results when
+done; only mark goals done that you verified (in Lean work: it compiles with
+no \`sorry\`); never speak as another persona; coordinate before editing files
+a teammate said they're working on. At session start, a \`squad_check\` with
+\`peek: true\` shows whether a teammate left you a message.
+
+Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
+the loop: check(wait 25s) → respond/work → repeat.
 EOF
 write_block "$TARGET/CLAUDE.md" "$BLOCK"
 write_block "$TARGET/AGENTS.md" "$BLOCK"
-echo "wrote marker blocks in CLAUDE.md and AGENTS.md"
+echo "wrote identical marker blocks in CLAUDE.md and AGENTS.md"
 
 # --- global: Codex ----------------------------------------------------------
-if [[ $CODEX -eq 1 ]] && confirm "Wire up Codex globally (~/.codex/prompts + config.toml)?"; then
+if [[ $CODEX -eq 1 ]] && confirm "Register squad with Codex (~/.codex/prompts + config.toml, one-time per machine)?"; then
   mkdir -p "$HOME/.codex/prompts"
   cp "$SRC"/codex/prompts/squad-*.md "$HOME/.codex/prompts/"
   echo "installed ~/.codex/prompts/squad-*.md"
@@ -135,6 +166,9 @@ if [[ $CODEX -eq 1 ]] && confirm "Wire up Codex globally (~/.codex/prompts + con
   cat >> "$CODEX_TOML" <<EOF
 
 # BEGIN SQUAD MCP
+# The squad server resolves each repo's room (<repo>/.squad) from the working
+# directory, so one global entry serves every squad-enabled repo — just start
+# codex inside the repo.
 [mcp_servers.squad]
 command = "node"
 args = ["$SRC/dist/index.js"]
@@ -147,7 +181,8 @@ else
 fi
 
 echo
-echo "done. try it:"
-echo "  terminal 1 (this repo): claude   → /squad:join"
-echo "  terminal 2 (any repo):  codex    → /squad-join   (prompt name may render as squad-join)"
-echo "  terminal 3 (human):     node $SRC/dist/index.js tail"
+echo "done. the flow:"
+echo "  cd $TARGET"
+echo "  terminal 1: claude → /squad:goals <the mission>  then  /squad:join"
+echo "  terminal 2: codex  → /squad-join"
+echo "  terminal 3: node $SRC/dist/index.js tail    # watch the room"

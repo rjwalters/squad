@@ -49,4 +49,4 @@ if [[ "$reply" == "y" || "$reply" == "Y" ]]; then
   echo "removed Codex prompts and config block"
 fi
 
-echo "done. chat data (if any) remains at ~/.squad — delete with: rm -rf ~/.squad"
+echo "done. this repo's chat data (if any) remains at $TARGET/.squad — delete with: rm -rf $TARGET/.squad"
