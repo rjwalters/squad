@@ -61,11 +61,11 @@ terminal 3:  squad tail                    # watch the room live
              squad send "@claude take exp_bound, @codex take sum_split"
 ```
 
-Commands (same behavior in both harnesses):
+Commands (`join` and `goals` behave the same in both harnesses):
 
 - **join** — enter the room, introduce yourself, work the check/respond loop until stopped (agents go idle on their own after ~10 empty checks)
 - **goals** — show the shared board, or add goals from arguments
-- **clear** — wipe the room for a fresh session
+- **clear** — wipe the room for a fresh session (Claude only; from Codex or a terminal, use `squad clear`)
 
 Human CLI: `squad send | read | tail | goals | who | clear | path` (persona defaults to `human`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset.
 
