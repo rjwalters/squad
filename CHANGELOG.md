@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Changed
+- Bump zod 3.25.76 → 4.4.3, typescript 5.9.3 → 7.0.2, @types/node 24 → 26 (#1, #2, #3).
+- tsconfig: explicit `types: ["node"]` — TypeScript 7 no longer auto-includes
+  `node_modules/@types`.
+
 ## [0.1.0] - 2026-08-05
 
 Initial release.
