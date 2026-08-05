@@ -1,0 +1,31 @@
+{
+  "name": "@rjwalters/squad",
+  "version": "0.1.0",
+  "description": "Local cross-agent chat room with shared goals — so Codex and Claude can collaborate on one machine",
+  "repository": "github:rjwalters/squad",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "squad": "dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "pnpm build && node --test 'tests/**/*.test.mjs'",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.8.0"
+  },
+  "packageManager": "pnpm@11.20.0"
+}
