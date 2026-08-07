@@ -10,6 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `squad goals reopen <id>` and matching `squad_goal_reopen` MCP tool: undo a
   mistaken `done` by resetting the goal to open and clearing `done_by` /
   `done_ts`, auto-announced in chat (#5).
+- Installer contract conformance (#4): `install.sh` now records a tracked
+  `.claude/skills/squad/install-metadata.json` (`version`, `commit`,
+  `layout_version` — byte-identical on every machine) so `/repo:update-tools`
+  discovers squad installs, plus a gitignored `.install-local.json` sidecar
+  for the machine-local source path and install timestamp.
+- `install.sh --dry-run`: prints every planned write — including the global
+  Codex writes outside the target repo — changes nothing, exits 0 (#4).
+- `VERSION` at the repo root, populated and enforced against `package.json`
+  by a test; the installer reads it as the single source of truth (#4).
 
 ### Changed
 - Bump zod 3.25.76 → 4.4.3, typescript 5.9.3 → 7.0.2, @types/node 24 → 26 (#1, #2, #3).
