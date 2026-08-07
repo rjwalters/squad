@@ -10,3 +10,12 @@ test("VERSION matches package.json", () => {
   assert.notEqual(version, "", "VERSION must not be empty");
   assert.equal(version, pkg.version);
 });
+
+test("MCP server version matches VERSION", () => {
+  const version = readFileSync(new URL("../VERSION", import.meta.url), "utf8").trim();
+  const mcp = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
+  assert.ok(
+    mcp.includes(`version: "${version}"`),
+    `src/mcp.ts must declare McpServer version "${version}"`,
+  );
+});
