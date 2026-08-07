@@ -13,6 +13,7 @@ Human CLI usage:
   squad goals                 Show the goal board (open + done)
   squad goals add <text...>   Add a shared goal
   squad goals done <id>       Mark a goal done
+  squad goals reopen <id>     Reopen a goal mistakenly marked done
   squad who                   Show members and last-seen times
   squad clear                 Wipe messages, goals, cursors, members
   squad path                  Print the database path
@@ -88,6 +89,13 @@ export async function runCli(argv: string[]): Promise<void> {
         if (Number.isNaN(id)) throw new Error("usage: squad goals done <id>");
         const g = squad.goalDone(id);
         console.log(`goal #${g.id} done: ${g.body}`);
+      } else if (sub === "reopen") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error("usage: squad goals reopen <id>");
+        const wasOpen = squad.goals().some((g) => g.id === id);
+        const g = squad.goalReopen(id);
+        if (wasOpen) console.log(`goal #${g.id} is already open: ${g.body}`);
+        else console.log(`goal #${g.id} reopened: ${g.body}`);
       } else if (sub === undefined) {
         const goals = squad.goals(true);
         if (goals.length === 0) console.log("no goals yet — squad goals add <text...>");
@@ -96,7 +104,7 @@ export async function runCli(argv: string[]): Promise<void> {
           console.log(`[${mark}] #${g.id} ${g.body} (${g.created_by})`);
         }
       } else {
-        throw new Error("usage: squad goals [add <text...> | done <id>]");
+        throw new Error("usage: squad goals [add <text...> | done <id> | reopen <id>]");
       }
       break;
     }

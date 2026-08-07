@@ -72,6 +72,34 @@ test("goalDone on missing id throws", () => {
   assert.throws(() => claude.goalDone(9999), /no goal/);
 });
 
+test("goalReopen resets a done goal and announces", () => {
+  claude.clear();
+  const goal = claude.goalAdd("prove the bound");
+  codex.goalDone(goal.id);
+  const reopened = claude.goalReopen(goal.id);
+  assert.equal(reopened.status, "open");
+  assert.equal(reopened.done_by, null);
+  assert.equal(reopened.done_ts, null);
+  const board = claude.goals(true);
+  assert.equal(board.length, 1);
+  assert.equal(board[0].status, "open", "reopen persisted");
+  assert.equal(board[0].done_by, null);
+  assert.match(codex.check().at(-1).body, /reopened goal #\d+/);
+});
+
+test("goalReopen on an open goal is a silent no-op", () => {
+  claude.clear();
+  const goal = claude.goalAdd("still open");
+  codex.check();
+  const same = claude.goalReopen(goal.id);
+  assert.equal(same.status, "open");
+  assert.equal(codex.check().length, 0, "no announcement for a no-op");
+});
+
+test("goalReopen on missing id throws", () => {
+  assert.throws(() => claude.goalReopen(9999), /no goal/);
+});
+
 test("checkWait returns promptly when a message lands", async () => {
   claude.clear();
   setTimeout(() => codex.send("late arrival"), 300);

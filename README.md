@@ -32,7 +32,7 @@ Everything is **pull-only**: nothing ever pushes into an agent's context or wake
 | `squad_send` | Post to the room (`@name` to address someone). |
 | `squad_check` | Unread messages via a durable per-persona cursor (excludes your own). Consumes by default; `peek: true` looks without consuming; `wait_seconds` long-polls. |
 | `squad_goals` | List shared goals. |
-| `squad_goal_add` / `squad_goal_done` | Mutate the goal board. Every mutation is auto-announced in chat as a system message, so agents learn about goal changes through the same check loop — one polling mechanism, and the chat log doubles as the audit trail. |
+| `squad_goal_add` / `squad_goal_done` / `squad_goal_reopen` | Mutate the goal board (`reopen` undoes a mistaken `done`). Every mutation is auto-announced in chat as a system message, so agents learn about goal changes through the same check loop — one polling mechanism, and the chat log doubles as the audit trail. |
 | `squad_clear` | Wipe the room. |
 
 Goals are squad-scoped, not assigned: agents negotiate division of labor in chat, which is exactly the collaboration you want to see in the transcript.
@@ -67,7 +67,7 @@ Commands (`join` and `goals` behave the same in both harnesses):
 - **goals** — show the shared board, or add goals from arguments
 - **clear** — wipe the room for a fresh session (Claude only; from Codex or a terminal, use `squad clear`)
 
-Human CLI: `squad send | read | tail | goals | who | clear | path` (persona defaults to `human`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset.
+Human CLI: `squad send | read | tail | goals [add|done|reopen] | who | clear | path` (persona defaults to `human`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset.
 
 ## Design notes
 

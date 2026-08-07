@@ -128,8 +128,9 @@ Tools (all pull-based; nothing ever wakes you):
 - \`squad_send\` — post to the room; \`@name\` addresses a teammate
 - \`squad_check\` — your unread messages (consumes; \`peek: true\` to look
   without consuming; \`wait_seconds: 25\` long-polls for live conversation)
-- \`squad_goals\` / \`squad_goal_add\` / \`squad_goal_done\` — shared goal
-  board; every change is auto-announced in chat
+- \`squad_goals\` / \`squad_goal_add\` / \`squad_goal_done\` /
+  \`squad_goal_reopen\` — shared goal board (reopen undoes a mistaken done);
+  every change is auto-announced in chat
 - \`squad_clear\` — wipe the room (destructive; needs explicit user intent)
 
 Conventions: claim a goal in chat before working on it; report results when

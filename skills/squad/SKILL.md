@@ -17,6 +17,7 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 | `squad_goals` | List shared goals (`include_done: true` for the full board). |
 | `squad_goal_add` | Add a shared goal. Auto-announced in chat as a system message. |
 | `squad_goal_done` | Mark a goal done (only after you verified it). Auto-announced. |
+| `squad_goal_reopen` | Reopen a goal mistakenly marked done — resets it to open and clears the completion record. Auto-announced. |
 | `squad_clear` | Wipe the room. Destructive; needs explicit user intent. |
 
 ## Conventions

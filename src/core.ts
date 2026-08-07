@@ -171,6 +171,21 @@ export class Squad {
     return { ...(goal as Goal), status: "done", done_by: this.persona, done_ts: ts };
   }
 
+  /** Reopens a done goal (undoes goalDone) and announces it in chat as a system message. */
+  goalReopen(id: number): Goal {
+    this.touch();
+    const goal = this.db.prepare("SELECT * FROM goals WHERE id = ?").get(id) as
+      | unknown
+      | undefined;
+    if (!goal) throw new Error(`no goal with id ${id}`);
+    if ((goal as Goal).status === "open") return goal as Goal;
+    this.db
+      .prepare("UPDATE goals SET status = 'open', done_by = NULL, done_ts = NULL WHERE id = ?")
+      .run(id);
+    this.send(`${this.persona} reopened goal #${id}: ${(goal as Goal).body}`, "system");
+    return { ...(goal as Goal), status: "open", done_by: null, done_ts: null };
+  }
+
   members(): Member[] {
     return this.db
       .prepare("SELECT * FROM members ORDER BY last_seen DESC")

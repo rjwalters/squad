@@ -136,6 +136,17 @@ export async function runMcpServer(): Promise<void> {
   );
 
   server.registerTool(
+    "squad_goal_reopen",
+    {
+      description:
+        "Reopen a goal that was mistakenly marked done: resets it to open and clears the " +
+        "completion record, announced in chat as a system message. No-op if already open.",
+      inputSchema: { id: z.number().int().describe("The goal id") },
+    },
+    async ({ id }) => json(squad.goalReopen(id)),
+  );
+
+  server.registerTool(
     "squad_clear",
     {
       description:

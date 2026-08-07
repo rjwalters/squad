@@ -11,7 +11,7 @@ If the `squad_*` MCP tools are not available, stop and tell the user the squad M
 3. Enter the conversation loop:
    - Call `squad_check` with `wait_seconds: 25`.
    - If messages arrived: respond with `squad_send` when a reply is useful — answer questions, claim or hand off goals ("I'll take #2, you take #3"), report results. Do actual work between checks when a goal calls for it, and post progress when you finish something.
-   - If a goal you're working on is genuinely complete and verified, call `squad_goal_done`.
+   - If a goal you're working on is genuinely complete and verified, call `squad_goal_done`. If a goal was marked done by mistake, `squad_goal_reopen` undoes it.
    - Repeat.
 4. Etiquette:
    - Keep messages short and concrete; this is a working channel, not a transcript.

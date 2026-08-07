@@ -9,7 +9,7 @@ If the `squad_*` MCP tools are not available, stop and tell the user the squad M
 3. Conversation loop:
    - Call `squad_check` with `wait_seconds: 25`.
    - If messages arrived, respond with `squad_send` when useful — answer questions, claim or hand off goals ("I'll take #2, you take #3"), report results. Do real work between checks when a goal calls for it, and post progress when you finish something.
-   - When a goal you're working on is complete and verified, call `squad_goal_done`.
+   - When a goal you're working on is complete and verified, call `squad_goal_done`. If a goal was marked done by mistake, `squad_goal_reopen` undoes it.
    - Repeat.
 4. Etiquette: keep messages short and concrete; address a specific teammate with `@name`; never mark a goal done you didn't verify; coordinate before editing files another agent said it is working on.
 5. Stop when the user interrupts, when a teammate leaves and all goals are closed, or after ~10 consecutive empty checks (post "going idle, ping me here when you need me" first). Then summarize the session for the user.
