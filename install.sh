@@ -8,6 +8,7 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET="."
 YES=0
 CODEX=1
+LINK=1
 DRY=0
 CLAUDE_PERSONA="${SQUAD_CLAUDE_PERSONA:-claude}"
 CODEX_PERSONA="${SQUAD_CODEX_PERSONA:-codex}"
@@ -30,17 +31,24 @@ Installs into the target repo (default .):
                                    Codex read the same instructions
   .gitignore                       adds .squad/ (the room is ephemeral local state)
 
-Global, with confirmation (skip with --no-codex) — Codex's MCP config lives in
-~/.codex/config.toml, so its half is registered once per machine:
+Global, with confirmation (skip with --no-codex / --no-link) — these are
+one-time-per-machine, not per target repo:
   ~/.codex/prompts/squad-*.md      /squad-join, /squad-goals prompts
   ~/.codex/config.toml             [mcp_servers.squad] (persona "$CODEX_PERSONA"); the server
                                    finds each repo's room from Codex's working
                                    directory, so start codex inside the repo
+  squad CLI on PATH                \`npm link\` from $SRC, so the human CLI
+                                   (\`squad send|read|tail|goals|who|clear|path\`)
+                                   works from any target repo. If it's skipped
+                                   or npm can't write the global prefix, the
+                                   closing output prints the equivalent
+                                   \`node $SRC/dist/index.js <cmd>\` form instead.
 
 options:
-  -y            non-interactive; assumes yes (including the Codex global writes
-                unless --no-codex is passed)
+  -y            non-interactive; assumes yes (including the Codex and CLI-link
+                global writes unless --no-codex / --no-link is passed)
   --no-codex    skip all writes outside the target repo
+  --no-link     skip \`npm link\`; the closing output uses the node path form
   --dry-run     print every planned write (including any outside the target
                 repo) and exit without changing anything
   -h, --help    show this help
@@ -51,6 +59,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     -y) YES=1 ;;
     --no-codex) CODEX=0 ;;
+    --no-link) LINK=0 ;;
     --dry-run) DRY=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage; exit 1 ;;
@@ -97,12 +106,17 @@ if [[ $DRY -eq 1 ]]; then
     echo "  .gitignore                           append .claude/skills/squad/.install-local.json"
   fi
   echo "  CLAUDE.md, AGENTS.md                 replace/append identical marker-bounded squad blocks"
-  if [[ $CODEX -eq 1 ]]; then
+  if [[ $CODEX -eq 1 || $LINK -eq 1 ]]; then
     echo
-    echo "outside the target repo (asks first; skipped entirely with --no-codex):"
+    echo "outside the target repo (asks first; skip individually with --no-codex / --no-link):"
+  fi
+  if [[ $CODEX -eq 1 ]]; then
     echo "  ~/.codex/prompts/squad-*.md          copy /squad-join, /squad-goals prompts"
     echo "  ~/.codex/config.toml                 replace/append [mcp_servers.squad] block (persona \"$CODEX_PERSONA\")"
     echo "  ~/.codex/config.toml.squad-backup    backup of config.toml before the edit"
+  fi
+  if [[ $LINK -eq 1 ]]; then
+    echo "  npm link (from $SRC)                 puts the squad CLI on PATH"
   fi
   exit 0
 fi
@@ -263,9 +277,39 @@ else
   echo "skipped Codex global setup"
 fi
 
+# --- global: link the squad CLI onto PATH -----------------------------------
+# `npm link` (not pnpm — npm's global-link mechanism is what puts a bin on
+# PATH regardless of which package manager built dist/) creates a symlink
+# named `squad` (per package.json's "bin") in npm's global bin dir. That's
+# one-time-per-machine, like the Codex registration above, so it's gated the
+# same way. If it's declined, unavailable, or the global prefix isn't
+# writable, we fall back to the equivalent `node <path>/dist/index.js <cmd>`
+# form everywhere below — the two are kept in sync via CLI_CMD.
+CLI_CMD="node $SRC/dist/index.js"
+if [[ $LINK -eq 1 ]] && command -v npm >/dev/null 2>&1; then
+  if confirm "Link the squad CLI onto your PATH (npm link, one-time per machine)?"; then
+    if (cd "$SRC" && npm link --silent) >/dev/null 2>&1; then
+      if command -v squad >/dev/null 2>&1; then
+        CLI_CMD="squad"
+        echo "linked squad CLI onto PATH ($(command -v squad))"
+      else
+        echo "npm link succeeded, but npm's global bin dir isn't on PATH yet"
+        echo "  run: export PATH=\"\$(npm config get prefix)/bin:\$PATH\"  (or open a new shell)"
+        echo "  until then, use: $CLI_CMD <cmd>"
+      fi
+    else
+      echo "npm link failed (no permission to write npm's global prefix?) — using: $CLI_CMD <cmd>"
+    fi
+  else
+    echo "skipped CLI linking — using: $CLI_CMD <cmd>"
+  fi
+else
+  [[ $LINK -eq 0 ]] && echo "skipped CLI linking (--no-link) — using: $CLI_CMD <cmd>"
+fi
+
 echo
 echo "done. the flow:"
 echo "  cd $TARGET"
 echo "  terminal 1: claude → /squad:goals <the mission>  then  /squad:join"
 echo "  terminal 2: codex  → /squad-join"
-echo "  terminal 3: node $SRC/dist/index.js tail    # watch the room"
+echo "  terminal 3: $CLI_CMD tail    # watch the room"
