@@ -20,7 +20,8 @@ Human CLI usage:
   squad help                  Show this help
 
 The room is per-repo: data lives in <repo-root>/.squad/, found by walking up
-from the current directory (falling back to ~/.squad outside any repo).
+from the current directory (falling back to ~/.squad outside any repo). Inside
+a git worktree the room is the primary clone's, so every worktree shares one.
 
 Environment:
   SQUAD_PERSONA   Identity stamped on messages (default: human)

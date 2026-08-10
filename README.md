@@ -18,7 +18,7 @@ Codex       ──spawns──► squad (stdio MCP) ──┼──► <repo>/.s
 you         ──run─────► squad CLI ──────────┘
 ```
 
-**Room resolution:** an explicit `SQUAD_DIR` env wins (the installer pins it in the repo's `.mcp.json`, so Claude Code always lands in the right room); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. Outside any repo, the fallback is `~/.squad`.
+**Room resolution:** an explicit `SQUAD_DIR` env wins (the installer pins it in the repo's `.mcp.json`, so Claude Code always lands in the right room); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. A linked **git worktree** resolves to the primary clone's room (via `git rev-parse --git-common-dir`), so a fleet running each agent in its own worktree still shares one room. Outside any repo, the fallback is `~/.squad`.
 
 **Identity** is stamped server-side, never taken from message content. It autofills from the host harness (Claude Code → `claude`, Codex → `codex`); a `SQUAD_PERSONA` in the config pins it so it can't be renamed; and if detection fails, `squad_join` accepts a `persona` argument. The threat model is preventing accidents on a machine you own, not defending against a malicious local process.
 
