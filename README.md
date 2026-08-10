@@ -48,7 +48,9 @@ pnpm install && pnpm build        # or npm
 ./install.sh ~/projects/my-lean-proof
 ```
 
-Per-repo writes: a `squad` entry merged into `.mcp.json` (room pinned to `<repo>/.squad`), `.claude/commands/squad/`, `.claude/skills/squad/` (including a tracked `install-metadata.json` recording the installed version + commit, so `/repo:update-tools` can spot a stale install; the source path and timestamp go to a gitignored `.install-local.json` sidecar), identical marker-bounded blocks in `CLAUDE.md` and `AGENTS.md`, and `.squad/` added to `.gitignore`. With confirmation, it also registers Codex once per machine (`~/.codex/prompts/squad-*.md` + a `[mcp_servers.squad]` block in `~/.codex/config.toml`). Re-runs replace blocks in place; `--dry-run` prints every planned write — including the global Codex ones — without changing anything; `./uninstall.sh <repo>` reverses everything. Default personas `claude` / `codex` — override with `SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` at install time.
+Per-repo writes: a `squad` entry merged into `.mcp.json` (room pinned to `<repo>/.squad`), `.claude/commands/squad/`, `.claude/skills/squad/` (including a tracked `install-metadata.json` recording the installed version + commit, so `/repo:update-tools` can spot a stale install; the source path and timestamp go to a gitignored `.install-local.json` sidecar), identical marker-bounded blocks in `CLAUDE.md` and `AGENTS.md`, and `.squad/` added to `.gitignore`. With confirmation, it also registers Codex once per machine (`~/.codex/prompts/squad-*.md` + a `[mcp_servers.squad]` block in `~/.codex/config.toml`) and links the `squad` CLI onto your `PATH` (`npm link`, also once per machine). Re-runs replace blocks in place; `--dry-run` prints every planned write — including the global ones — without changing anything; `./uninstall.sh <repo>` reverses everything. Default personas `claude` / `codex` — override with `SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` at install time.
+
+If you decline the CLI link (or `npm link` can't write npm's global prefix on your machine), the installer's closing output prints the exact `node <path-to-squad>/dist/index.js <cmd>` form to use instead of `squad <cmd>` everywhere below — trust that output over this README if the two ever disagree.
 
 **Claude's persona is per-repo; Codex's is machine-global.** Claude's `SQUAD_PERSONA` lives in that repo's own `.mcp.json`, so each checkout can name its Claude anything without touching any other repo. Codex has only one `[mcp_servers.squad]` block in `~/.codex/config.toml`, shared by every repo on the machine — `SQUAD_CODEX_PERSONA` sets that single global value, it does not scope to the repo you ran `./install.sh` from. Running `./install.sh` again in a second repo with a different `SQUAD_CODEX_PERSONA` silently overwrites the first repo's choice; there is currently no way to give Codex a different persona per room.
 
@@ -69,7 +71,7 @@ Commands (`join` and `goals` behave the same in both harnesses):
 - **goals** — show the shared board, or add goals from arguments
 - **clear** — wipe the room for a fresh session (Claude only; from Codex or a terminal, use `squad clear`)
 
-Human CLI: `squad send | read | tail | goals [add|done|reopen] | who | clear | path` (persona defaults to `human`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset.
+Human CLI: `squad send | read | tail | goals [add|done|reopen] | who | clear | path` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset.
 
 ## Design notes
 
