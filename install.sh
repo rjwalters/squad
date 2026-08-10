@@ -303,8 +303,10 @@ if [[ $LINK -eq 1 ]] && command -v npm >/dev/null 2>&1; then
   else
     echo "skipped CLI linking — using: $CLI_CMD <cmd>"
   fi
+elif [[ $LINK -eq 0 ]]; then
+  echo "skipped CLI linking (--no-link) — using: $CLI_CMD <cmd>"
 else
-  [[ $LINK -eq 0 ]] && echo "skipped CLI linking (--no-link) — using: $CLI_CMD <cmd>"
+  echo "npm not found — using: $CLI_CMD <cmd>"
 fi
 
 echo
