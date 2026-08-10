@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- Room resolution in git worktrees (#6): a linked worktree now resolves to the
+  primary clone's `<repo>/.squad` (via `git rev-parse --path-format=absolute
+  --git-common-dir`) instead of its own private, empty room — so a Codex agent
+  started in a worktree joins the same room as Claude agents in the primary
+  clone. `SQUAD_DIR` still takes precedence, an explicit `.squad` in the
+  worktree still opts it into its own room, and resolution falls back to the
+  previous cwd walk when `git` is unavailable. As defense in depth, joining an
+  empty room from a worktree whose primary clone has a live room now prints a
+  warning to stderr naming the `SQUAD_DIR` to set.
+
 ## [0.2.0] - 2026-08-07
 
 ### Added

@@ -249,7 +249,9 @@ if [[ $CODEX -eq 1 ]] && confirm "Register squad with Codex (~/.codex/prompts + 
 # BEGIN SQUAD MCP
 # The squad server resolves each repo's room (<repo>/.squad) from the working
 # directory, so one global entry serves every squad-enabled repo — just start
-# codex inside the repo.
+# codex inside the repo. Starting it in a git worktree is fine too: worktrees
+# resolve to the primary clone's room, so they join the Claude agents there.
+# Add SQUAD_DIR here only to pin a room explicitly (it overrides resolution).
 [mcp_servers.squad]
 command = "node"
 args = ["$SRC/dist/index.js"]
