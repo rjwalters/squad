@@ -50,6 +50,8 @@ pnpm install && pnpm build        # or npm
 
 Per-repo writes: a `squad` entry merged into `.mcp.json` (room pinned to `<repo>/.squad`), `.claude/commands/squad/`, `.claude/skills/squad/` (including a tracked `install-metadata.json` recording the installed version + commit, so `/repo:update-tools` can spot a stale install; the source path and timestamp go to a gitignored `.install-local.json` sidecar), identical marker-bounded blocks in `CLAUDE.md` and `AGENTS.md`, and `.squad/` added to `.gitignore`. With confirmation, it also registers Codex once per machine (`~/.codex/prompts/squad-*.md` + a `[mcp_servers.squad]` block in `~/.codex/config.toml`). Re-runs replace blocks in place; `--dry-run` prints every planned write — including the global Codex ones — without changing anything; `./uninstall.sh <repo>` reverses everything. Default personas `claude` / `codex` — override with `SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` at install time.
 
+**Claude's persona is per-repo; Codex's is machine-global.** Claude's `SQUAD_PERSONA` lives in that repo's own `.mcp.json`, so each checkout can name its Claude anything without touching any other repo. Codex has only one `[mcp_servers.squad]` block in `~/.codex/config.toml`, shared by every repo on the machine — `SQUAD_CODEX_PERSONA` sets that single global value, it does not scope to the repo you ran `./install.sh` from. Running `./install.sh` again in a second repo with a different `SQUAD_CODEX_PERSONA` silently overwrites the first repo's choice; there is currently no way to give Codex a different persona per room.
+
 ## Use
 
 ```
