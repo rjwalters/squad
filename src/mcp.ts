@@ -40,7 +40,7 @@ export async function runMcpServer(): Promise<void> {
     {
       description:
         "Join the squad room: registers your presence and returns who else is here, the " +
-        "current open goals, and recent chat history. Advances your read cursor past the " +
+        "current open goals, the advisory file claims, and recent chat history. Advances your read cursor past the " +
         "returned history, so squad_check afterwards yields only new messages. Idempotent — " +
         "call again anytime to re-sync. Your identity autofills from the host harness; the " +
         "optional persona argument renames this connection, but is ignored (with a note in " +
@@ -98,7 +98,11 @@ export async function runMcpServer(): Promise<void> {
     },
     async ({ wait_seconds, peek }) => {
       const messages = await squad.checkWait(wait_seconds ?? 0, { peek });
-      return json({ messages, open_goals: squad.goals().length });
+      return json({
+        messages,
+        open_goals: squad.goals().length,
+        active_claims: squad.claims().length,
+      });
     },
   );
 
@@ -147,10 +151,50 @@ export async function runMcpServer(): Promise<void> {
   );
 
   server.registerTool(
+    "squad_claims",
+    {
+      description:
+        "List the room's advisory claims: which persona says it is working on which file or " +
+        "area, when the claim was staked, and whether it has gone stale (its holder has been " +
+        "absent). Claims are visibility, not locks — check here before editing shared files.",
+      inputSchema: {},
+    },
+    async () => json(squad.claims()),
+  );
+
+  server.registerTool(
+    "squad_claim",
+    {
+      description:
+        "Stake an advisory claim on a file path (or freeform area label) you are about to work " +
+        "on, announced in chat as a system message so teammates see it in their normal " +
+        "squad_check loop. Advisory, not a lock: claiming a path a teammate already holds is " +
+        "allowed and the announcement names them so the conflict is visible. Claim before you " +
+        "edit; release when you are done.",
+      inputSchema: {
+        path: z.string().min(1).describe("File path or area label you are working on"),
+      },
+    },
+    async ({ path }) => json(squad.claim(path)),
+  );
+
+  server.registerTool(
+    "squad_release",
+    {
+      description:
+        "Drop your claim on a path, announced in chat as a system message. Releases your own " +
+        "claim; if you hold none, releases a teammate's claim on that path — the explicit way " +
+        "to take over a stale claim left by a departed agent. No-op when nothing is claimed.",
+      inputSchema: { path: z.string().min(1).describe("The claimed path or label to release") },
+    },
+    async ({ path }) => json({ path, released: squad.release(path) }),
+  );
+
+  server.registerTool(
     "squad_clear",
     {
       description:
-        "Wipe the room: deletes all messages, goals, cursors, and member records for a fresh " +
+        "Wipe the room: deletes all messages, goals, claims, cursors, and member records for a fresh " +
         "session. Destructive — only call when the user has asked for a reset.",
       inputSchema: {},
     },

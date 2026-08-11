@@ -24,7 +24,37 @@ export interface Member {
   last_seen: string;
 }
 
+/** An advisory claim on a file path (or freeform label). Never a lock. */
+export interface Claim {
+  id: number;
+  path: string;
+  persona: string;
+  created_ts: string;
+}
+
+/** A claim as listed: annotated with its holder's presence so peers can judge it. */
+export interface ClaimView extends Claim {
+  /** Holder's last_seen, or null when the holder has no member record. */
+  last_seen: string | null;
+  /** True when the holder has been absent longer than the staleness threshold. */
+  stale: boolean;
+}
+
 const now = () => new Date().toISOString();
+
+/**
+ * A claim goes stale with its holder: once the claiming persona has not touched
+ * the room for this many minutes, the claim is listed as stale so a peer can
+ * take it over explicitly. Advisory only — nothing expires or is enforced.
+ */
+export const DEFAULT_STALE_MINUTES = 30;
+
+function staleMinutes(): number {
+  const raw = process.env.SQUAD_STALE_MINUTES;
+  if (!raw) return DEFAULT_STALE_MINUTES;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_STALE_MINUTES;
+}
 
 export class Squad {
   constructor(
@@ -186,6 +216,74 @@ export class Squad {
     return { ...(goal as Goal), status: "open", done_by: null, done_ts: null };
   }
 
+  /**
+   * Current advisory claims, oldest first, each annotated with its holder's
+   * last_seen and whether that presence has gone stale.
+   */
+  claims(): ClaimView[] {
+    this.touch();
+    const rows = this.db
+      .prepare(
+        `SELECT c.id, c.path, c.persona, c.created_ts, m.last_seen AS last_seen
+           FROM claims c LEFT JOIN members m ON m.persona = c.persona
+          ORDER BY c.id ASC`,
+      )
+      .all() as unknown as Array<Claim & { last_seen: string | null }>;
+    const cutoff = Date.now() - staleMinutes() * 60_000;
+    return rows.map((r) => ({
+      ...r,
+      // No member record means the holder is gone entirely — treat as stale.
+      stale: r.last_seen === null || Date.parse(r.last_seen) < cutoff,
+    }));
+  }
+
+  /**
+   * Stake an advisory claim on a path and announce it in chat as a system
+   * message. Idempotent for your own claim. Claiming a path a teammate already
+   * holds is allowed — this is visibility, not a lock — but the announcement
+   * names the existing holders so the conflict is impossible to miss.
+   */
+  claim(path: string): Claim {
+    this.touch();
+    const existing = this.db
+      .prepare("SELECT * FROM claims WHERE path = ? ORDER BY id ASC")
+      .all(path) as unknown as Claim[];
+    const mine = existing.find((c) => c.persona === this.persona);
+    if (mine) return mine;
+    const ts = now();
+    const { lastInsertRowid } = this.db
+      .prepare("INSERT INTO claims (path, persona, created_ts) VALUES (?, ?, ?)")
+      .run(path, this.persona, ts);
+    const others = existing.map((c) => c.persona);
+    const note = others.length
+      ? ` — already claimed by ${others.join(", ")}; claims are advisory, coordinate in chat`
+      : "";
+    this.send(`${this.persona} claimed ${path}${note}`, "system");
+    return { id: Number(lastInsertRowid), path, persona: this.persona, created_ts: ts };
+  }
+
+  /**
+   * Drop claims on a path and announce it. Releases your own claim; if you hold
+   * none, releases the peers' claims on that path (the explicit takeover path
+   * for a stale claim left by a departed teammate). A no-op returning [] when
+   * nothing is claimed on that path.
+   */
+  release(path: string): Claim[] {
+    this.touch();
+    const rows = this.db
+      .prepare("SELECT * FROM claims WHERE path = ? ORDER BY id ASC")
+      .all(path) as unknown as Claim[];
+    if (rows.length === 0) return [];
+    const mine = rows.filter((c) => c.persona === this.persona);
+    const released = mine.length > 0 ? mine : rows;
+    const del = this.db.prepare("DELETE FROM claims WHERE id = ?");
+    for (const c of released) del.run(c.id);
+    const owners = [...new Set(released.map((c) => c.persona))].filter((p) => p !== this.persona);
+    const note = owners.length ? ` (held by ${owners.join(", ")})` : "";
+    this.send(`${this.persona} released ${path}${note}`, "system");
+    return released;
+  }
+
   members(): Member[] {
     return this.db
       .prepare("SELECT * FROM members ORDER BY last_seen DESC")
@@ -193,19 +291,27 @@ export class Squad {
   }
 
   /**
-   * Register presence and catch up: returns who's here, the open goals, and
-   * recent history. Advances the cursor past everything returned, so a
-   * subsequent check() yields only genuinely new messages.
+   * Register presence and catch up: returns who's here, the open goals, the
+   * current advisory claims, and recent history. Advances the cursor past
+   * everything returned, so a subsequent check() yields only genuinely new
+   * messages.
    */
-  join(recentLimit = 30): { members: Member[]; goals: Goal[]; recent: Message[] } {
+  join(recentLimit = 30): {
+    members: Member[];
+    goals: Goal[];
+    claims: ClaimView[];
+    recent: Message[];
+  } {
     this.touch();
     const recent = this.read(recentLimit);
     this.setCursor(this.maxMessageId());
-    return { members: this.members(), goals: this.goals(), recent };
+    return { members: this.members(), goals: this.goals(), claims: this.claims(), recent };
   }
 
-  /** Wipe the room: all messages, goals, cursors, and members. */
+  /** Wipe the room: all messages, goals, claims, cursors, and members. */
   clear(): void {
-    this.db.exec("DELETE FROM messages; DELETE FROM goals; DELETE FROM cursors; DELETE FROM members;");
+    this.db.exec(
+      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; DELETE FROM members;",
+    );
   }
 }
