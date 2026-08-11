@@ -38,7 +38,7 @@ one-time-per-machine, not per target repo:
                                    finds each repo's room from Codex's working
                                    directory, so start codex inside the repo
   squad CLI on PATH                \`npm link\` from $SRC, so the human CLI
-                                   (\`squad send|read|tail|goals|who|clear|path\`)
+                                   (\`squad send|read|tail|goals|claims|claim|release|who|clear|path\`)
                                    works from any target repo. If it's skipped
                                    or npm can't write the global prefix, the
                                    closing output prints the equivalent
@@ -225,13 +225,20 @@ Tools (all pull-based; nothing ever wakes you):
 - \`squad_goals\` / \`squad_goal_add\` / \`squad_goal_done\` /
   \`squad_goal_reopen\` — shared goal board (reopen undoes a mistaken done);
   every change is auto-announced in chat
+- \`squad_claims\` / \`squad_claim\` / \`squad_release\` — advisory claims on
+  files or areas: claim a path before you edit it, release when done. Every
+  change is auto-announced and current claims ride along in \`squad_join\`, so
+  a claim is visible before an edit lands. Advisory, never a lock; a claim
+  lists as \`stale\` once its holder has been absent, so it can be taken over
 - \`squad_clear\` — wipe the room (destructive; needs explicit user intent)
 
 Conventions: claim a goal in chat before working on it; report results when
 done; only mark goals done that you verified (in Lean work: it compiles with
-no \`sorry\`); never speak as another persona; coordinate before editing files
-a teammate said they're working on. At session start, a \`squad_check\` with
-\`peek: true\` shows whether a teammate left you a message.
+no \`sorry\`); never speak as another persona; \`squad_claim\` a file before
+editing it and check \`squad_claims\` before touching a shared one; never
+delete files you did not create, however scratch-like they look — untracked
+≠ yours. At session start, a \`squad_check\` with \`peek: true\` shows whether
+a teammate left you a message.
 
 Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
 the loop: check(wait 25s) → respond/work → repeat.

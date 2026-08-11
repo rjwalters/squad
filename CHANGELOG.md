@@ -6,6 +6,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Advisory claim primitive (#12): `squad_claim` / `squad_release` / `squad_claims`
+  MCP tools and `squad claim <path>` / `squad release <path>` / `squad claims`
+  CLI subcommands. A claim is freeform text (file path or area label) stored in
+  a new `claims` table, announced in chat as a system message, included in every
+  `squad_join` result, and counted as `active_claims` in `squad_check` — so a
+  claim is visible *before* an edit lands, unlike an "I'm editing X" chat
+  message that races with the teammate's edit. Claims are advisory, never locks:
+  claiming a path a peer holds is allowed (the announcement names them), and a
+  claim is listed as `stale` once its holder's `last_seen` ages past
+  `SQUAD_STALE_MINUTES` (default 30) so a peer can take it over explicitly.
+  `squad clear` / `squad_clear` wipe claims along with the other tables.
+
+### Changed
+- Squad conventions now say: claim a file before editing it, and never delete
+  files you did not create, however scratch-like they look — untracked ≠ yours
+  (#12, mirrored across `skills/squad/SKILL.md`, `commands/squad/join.md`, and
+  `codex/prompts/squad-join.md`).
+
 ### Fixed
 - Room resolution in git worktrees (#6): a linked worktree now resolves to the
   primary clone's `<repo>/.squad` (via `git rev-parse --path-format=absolute

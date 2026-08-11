@@ -14,8 +14,11 @@ Human CLI usage:
   squad goals add <text...>   Add a shared goal
   squad goals done <id>       Mark a goal done
   squad goals reopen <id>     Reopen a goal mistakenly marked done
+  squad claims                Show advisory file claims (who is working on what)
+  squad claim <path>          Claim a file or area you are working on
+  squad release <path>        Drop your claim on a file or area
   squad who                   Show members and last-seen times
-  squad clear                 Wipe messages, goals, cursors, members
+  squad clear                 Wipe messages, goals, claims, cursors, members
   squad path                  Print the database path
   squad help                  Show this help
 
@@ -26,6 +29,8 @@ a git worktree the room is the primary clone's, so every worktree shares one.
 Environment:
   SQUAD_PERSONA   Identity stamped on messages (default: human)
   SQUAD_DIR       Override the data directory (skips repo-root resolution)
+  SQUAD_STALE_MINUTES  Minutes of holder absence after which a claim lists as
+                  stale (default 30)
 `;
 
 function fmt(m: Message): string {
@@ -109,6 +114,30 @@ export async function runCli(argv: string[]): Promise<void> {
       }
       break;
     }
+    case "claims": {
+      const claims = squad.claims();
+      if (claims.length === 0) console.log("no claims — squad claim <path>");
+      for (const c of claims) {
+        const mark = c.stale ? " (stale)" : "";
+        console.log(`${c.path}\t${c.persona}${mark}\tsince ${c.created_ts}`);
+      }
+      break;
+    }
+    case "claim": {
+      const path = rest.join(" ").trim();
+      if (!path) throw new Error("usage: squad claim <path>");
+      const c = squad.claim(path);
+      console.log(`claimed ${c.path} (${c.persona})`);
+      break;
+    }
+    case "release": {
+      const path = rest.join(" ").trim();
+      if (!path) throw new Error("usage: squad release <path>");
+      const released = squad.release(path);
+      if (released.length === 0) console.log(`no claim on ${path}`);
+      else console.log(`released ${path} (was ${released.map((c) => c.persona).join(", ")})`);
+      break;
+    }
     case "who": {
       for (const m of squad.members()) console.log(`${m.persona}\tlast seen ${m.last_seen}`);
       break;
@@ -133,7 +162,22 @@ export async function runCli(argv: string[]): Promise<void> {
 export function knownCommand(cmd: string | undefined): boolean {
   return (
     cmd !== undefined &&
-    ["send", "read", "tail", "goals", "who", "clear", "nuke", "path", "help", "--help", "-h"].includes(cmd)
+    [
+      "send",
+      "read",
+      "tail",
+      "goals",
+      "claims",
+      "claim",
+      "release",
+      "who",
+      "clear",
+      "nuke",
+      "path",
+      "help",
+      "--help",
+      "-h",
+    ].includes(cmd)
   );
 }
 

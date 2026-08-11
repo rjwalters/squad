@@ -30,6 +30,12 @@ CREATE TABLE IF NOT EXISTS members (
   first_seen TEXT NOT NULL,
   last_seen TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS claims (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  path TEXT NOT NULL,
+  persona TEXT NOT NULL,
+  created_ts TEXT NOT NULL
+);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */

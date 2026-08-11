@@ -100,6 +100,123 @@ test("goalReopen on missing id throws", () => {
   assert.throws(() => claude.goalReopen(9999), /no goal/);
 });
 
+test("claim announces in chat and appears in claims()", () => {
+  claude.clear();
+  const c = claude.claim("src/core.ts");
+  assert.equal(c.path, "src/core.ts");
+  assert.equal(c.persona, "claude");
+
+  const seen = codex.check();
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].kind, "system");
+  assert.match(seen[0].body, /claude claimed src\/core\.ts/);
+
+  const listed = codex.claims();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].path, "src/core.ts");
+  assert.equal(listed[0].persona, "claude");
+  assert.equal(listed[0].stale, false, "a just-claimed path is not stale");
+});
+
+test("claiming your own path twice is idempotent and silent", () => {
+  claude.clear();
+  const first = claude.claim("docs/README.md");
+  codex.check();
+  const second = claude.claim("docs/README.md");
+  assert.equal(second.id, first.id);
+  assert.equal(codex.claims().length, 1, "no duplicate row");
+  assert.equal(codex.check().length, 0, "no second announcement");
+});
+
+test("claiming a path a peer holds is allowed and names the holder", () => {
+  claude.clear();
+  claude.claim("src/mcp.ts");
+  codex.check();
+  codex.claim("src/mcp.ts");
+  const seen = claude.check();
+  assert.equal(seen.length, 1);
+  assert.match(seen.at(-1).body, /codex claimed src\/mcp\.ts .*already claimed by claude/);
+  assert.equal(claude.claims().length, 2, "advisory: both claims are visible");
+});
+
+test("release removes the claim and announces", () => {
+  claude.clear();
+  claude.claim("src/cli.ts");
+  codex.check();
+  const released = claude.release("src/cli.ts");
+  assert.equal(released.length, 1);
+  assert.equal(released[0].path, "src/cli.ts");
+  assert.equal(claude.claims().length, 0);
+  assert.match(codex.check().at(-1).body, /claude released src\/cli\.ts/);
+});
+
+test("releasing a nonexistent claim is a silent no-op", () => {
+  claude.clear();
+  codex.check();
+  const released = claude.release("nothing/here.ts");
+  assert.deepEqual(released, []);
+  assert.equal(codex.check().length, 0, "no announcement for a no-op");
+});
+
+test("release takes over a peer's claim when you hold none", () => {
+  claude.clear();
+  claude.claim("src/db.ts");
+  codex.check();
+  const released = codex.release("src/db.ts");
+  assert.equal(released.length, 1);
+  assert.equal(released[0].persona, "claude");
+  assert.equal(codex.claims().length, 0);
+  assert.match(claude.check().at(-1).body, /codex released src\/db\.ts \(held by claude\)/);
+});
+
+test("release drops only your own claim when a peer also holds the path", () => {
+  claude.clear();
+  claude.claim("shared.ts");
+  codex.claim("shared.ts");
+  const released = codex.release("shared.ts");
+  assert.equal(released.length, 1);
+  assert.equal(released[0].persona, "codex");
+  const left = claude.claims();
+  assert.equal(left.length, 1);
+  assert.equal(left[0].persona, "claude", "peer's claim survives");
+});
+
+test("join includes current claims", () => {
+  claude.clear();
+  claude.claim("tests/core.test.mjs");
+  const { claims } = codex.join();
+  assert.equal(claims.length, 1);
+  assert.equal(claims[0].path, "tests/core.test.mjs");
+  assert.equal(claims[0].persona, "claude");
+});
+
+test("a claim goes stale with its holder's last_seen", () => {
+  claude.clear();
+  claude.claim("stale/target.ts");
+  assert.equal(codex.claims()[0].stale, false);
+
+  // touch() always stamps real time, so age the holder's presence directly.
+  const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  db.prepare("UPDATE members SET last_seen = ? WHERE persona = ?").run(old, "claude");
+
+  const listed = codex.claims();
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].persona, "claude");
+  assert.equal(listed[0].last_seen, old);
+  assert.equal(listed[0].stale, true, "an absent holder's claim lists as stale");
+});
+
+test("clear wipes claims along with everything else", () => {
+  claude.clear();
+  claude.claim("wiped.ts");
+  claude.goalAdd("also wiped");
+  assert.equal(claude.claims().length, 1);
+  codex.clear();
+  assert.equal(codex.claims().length, 0);
+  assert.equal(codex.goals(true).length, 0);
+  assert.equal(codex.read().length, 0);
+});
+
 test("checkWait returns promptly when a message lands", async () => {
   claude.clear();
   setTimeout(() => codex.send("late arrival"), 300);
