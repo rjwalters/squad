@@ -81,14 +81,29 @@ if [[ -z "$VERSION_VALUE" ]]; then
 fi
 COMMIT="$(git -C "$SRC" rev-parse --short HEAD 2>/dev/null || echo unknown)"
 
+# --- verify the runtime dependencies actually resolve -----------------------
+# dist/ is a build artifact, not a promise that node_modules exists: it can
+# survive a wiped node_modules (e.g. after a host reboot) untouched, so its
+# mere presence proves nothing about whether the MCP server can start. Every
+# agent reaches the room through this one `node dist/index.js` entry point
+# (both .mcp.json and ~/.codex/config.toml point at it), so a broken install
+# here silently drops the room for every agent at once — check for real by
+# attempting the same dynamic import mcp.js performs at startup, not by
+# stat-ing a file.
+squad_deps_resolve() {
+  (cd "$SRC/dist" 2>/dev/null && node -e "
+    import('./mcp.js').then(() => process.exit(0), () => process.exit(1));
+  ") >/dev/null 2>&1
+}
+
 # --- dry run: print the full write plan and stop ---------------------------
 if [[ $DRY -eq 1 ]]; then
   echo
   echo "dry-run: planned writes (nothing will be changed)"
   echo
-  if [[ ! -f "$SRC/dist/index.js" ]]; then
+  if [[ ! -f "$SRC/dist/index.js" ]] || ! squad_deps_resolve; then
     echo "source clone ($SRC):"
-    echo "  node_modules/, dist/                 install deps + build (dist/index.js is missing)"
+    echo "  node_modules/, dist/                 install deps + build (dist/index.js or node_modules missing)"
     echo
   fi
   echo "target repo ($TARGET):"
@@ -121,10 +136,24 @@ if [[ $DRY -eq 1 ]]; then
   exit 0
 fi
 
-# Build if needed
-if [[ ! -f "$SRC/dist/index.js" ]]; then
-  echo "building squad..."
-  (cd "$SRC" && (pnpm install --silent || npm install --silent) && (pnpm build || npm run build))
+# Build (or rebuild deps) if the entry point is missing or its dependencies
+# don't actually resolve.
+if [[ ! -f "$SRC/dist/index.js" ]] || ! squad_deps_resolve; then
+  echo "building squad (installing runtime dependencies)..."
+  # Not guarded by set -e's usual abort-on-failure: a failed install/build
+  # here is reported by the squad_deps_resolve check right below, with a
+  # clearer message than an unhandled `pnpm: command not found` would give.
+  (cd "$SRC" && (pnpm install --silent || npm install --silent) && (pnpm build || npm run build)) ||
+    echo "warning: dependency install/build did not complete cleanly; verifying below" >&2
+fi
+
+# Fail loudly rather than installing a repo config that points at a server
+# that can't start — this is the check the bug report's issue asked for.
+if ! squad_deps_resolve; then
+  echo "error: squad's runtime dependencies still do not resolve after install." >&2
+  echo "  run: node $SRC/dist/index.js doctor    # for a full diagnostic" >&2
+  echo "  or:  cd $SRC && pnpm install && pnpm build   # (or npm)" >&2
+  exit 1
 fi
 
 confirm() { # confirm "prompt" -> 0/1

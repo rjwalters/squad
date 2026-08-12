@@ -20,6 +20,7 @@ Human CLI usage:
   squad who                   Show members and last-seen times
   squad clear                 Wipe messages, goals, claims, cursors, members
   squad path                  Print the database path
+  squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad help                  Show this help
 
 The room is per-repo: data lives in <repo-root>/.squad/, found by walking up
@@ -38,6 +39,83 @@ function fmt(m: Message): string {
   return m.kind === "system" ? `${time} -- ${m.body}` : `${time} <${m.sender}> ${m.body}`;
 }
 
+interface DoctorCheck {
+  name: string;
+  ok: boolean;
+  detail: string;
+}
+
+/**
+ * Dynamic import, not a static one at the top of this file: a static import
+ * would make `squad doctor` itself unrunnable exactly when it's needed most
+ * (node_modules missing/broken), same as index.ts's server startup. This is
+ * the one check in `doctor` that can actually fail — it's the same package
+ * resolution the MCP server depends on (mcp.ts imports the SDK and zod;
+ * nothing else in this codebase does).
+ */
+async function checkDeps(): Promise<DoctorCheck> {
+  try {
+    await import("@modelcontextprotocol/sdk/server/mcp.js");
+    await import("zod");
+    return { name: "dependencies", ok: true, detail: "@modelcontextprotocol/sdk and zod resolve" };
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      name: "dependencies",
+      ok: false,
+      detail: `${detail} -- run 'pnpm install' (or 'npm install') in the squad source clone, then 'pnpm build'`,
+    };
+  }
+}
+
+function checkDatabase(): DoctorCheck {
+  try {
+    const db = openDb();
+    db.prepare("SELECT 1").get();
+    db.close();
+    return { name: "database", ok: true, detail: `reachable at ${dbPath()}` };
+  } catch (err) {
+    return {
+      name: "database",
+      ok: false,
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function checkPersona(): DoctorCheck {
+  const pinned = process.env.SQUAD_PERSONA;
+  if (pinned) {
+    return { name: "persona", ok: true, detail: `pinned via SQUAD_PERSONA='${pinned}'` };
+  }
+  return {
+    name: "persona",
+    ok: true,
+    detail:
+      "not pinned -- the MCP server autodetects from the host harness (Claude Code -> claude, " +
+      "Codex -> codex, else 'agent'); this CLI defaults to 'human'",
+  };
+}
+
+/**
+ * Preflight for the MCP server's dependencies: run this to find out *why*
+ * a host came up with no squad_* tools instead of guessing. Exits non-zero
+ * (and prints a summary) when any check fails.
+ */
+async function runDoctor(): Promise<void> {
+  const checks = [await checkDeps(), checkDatabase(), checkPersona()];
+  for (const c of checks) {
+    console.log(`[${c.ok ? "ok" : "FAIL"}] ${c.name}: ${c.detail}`);
+  }
+  const failed = checks.filter((c) => !c.ok);
+  if (failed.length > 0) {
+    process.exitCode = 1;
+    console.log(`\n${failed.length} check(s) failed -- squad_* tools will not work until fixed.`);
+  } else {
+    console.log("\nall checks passed.");
+  }
+}
+
 export async function runCli(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
   if (cmd === "help" || cmd === "--help" || cmd === "-h" || cmd === undefined) {
@@ -46,6 +124,10 @@ export async function runCli(argv: string[]): Promise<void> {
   }
   if (cmd === "path") {
     console.log(dbPath());
+    return;
+  }
+  if (cmd === "doctor") {
+    await runDoctor();
     return;
   }
 
@@ -174,6 +256,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "clear",
       "nuke",
       "path",
+      "doctor",
       "help",
       "--help",
       "-h",

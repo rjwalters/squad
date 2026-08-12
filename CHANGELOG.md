@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `squad doctor` (#15): a preflight/diagnostic CLI subcommand that checks
+  whether the MCP server's runtime dependencies (`@modelcontextprotocol/sdk`,
+  `zod`) actually resolve, whether the database is reachable, and how the
+  persona will resolve — the tool for finding out *why* a harness came up
+  with no `squad_*` tools instead of guessing. It keeps working even when the
+  dependencies it's checking are missing.
 - Advisory claim primitive (#12): `squad_claim` / `squad_release` / `squad_claims`
   MCP tools and `squad claim <path>` / `squad release <path>` / `squad claims`
   CLI subcommands. A claim is freeform text (file path or area label) stored in
@@ -26,6 +32,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codex/prompts/squad-join.md`).
 
 ### Fixed
+- A wiped/missing `node_modules` in the source clone silently disabled the
+  room for every agent at once (#15): `index.ts` now imports `mcp.js` (the
+  only module that depends on anything outside Node's built-ins) lazily,
+  only when actually starting the MCP server, so a broken `node_modules`
+  degrades gracefully instead of taking the whole binary down — the CLI
+  (`squad doctor`, `squad --help`, etc.) still runs. A failed MCP-server
+  startup now also leaves a system message in the room itself (using only
+  the built-in-only `db.js`/`core.js` modules), so a teammate already
+  connected sees *why* this persona has no `squad_*` tools instead of
+  silently proceeding uncoordinated. `install.sh` now verifies the runtime
+  dependencies actually resolve (attempting the same dynamic import `mcp.js`
+  performs, not just checking that `dist/index.js` exists) and fails loudly,
+  before writing any target-repo config, if they still don't resolve after
+  attempting an install.
 - Room resolution in git worktrees (#6): a linked worktree now resolves to the
   primary clone's `<repo>/.squad` (via `git rev-parse --path-format=absolute
   --git-common-dir`) instead of its own private, empty room — so a Codex agent
