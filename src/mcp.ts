@@ -2,9 +2,17 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { openDb, dbPath } from "./db.js";
-import { Squad } from "./core.js";
+import { Squad, CARD_PHASES, CARD_TERMINAL_PHASES, EVIDENCE_TYPES } from "./core.js";
+import type { CardPhase, EvidenceType } from "./core.js";
 
 const MAX_WAIT_SECONDS = 240;
+
+// zod's `.enum()` wants a non-empty literal tuple; CARD_PHASES/EVIDENCE_TYPES
+// are the runtime source of truth (src/core.ts) but are typed as plain
+// `readonly CardPhase[]`/`readonly EvidenceType[]`, so the shape is asserted
+// here rather than re-declared.
+const CARD_PHASE_ENUM = CARD_PHASES as unknown as [CardPhase, ...CardPhase[]];
+const EVIDENCE_TYPE_ENUM = EVIDENCE_TYPES as unknown as [EvidenceType, ...EvidenceType[]];
 
 function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -188,6 +196,119 @@ export async function runMcpServer(): Promise<void> {
       inputSchema: { path: z.string().min(1).describe("The claimed path or label to release") },
     },
     async ({ path }) => json({ path, released: squad.release(path) }),
+  );
+
+  server.registerTool(
+    "squad_card_create",
+    {
+      description:
+        "Open a Science Card in the QUESTION phase, announced in chat as a system message. Only " +
+        "title and question are required; the rest are optional fields filled in as the " +
+        "investigation progresses.",
+      inputSchema: {
+        title: z.string().min(1).describe("Short card title"),
+        question: z.string().min(1).describe("The question under investigation"),
+        claim_kind: z
+          .enum(["empirical", "formal"])
+          .optional()
+          .describe(
+            "Whether SUPPORTED requires empirical evidence (default 'empirical') or can be " +
+              "reached on formal evidence alone ('formal', for pure math/logic claims)",
+          ),
+        origin_method: z.string().optional().describe("Where this card came from"),
+        origin_contributors: z.array(z.string()).optional().describe("Personas who contributed"),
+        changed_assumptions: z.array(z.string()).optional().describe("Assumptions this card revises"),
+        proposed_mechanism: z.string().optional().describe("The proposed mechanism"),
+        math_model: z.string().optional().describe("The math model, if any"),
+        standard_prediction: z.string().optional().describe("What the standard model predicts"),
+        discriminating_prediction: z
+          .string()
+          .optional()
+          .describe("What this card's mechanism predicts differently"),
+        decisive_falsifier: z.string().optional().describe("What observation would falsify this card"),
+        cheapest_test: z.string().optional().describe("The cheapest way to test the card"),
+        prior_art_status: z.string().optional().describe("Known prior art, if any"),
+        confidence: z.number().optional().describe("Current confidence, 0-1"),
+        novelty: z.number().optional().describe("Estimated novelty, 0-1"),
+        attempts: z.array(z.string()).optional().describe("Attempts made so far"),
+        attacks: z.array(z.string()).optional().describe("Attacks/critiques made so far"),
+        insights: z.array(z.string()).optional().describe("Insights gained so far"),
+        post_mortems: z.array(z.string()).optional().describe("Post-mortems, if any"),
+      },
+    },
+    async (fields) => json(squad.cardCreate(fields)),
+  );
+
+  server.registerTool(
+    "squad_card_list",
+    {
+      description:
+        "List Science Cards. Active (non-terminal-phase) cards by default; pass include_done to " +
+        "also show SUPPORTED/FALSIFIED/INCONCLUSIVE/ABANDONED cards — negative outcomes are never " +
+        "silently hidden when asked for.",
+      inputSchema: {
+        include_done: z
+          .boolean()
+          .optional()
+          .describe("Also include SUPPORTED/FALSIFIED/INCONCLUSIVE/ABANDONED cards"),
+      },
+    },
+    async ({ include_done }) => {
+      const cards = squad.cardList();
+      const filtered = include_done
+        ? cards
+        : cards.filter((c) => !CARD_TERMINAL_PHASES.includes(c.phase));
+      return json(filtered);
+    },
+  );
+
+  server.registerTool(
+    "squad_card_get",
+    {
+      description:
+        "Full detail for one Science Card: the card's fields plus its complete evidence and " +
+        "phase-transition history.",
+      inputSchema: { id: z.number().int().describe("The card id") },
+    },
+    async ({ id }) => json(squad.cardGet(id)),
+  );
+
+  server.registerTool(
+    "squad_card_transition",
+    {
+      description:
+        "Move a Science Card to a new phase, announced in chat as a system message. Validated " +
+        "against the allowed-transition graph — an illegal transition (e.g. QUESTION -> " +
+        "SUPPORTED) is rejected with an error naming the phases actually allowed from here. An " +
+        "empirical-claim card also needs at least one experiment/observation evidence item " +
+        "before it can reach SUPPORTED.",
+      inputSchema: {
+        id: z.number().int().describe("The card id"),
+        to_phase: z.enum(CARD_PHASE_ENUM).describe("Target phase"),
+        note: z.string().optional().describe("Optional note recorded with the transition"),
+      },
+    },
+    async ({ id, to_phase, note }) => json(squad.cardTransition(id, to_phase, note)),
+  );
+
+  server.registerTool(
+    "squad_card_evidence_add",
+    {
+      description:
+        "Attach an evidence item to a Science Card, announced in chat as a system message. " +
+        "Requires a type from the fixed enum and non-empty provenance.",
+      inputSchema: {
+        card_id: z.number().int().describe("The card id"),
+        type: z.enum(EVIDENCE_TYPE_ENUM).describe("Evidence type"),
+        provenance: z
+          .string()
+          .min(1)
+          .describe("Where the evidence comes from (file path, run log, paper citation, etc.)"),
+        body: z.string().optional().describe("Evidence content or summary"),
+      },
+    },
+    async ({ card_id, type, provenance, body }) =>
+      json(squad.cardEvidenceAdd(card_id, type, provenance, body)),
   );
 
   server.registerTool(

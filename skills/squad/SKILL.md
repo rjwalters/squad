@@ -21,6 +21,11 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 | `squad_claims` | List the advisory file claims: who is working on what, since when, and whether the claim has gone stale. |
 | `squad_claim` | Claim a file path (or freeform area label) before you edit it. Auto-announced. Advisory, never a lock. |
 | `squad_release` | Drop your claim when you're done. Auto-announced. No-op if nothing is claimed. |
+| `squad_card_create` | Open a Science Card (`title` + `question`; everything else optional) in the `QUESTION` phase. Auto-announced. |
+| `squad_card_list` | List Science Cards — active phases only by default (`include_done: true` for the full board, including `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`). |
+| `squad_card_get` | Full detail for one card: its fields plus complete evidence and phase-transition history. |
+| `squad_card_transition` | Move a card to a new phase. Validated against the allowed graph — an illegal move is rejected with an error naming what's actually allowed. Auto-announced. |
+| `squad_card_evidence_add` | Attach an evidence item (`type` + `provenance`, optional `body`) to a card. Auto-announced. |
 | `squad_clear` | Wipe the room. Destructive; needs explicit user intent. |
 
 ## Conventions
@@ -31,6 +36,7 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 - **Claims are advisory, not locks.** Nothing stops you from claiming or editing a claimed path — the value is visibility. If a claim is marked `stale` (its holder hasn't been seen for a while), you may take it over: say so in chat, `squad_release` it, and claim it yourself.
 - **Never delete files you did not create**, however scratch-like they look — untracked ≠ yours. A teammate's in-progress work is often an untracked file in the directory you're cleaning up. When cleaning, remove only paths you created this session; if something looks like debris but isn't yours, ask in the room instead of deleting it.
 - **Goals are squad-scoped, not assigned.** Division of labor is negotiated in chat.
+- **Science Cards track a claim through its investigation, not a to-do item.** Open one with `squad_card_create` when a question needs structured tracking (phase, evidence, transition history) rather than a plain goal. Move it forward with `squad_card_transition` — illegal jumps are rejected — and record supporting work with `squad_card_evidence_add` before claiming `SUPPORTED` (an empirical-claim card needs at least one `experiment`/`observation` item; a `formal` card can rely on `formal-check`/`derivation` alone).
 - **`squad_check` consumes.** Don't call it casually from a side task and eat messages your main loop was waiting for; use `peek: true` for a look-don't-touch read.
 - **Long-poll etiquette:** `wait_seconds: 25` keeps calls under default MCP tool timeouts. A live conversation is a loop of check(wait) → respond → check(wait).
 - **Session start habit:** even outside an explicit `/squad:join` session, a quick `squad_check` with `peek: true` at the start of work tells you whether a teammate left you something.
@@ -39,6 +45,7 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 
 - `/squad:join` — enter the room and converse until stopped
 - `/squad:goals` — show the board, or add goals from arguments
+- `/squad:card` — create, inspect, transition, or attach evidence to a Science Card
 - `/squad:clear` — wipe the room for a fresh session
 
-The human can watch and participate from a terminal: `squad tail`, `squad send "..."`, `squad goals`, `squad claims`.
+The human can watch and participate from a terminal: `squad tail`, `squad send "..."`, `squad goals`, `squad claims`, `squad card list`.
