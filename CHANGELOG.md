@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Science Cards: schema, storage, and phase-transition core (#22). A Science
+  Card is a durable record of one research question moving through
+  `QUESTION → DIVERGE → ORIENT → HYPOTHESIZE → DERIVE → ATTACK → SIMULATE →
+  EXPERIMENT → REPLICATE → SUPPORTED | FALSIFIED | INCONCLUSIVE`, with
+  `LEARN → PIVOT` loops and `ABANDONED` reachable from any live phase. This
+  increment adds the storage layer only — the CLI/MCP surface (#23),
+  divergence rounds (#24), and docs (#25) build on it.
+  - `schema/science-card.schema.json`: the versioned, runtime-neutral JSON
+    Schema (`$id` + `version` 1.0.0), canonical for the cross-repo effort
+    (#20) so Loom and Lean Genius vendor it rather than authoring their own
+    (`schema/README.md` explains how).
+  - Three additive tables — `science_cards`, `science_card_transitions`
+    (append-only history, starting from a genesis entry), and
+    `science_card_evidence`.
+  - `Squad.cardCreate` / `cardList` / `cardGet` / `cardTransition` /
+    `cardEvidenceAdd` / `cardDocument`, each announcing state changes in chat
+    as system messages the way goals and claims already do.
+  - Phase moves are validated against an explicit transition graph, and
+    **evidence status is not claim status**: a `verified` derivation or
+    formal-check never makes an empirical claim `SUPPORTED` — that needs
+    unrefuted `experiment` or `observation` evidence. Evidence requires a
+    recognised `type` and non-empty provenance.
+  - Negative results stay queryable: unlike `goals()`, `cardList()` returns
+    `FALSIFIED` / `INCONCLUSIVE` / `ABANDONED` cards by default.
 - `squad doctor` (#15): a preflight/diagnostic CLI subcommand that checks
   whether the MCP server's runtime dependencies (`@modelcontextprotocol/sdk`,
   `zod`) actually resolve, whether the database is reachable, and how the

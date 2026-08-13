@@ -1,4 +1,61 @@
 import type { DatabaseSync } from "node:sqlite";
+import {
+  CARD_CLAIM_KINDS,
+  CARD_EVIDENCE_STATUSES,
+  CARD_EVIDENCE_TYPES,
+  CARD_PHASES,
+  CARD_PRIOR_ART_STATUSES,
+  CARD_STATUSES,
+  EMPIRICAL_EVIDENCE_TYPES,
+  PHASE_TRANSITIONS,
+  TERMINAL_PHASE_STATUS,
+  toScienceCardDocument,
+} from "./science-card.js";
+import type {
+  Card,
+  CardClaimKind,
+  CardDetail,
+  CardEvidence,
+  CardEvidenceStatus,
+  CardEvidenceType,
+  CardNote,
+  CardPhase,
+  CardPriorArtStatus,
+  CardStatus,
+  CardTransition,
+} from "./science-card.js";
+
+// Card vocabulary lives in science-card.ts (it is the runtime-neutral part),
+// but callers import card types from the same place they import Goal and
+// Claim, so re-export them here.
+export type {
+  Card,
+  CardClaimKind,
+  CardDetail,
+  CardEvidence,
+  CardEvidenceStatus,
+  CardEvidenceType,
+  CardNote,
+  CardPhase,
+  CardPriorArtStatus,
+  CardStatus,
+  CardTransition,
+};
+export {
+  CARD_CLAIM_KINDS,
+  CARD_EVIDENCE_STATUSES,
+  CARD_EVIDENCE_TYPES,
+  CARD_PHASES,
+  CARD_PRIOR_ART_STATUSES,
+  CARD_STATUSES,
+  EMPIRICAL_EVIDENCE_TYPES,
+  PHASE_TRANSITIONS,
+  SCIENCE_CARD_SCHEMA_ID,
+  SCIENCE_CARD_SCHEMA_VERSION,
+  scienceCardSchema,
+  toScienceCardDocument,
+  validateScienceCard,
+} from "./science-card.js";
 
 export interface Message {
   id: number;
@@ -41,6 +98,128 @@ export interface ClaimView extends Claim {
 }
 
 const now = () => new Date().toISOString();
+
+/** Fields accepted by `cardCreate`. Everything but title/question is optional. */
+export interface CardCreateFields {
+  title: string;
+  question: string;
+  /** Defaults to `empirical` — the stricter bar for reaching SUPPORTED. */
+  claim_kind?: CardClaimKind;
+  origin_method?: string | null;
+  /** Defaults to `[the creating persona]`. */
+  contributors?: string[];
+  changed_assumptions?: string[];
+  proposed_mechanism?: string | null;
+  model_statement?: string | null;
+  null_prediction?: string | null;
+  discriminating_prediction?: string | null;
+  decisive_falsifier?: string | null;
+  cheapest_test?: string | null;
+  prior_art_status?: CardPriorArtStatus;
+  confidence?: number | null;
+  novelty?: number | null;
+  attempts?: Array<string | CardNote>;
+  attacks?: Array<string | CardNote>;
+  insights?: Array<string | CardNote>;
+  post_mortems?: Array<string | CardNote>;
+}
+
+/** Filters for `cardList`. All of them narrow a default of "every card". */
+export interface CardListOptions {
+  status?: CardStatus | CardStatus[];
+  phase?: CardPhase | CardPhase[];
+  /** Shorthand for `status: "OPEN"` — cards still in play. */
+  openOnly?: boolean;
+}
+
+/** The raw `science_cards` row shape: compound fields arrive as JSON text. */
+interface CardRow {
+  id: number;
+  title: string;
+  question: string;
+  phase: CardPhase;
+  status: CardStatus;
+  claim_kind: CardClaimKind;
+  origin_method: string | null;
+  contributors: string;
+  changed_assumptions: string;
+  proposed_mechanism: string | null;
+  model_statement: string | null;
+  null_prediction: string | null;
+  discriminating_prediction: string | null;
+  decisive_falsifier: string | null;
+  cheapest_test: string | null;
+  prior_art_status: CardPriorArtStatus;
+  confidence: number | null;
+  novelty: number | null;
+  attempts: string;
+  attacks: string;
+  insights: string;
+  post_mortems: string;
+  created_by: string;
+  created_ts: string;
+  updated_ts: string;
+}
+
+function parseJsonArray<T>(raw: string | null): T[] {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    return Array.isArray(parsed) ? (parsed as T[]) : [];
+  } catch {
+    return []; // a corrupt blob must not make the whole card unreadable
+  }
+}
+
+function rowToCard(row: CardRow): Card {
+  return {
+    ...row,
+    contributors: parseJsonArray<string>(row.contributors),
+    changed_assumptions: parseJsonArray<string>(row.changed_assumptions),
+    attempts: parseJsonArray<CardNote>(row.attempts),
+    attacks: parseJsonArray<CardNote>(row.attacks),
+    insights: parseJsonArray<CardNote>(row.insights),
+    post_mortems: parseJsonArray<CardNote>(row.post_mortems),
+  };
+}
+
+/** Bare strings are the common case; both forms are stored as dated notes. */
+function normalizeNotes(
+  input: Array<string | CardNote> | undefined,
+  persona: string,
+  ts: string,
+): CardNote[] {
+  return (input ?? []).map((n) =>
+    typeof n === "string"
+      ? { body: n, persona, ts }
+      : { body: n.body, persona: n.persona ?? persona, ts: n.ts ?? ts },
+  );
+}
+
+function toArray<T>(v: T | T[]): T[] {
+  return Array.isArray(v) ? v : [v];
+}
+
+function requireText(value: string | undefined | null, field: string): string {
+  const text = (value ?? "").trim();
+  if (!text) throw new Error(`${field} is required and cannot be empty`);
+  return text;
+}
+
+function requireEnum<T extends string>(value: string, allowed: readonly T[], field: string): T {
+  if (!allowed.includes(value as T)) {
+    throw new Error(`invalid ${field} '${value}' (expected one of: ${allowed.join(", ")})`);
+  }
+  return value as T;
+}
+
+function requireUnitInterval(value: number | null | undefined, field: string): number | null {
+  if (value === undefined || value === null) return null;
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new Error(`${field} must be between 0 and 1 (got ${value})`);
+  }
+  return value;
+}
 
 /**
  * A claim goes stale with its holder: once the claiming persona has not touched
@@ -284,6 +463,256 @@ export class Squad {
     return released;
   }
 
+  // ---------------------------------------------------------------------
+  // Science Cards
+  // ---------------------------------------------------------------------
+
+  /**
+   * Create a Science Card in the QUESTION phase and announce it in chat, so
+   * teammates learn about it through the same check() loop that carries goals
+   * and claims.
+   */
+  cardCreate(fields: CardCreateFields): Card {
+    this.touch();
+    const title = requireText(fields.title, "title");
+    const question = requireText(fields.question, "question");
+    const claim_kind = requireEnum(
+      fields.claim_kind ?? "empirical",
+      CARD_CLAIM_KINDS,
+      "claim_kind",
+    );
+    const prior_art_status = requireEnum(
+      fields.prior_art_status ?? "unknown",
+      CARD_PRIOR_ART_STATUSES,
+      "prior_art_status",
+    );
+    const confidence = requireUnitInterval(fields.confidence, "confidence");
+    const novelty = requireUnitInterval(fields.novelty, "novelty");
+    const ts = now();
+    const notes = (input?: Array<string | CardNote>) => normalizeNotes(input, this.persona, ts);
+
+    const { lastInsertRowid } = this.db
+      .prepare(
+        `INSERT INTO science_cards (
+           title, question, phase, status, claim_kind, origin_method, contributors,
+           changed_assumptions, proposed_mechanism, model_statement, null_prediction,
+           discriminating_prediction, decisive_falsifier, cheapest_test, prior_art_status,
+           confidence, novelty, attempts, attacks, insights, post_mortems,
+           created_by, created_ts, updated_ts
+         ) VALUES (?, ?, 'QUESTION', 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        title,
+        question,
+        claim_kind,
+        fields.origin_method ?? null,
+        JSON.stringify(fields.contributors ?? [this.persona]),
+        JSON.stringify(fields.changed_assumptions ?? []),
+        fields.proposed_mechanism ?? null,
+        fields.model_statement ?? null,
+        fields.null_prediction ?? null,
+        fields.discriminating_prediction ?? null,
+        fields.decisive_falsifier ?? null,
+        fields.cheapest_test ?? null,
+        prior_art_status,
+        confidence,
+        novelty,
+        JSON.stringify(notes(fields.attempts)),
+        JSON.stringify(notes(fields.attacks)),
+        JSON.stringify(notes(fields.insights)),
+        JSON.stringify(notes(fields.post_mortems)),
+        this.persona,
+        ts,
+        ts,
+      );
+    const id = Number(lastInsertRowid);
+    // Genesis entry: history is complete from the card's first breath, so
+    // "how did this get here" never has to be inferred from created_ts.
+    this.db
+      .prepare(
+        `INSERT INTO science_card_transitions (card_id, from_phase, to_phase, persona, ts, note)
+         VALUES (?, NULL, 'QUESTION', ?, ?, ?)`,
+      )
+      .run(id, this.persona, ts, "card created");
+    this.send(`${this.persona} created science card #${id} (QUESTION): ${title}`, "system");
+    return this.cardRow(id);
+  }
+
+  /**
+   * List cards, newest first.
+   *
+   * **The default is everything.** Unlike `goals()`, which hides done goals
+   * unless asked, a settled card is a result: FALSIFIED, INCONCLUSIVE, and
+   * ABANDONED cards are returned by default and stay queryable forever. Pass
+   * `openOnly` (or an explicit `status`/`phase` filter) to narrow.
+   */
+  cardList(opts: CardListOptions = {}): Card[] {
+    this.touch();
+    const where: string[] = [];
+    const params: string[] = [];
+    const statuses = opts.openOnly
+      ? (["OPEN"] as CardStatus[])
+      : opts.status
+        ? toArray(opts.status)
+        : [];
+    if (statuses.length) {
+      for (const s of statuses) requireEnum(s, CARD_STATUSES, "status");
+      where.push(`status IN (${statuses.map(() => "?").join(", ")})`);
+      params.push(...statuses);
+    }
+    const phases = opts.phase ? toArray(opts.phase) : [];
+    if (phases.length) {
+      for (const p of phases) requireEnum(p, CARD_PHASES, "phase");
+      where.push(`phase IN (${phases.map(() => "?").join(", ")})`);
+      params.push(...phases);
+    }
+    const sql =
+      `SELECT * FROM science_cards${where.length ? ` WHERE ${where.join(" AND ")}` : ""}` +
+      ` ORDER BY id DESC`;
+    const rows = this.db.prepare(sql).all(...params) as unknown as CardRow[];
+    return rows.map(rowToCard);
+  }
+
+  /** A card with its full evidence list and transition history. */
+  cardGet(id: number): CardDetail {
+    this.touch();
+    const card = this.cardRow(id);
+    return {
+      ...card,
+      evidence: this.db
+        .prepare("SELECT * FROM science_card_evidence WHERE card_id = ? ORDER BY id ASC")
+        .all(id) as unknown as CardEvidence[],
+      transitions: this.db
+        .prepare("SELECT * FROM science_card_transitions WHERE card_id = ? ORDER BY id ASC")
+        .all(id) as unknown as CardTransition[],
+    };
+  }
+
+  /** The card as a canonical Science Card document (see the JSON Schema). */
+  cardDocument(id: number): Record<string, unknown> {
+    return toScienceCardDocument(this.cardGet(id));
+  }
+
+  /**
+   * Move a card to another phase, if the graph allows it, and record the move
+   * in the card's append-only history.
+   *
+   * Two rules are enforced here, and both are refusals rather than warnings:
+   *
+   * 1. The move must be legal in `PHASE_TRANSITIONS` — no jumping from
+   *    QUESTION straight to SUPPORTED.
+   * 2. A card whose claim is `empirical` or `mixed` cannot reach SUPPORTED on
+   *    derivation/formal-check/simulation/literature evidence alone. A
+   *    `verified` proof is verified mathematics, not a supported claim about
+   *    the world.
+   *
+   * Reaching a terminal phase sets the card's claim-level status; leaving one
+   * through LEARN returns it to OPEN.
+   */
+  cardTransition(id: number, toPhase: CardPhase, note?: string): CardDetail {
+    this.touch();
+    const card = this.cardRow(id);
+    const to = requireEnum(toPhase, CARD_PHASES, "phase");
+    const allowed = PHASE_TRANSITIONS[card.phase];
+    if (!allowed.includes(to)) {
+      throw new Error(
+        `illegal transition for science card #${id}: ${card.phase} -> ${to} ` +
+          `(allowed from ${card.phase}: ${allowed.join(", ")})`,
+      );
+    }
+    if (to === "SUPPORTED" && card.claim_kind !== "formal") {
+      const empirical = this.db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM science_card_evidence
+            WHERE card_id = ? AND status != 'refuted'
+              AND type IN (${EMPIRICAL_EVIDENCE_TYPES.map(() => "?").join(", ")})`,
+        )
+        .get(id, ...EMPIRICAL_EVIDENCE_TYPES) as { n: number };
+      if (empirical.n === 0) {
+        throw new Error(
+          `science card #${id} makes an ${card.claim_kind} claim, so it cannot be SUPPORTED ` +
+            `without unrefuted empirical evidence (${EMPIRICAL_EVIDENCE_TYPES.join(" or ")}): ` +
+            `a verified derivation or formal-check is evidence about the mathematics, not ` +
+            `about the world`,
+        );
+      }
+    }
+    const ts = now();
+    const status: CardStatus = TERMINAL_PHASE_STATUS[to] ?? "OPEN";
+    this.db
+      .prepare("UPDATE science_cards SET phase = ?, status = ?, updated_ts = ? WHERE id = ?")
+      .run(to, status, ts, id);
+    this.db
+      .prepare(
+        `INSERT INTO science_card_transitions (card_id, from_phase, to_phase, persona, ts, note)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, card.phase, to, this.persona, ts, note ?? null);
+    const statusNote = status === "OPEN" ? "" : ` [status ${status}]`;
+    this.send(
+      `${this.persona} moved science card #${id} ${card.phase} -> ${to}${statusNote}` +
+        `${note ? `: ${note}` : ""}`,
+      "system",
+    );
+    return this.cardGet(id);
+  }
+
+  /**
+   * Attach a typed, sourced piece of evidence to a card.
+   *
+   * `type` must be one of the six recognised kinds and `provenance` must be
+   * non-empty — evidence nobody can trace back to a file, run, or paper is an
+   * assertion, and the point of the card is to keep the two apart. The
+   * evidence item's own `status` (default `pending`) describes that item only;
+   * it never promotes the card's claim.
+   */
+  cardEvidenceAdd(
+    id: number,
+    type: CardEvidenceType,
+    provenance: string,
+    body: string,
+    opts: { status?: CardEvidenceStatus } = {},
+  ): CardEvidence {
+    this.touch();
+    this.cardRow(id); // 404s before writing an orphan row
+    const evidenceType = requireEnum(type, CARD_EVIDENCE_TYPES, "evidence type");
+    const source = requireText(provenance, "provenance");
+    const text = requireText(body, "evidence body");
+    const status = requireEnum(opts.status ?? "pending", CARD_EVIDENCE_STATUSES, "evidence status");
+    const ts = now();
+    const { lastInsertRowid } = this.db
+      .prepare(
+        `INSERT INTO science_card_evidence (card_id, type, provenance, body, status, persona, ts)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(id, evidenceType, source, text, status, this.persona, ts);
+    this.db.prepare("UPDATE science_cards SET updated_ts = ? WHERE id = ?").run(ts, id);
+    this.send(
+      `${this.persona} added ${evidenceType} evidence to science card #${id} (${status}, ` +
+        `source: ${source})`,
+      "system",
+    );
+    return {
+      id: Number(lastInsertRowid),
+      card_id: id,
+      type: evidenceType,
+      provenance: source,
+      body: text,
+      status,
+      persona: this.persona,
+      ts,
+    };
+  }
+
+  /** The card row, or a clear error naming the id that does not exist. */
+  private cardRow(id: number): Card {
+    const row = this.db.prepare("SELECT * FROM science_cards WHERE id = ?").get(id) as
+      | CardRow
+      | undefined;
+    if (!row) throw new Error(`no science card with id ${id}`);
+    return rowToCard(row);
+  }
+
   members(): Member[] {
     return this.db
       .prepare("SELECT * FROM members ORDER BY last_seen DESC")
@@ -308,10 +737,14 @@ export class Squad {
     return { members: this.members(), goals: this.goals(), claims: this.claims(), recent };
   }
 
-  /** Wipe the room: all messages, goals, claims, cursors, and members. */
+  /**
+   * Wipe the room: all messages, goals, claims, cursors, members, and science
+   * cards (with their evidence and transition history).
+   */
   clear(): void {
     this.db.exec(
-      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; DELETE FROM members;",
+      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; DELETE FROM members;" +
+        " DELETE FROM science_card_evidence; DELETE FROM science_card_transitions; DELETE FROM science_cards;",
     );
   }
 }

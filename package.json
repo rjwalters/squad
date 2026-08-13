@@ -9,7 +9,8 @@
     "squad": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "schema"
   ],
   "engines": {
     "node": ">=22.5"

@@ -36,6 +36,56 @@ CREATE TABLE IF NOT EXISTS claims (
   persona TEXT NOT NULL,
   created_ts TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS science_cards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  question TEXT NOT NULL,
+  phase TEXT NOT NULL DEFAULT 'QUESTION',
+  status TEXT NOT NULL DEFAULT 'OPEN',
+  claim_kind TEXT NOT NULL DEFAULT 'empirical',
+  origin_method TEXT,
+  contributors TEXT NOT NULL DEFAULT '[]',
+  changed_assumptions TEXT NOT NULL DEFAULT '[]',
+  proposed_mechanism TEXT,
+  model_statement TEXT,
+  null_prediction TEXT,
+  discriminating_prediction TEXT,
+  decisive_falsifier TEXT,
+  cheapest_test TEXT,
+  prior_art_status TEXT NOT NULL DEFAULT 'unknown',
+  confidence REAL,
+  novelty REAL,
+  attempts TEXT NOT NULL DEFAULT '[]',
+  attacks TEXT NOT NULL DEFAULT '[]',
+  insights TEXT NOT NULL DEFAULT '[]',
+  post_mortems TEXT NOT NULL DEFAULT '[]',
+  created_by TEXT NOT NULL,
+  created_ts TEXT NOT NULL,
+  updated_ts TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS science_card_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id INTEGER NOT NULL,
+  from_phase TEXT,
+  to_phase TEXT NOT NULL,
+  persona TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  note TEXT
+);
+CREATE TABLE IF NOT EXISTS science_card_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id INTEGER NOT NULL,
+  type TEXT NOT NULL,
+  provenance TEXT NOT NULL,
+  body TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  persona TEXT NOT NULL,
+  ts TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_science_cards_status ON science_cards (status);
+CREATE INDEX IF NOT EXISTS idx_science_cards_phase ON science_cards (phase);
+CREATE INDEX IF NOT EXISTS idx_science_card_transitions_card ON science_card_transitions (card_id);
+CREATE INDEX IF NOT EXISTS idx_science_card_evidence_card ON science_card_evidence (card_id);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */
