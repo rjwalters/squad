@@ -1,0 +1,196 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/rjwalters/squad/blob/main/schema/science-card.schema.json",
+  "version": "1.0.0",
+  "title": "Science Card",
+  "description": "Canonical, runtime-neutral definition of a Squad Science Card: a durable record of a research question moving through phases (QUESTION -> DIVERGE -> ORIENT -> HYPOTHESIZE -> DERIVE -> ATTACK -> SIMULATE -> EXPERIMENT -> REPLICATE -> SUPPORTED | FALSIFIED | INCONCLUSIVE, with LEARN -> PIVOT loops and an ABANDONED escape hatch), carrying typed evidence and a full transition history. This file has no Claude- or Codex-specific fields and no fields specific to any single agent runtime — `persona` is a plain string identifying whichever agent or human acted.\n\nSchema ownership: this file is the canonical Science Card schema for the cross-repo effort tracked by squad#20 (companion issues rjwalters/loom#6109 and rjwalters/lean-genius#43705). Other repos should vendor a copy with a comment noting the `$id`/`version` it was copied from (or otherwise reference this file), not independently redefine the shape. Bump `version` (semver) on any breaking change to this shape so vendored copies can detect drift.",
+  "type": "object",
+  "required": [
+    "id",
+    "title",
+    "question",
+    "phase",
+    "claim_kind",
+    "created_by",
+    "created_ts",
+    "updated_ts"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Stable numeric card id."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Short human-readable title."
+    },
+    "question": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The research question this card investigates."
+    },
+    "phase": {
+      "$ref": "#/$defs/phase",
+      "description": "Current phase in the transition graph."
+    },
+    "claim_kind": {
+      "type": "string",
+      "enum": ["empirical", "formal"],
+      "description": "Whether reaching SUPPORTED requires empirical evidence (experiment/observation) or is satisfiable by formal evidence alone (derivation/formal-check). Keeps evidence-level 'verified' distinct from card-level 'SUPPORTED': a verified derivation never alone satisfies an empirical claim."
+    },
+    "origin_method": {
+      "type": ["string", "null"],
+      "description": "How this card originated, e.g. 'human', 'divergence-round', 'derived-from-card-12'."
+    },
+    "origin_contributors": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Personas (agents or humans) credited with originating this card."
+    },
+    "changed_assumptions": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Assumptions this card revises relative to prior work."
+    },
+    "proposed_mechanism": {
+      "type": ["string", "null"]
+    },
+    "math_model": {
+      "type": ["string", "null"],
+      "description": "Math or model statement, if any."
+    },
+    "standard_prediction": {
+      "type": ["string", "null"],
+      "description": "The standard/null-hypothesis prediction."
+    },
+    "discriminating_prediction": {
+      "type": ["string", "null"],
+      "description": "The prediction that discriminates this hypothesis from the standard/null one."
+    },
+    "decisive_falsifier": {
+      "type": ["string", "null"],
+      "description": "What observation/result would decisively falsify this card's claim."
+    },
+    "cheapest_test": {
+      "type": ["string", "null"],
+      "description": "The cheapest available test that could move this card forward."
+    },
+    "prior_art_status": {
+      "type": ["string", "null"]
+    },
+    "confidence": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "novelty": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1
+    },
+    "attempts": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "attacks": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "insights": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "post_mortems": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "created_by": {
+      "type": "string",
+      "minLength": 1
+    },
+    "created_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "updated_ts": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "evidence": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/evidence" }
+    },
+    "transitions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transition" }
+    }
+  },
+  "$defs": {
+    "phase": {
+      "type": "string",
+      "enum": [
+        "QUESTION",
+        "DIVERGE",
+        "ORIENT",
+        "HYPOTHESIZE",
+        "DERIVE",
+        "ATTACK",
+        "SIMULATE",
+        "EXPERIMENT",
+        "REPLICATE",
+        "LEARN",
+        "PIVOT",
+        "SUPPORTED",
+        "FALSIFIED",
+        "INCONCLUSIVE",
+        "ABANDONED"
+      ]
+    },
+    "evidence_type": {
+      "type": "string",
+      "enum": [
+        "derivation",
+        "formal-check",
+        "simulation",
+        "experiment",
+        "literature",
+        "observation"
+      ]
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["id", "card_id", "type", "provenance", "persona", "ts"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "integer" },
+        "card_id": { "type": "integer" },
+        "type": { "$ref": "#/$defs/evidence_type" },
+        "provenance": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where this evidence came from — non-empty, required."
+        },
+        "body": { "type": ["string", "null"] },
+        "persona": { "type": "string", "minLength": 1 },
+        "ts": { "type": "string", "format": "date-time" }
+      }
+    },
+    "transition": {
+      "type": "object",
+      "required": ["id", "card_id", "from_phase", "to_phase", "persona", "ts"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "type": "integer" },
+        "card_id": { "type": "integer" },
+        "from_phase": { "$ref": "#/$defs/phase" },
+        "to_phase": { "$ref": "#/$defs/phase" },
+        "persona": { "type": "string", "minLength": 1 },
+        "ts": { "type": "string", "format": "date-time" },
+        "note": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

@@ -55,6 +55,50 @@ CREATE TABLE IF NOT EXISTS divergence_submissions (
   submitted_ts TEXT NOT NULL,
   UNIQUE(round_id, persona)
 );
+CREATE TABLE IF NOT EXISTS science_cards (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  title TEXT NOT NULL,
+  question TEXT NOT NULL,
+  phase TEXT NOT NULL DEFAULT 'QUESTION',
+  claim_kind TEXT NOT NULL DEFAULT 'empirical',
+  origin_method TEXT,
+  origin_contributors TEXT NOT NULL DEFAULT '[]',
+  changed_assumptions TEXT NOT NULL DEFAULT '[]',
+  proposed_mechanism TEXT,
+  math_model TEXT,
+  standard_prediction TEXT,
+  discriminating_prediction TEXT,
+  decisive_falsifier TEXT,
+  cheapest_test TEXT,
+  prior_art_status TEXT,
+  confidence REAL,
+  novelty REAL,
+  attempts TEXT NOT NULL DEFAULT '[]',
+  attacks TEXT NOT NULL DEFAULT '[]',
+  insights TEXT NOT NULL DEFAULT '[]',
+  post_mortems TEXT NOT NULL DEFAULT '[]',
+  created_by TEXT NOT NULL,
+  created_ts TEXT NOT NULL,
+  updated_ts TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS science_card_transitions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id INTEGER NOT NULL,
+  from_phase TEXT NOT NULL,
+  to_phase TEXT NOT NULL,
+  persona TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  note TEXT
+);
+CREATE TABLE IF NOT EXISTS science_card_evidence (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id INTEGER NOT NULL,
+  type TEXT NOT NULL CHECK (type IN ('derivation', 'formal-check', 'simulation', 'experiment', 'literature', 'observation')),
+  provenance TEXT NOT NULL,
+  body TEXT,
+  persona TEXT NOT NULL,
+  ts TEXT NOT NULL
+);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */
