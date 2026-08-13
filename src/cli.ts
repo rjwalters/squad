@@ -17,8 +17,18 @@ Human CLI usage:
   squad claims                Show advisory file claims (who is working on what)
   squad claim <path>          Claim a file or area you are working on
   squad release <path>        Drop your claim on a file or area
+  squad diverge open [--card <id>] [--expect <p1,p2,...>] <topic...>
+                               Open a divergence round (hidden until reveal)
+  squad diverge submit <round_id> <text...>
+                               Submit your independent entry to an open round
+  squad diverge status <round_id>
+                               Show round metadata (+ your own submission if made);
+                               full submissions only once the round is closed
+  squad diverge close <round_id>
+                               Explicitly close a round and reveal all submissions
   squad who                   Show members and last-seen times
-  squad clear                 Wipe messages, goals, claims, cursors, members
+  squad clear                 Wipe messages, goals, claims, cursors, members, and
+                               divergence rounds/submissions
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad help                  Show this help
@@ -220,6 +230,62 @@ export async function runCli(argv: string[]): Promise<void> {
       else console.log(`released ${path} (was ${released.map((c) => c.persona).join(", ")})`);
       break;
     }
+    case "diverge": {
+      const [sub, ...args] = rest;
+      if (sub === "open") {
+        const tokens = [...args];
+        let cardId: number | undefined;
+        let expectedParticipants: string[] | undefined;
+        while (tokens[0] === "--card" || tokens[0] === "--expect") {
+          const flag = tokens.shift();
+          const val = tokens.shift();
+          if (flag === "--card") {
+            cardId = parseInt(val ?? "", 10);
+            if (Number.isNaN(cardId)) throw new Error("usage: squad diverge open --card <id> ...");
+          } else {
+            expectedParticipants = (val ?? "")
+              .split(",")
+              .map((p) => p.trim())
+              .filter(Boolean);
+          }
+        }
+        const topic = tokens.join(" ").trim();
+        if (!topic) {
+          throw new Error(
+            "usage: squad diverge open [--card <id>] [--expect <p1,p2,...>] <topic...>",
+          );
+        }
+        const round = squad.divergeOpen(topic, { cardId, expectedParticipants });
+        console.log(`opened divergence round #${round.id}: ${round.topic}`);
+      } else if (sub === "submit") {
+        const id = parseInt(args[0] ?? "", 10);
+        const body = args.slice(1).join(" ").trim();
+        if (Number.isNaN(id) || !body) {
+          throw new Error("usage: squad diverge submit <round_id> <text...>");
+        }
+        const s = squad.divergeSubmit(id, body);
+        console.log(`submitted to round #${id} (${s.persona})`);
+      } else if (sub === "status") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error("usage: squad diverge status <round_id>");
+        const status = squad.divergeStatus(id);
+        console.log(`round #${status.round.id}: ${status.round.topic} [${status.round.status}]`);
+        console.log(`submitted: ${status.submitted_personas.join(", ") || "none yet"}`);
+        if (status.submissions) {
+          for (const s of status.submissions) console.log(`  <${s.persona}> ${s.body}`);
+        } else if (status.mine) {
+          console.log(`  <${status.mine.persona}> ${status.mine.body} (yours; others hidden until close)`);
+        }
+      } else if (sub === "close") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error("usage: squad diverge close <round_id>");
+        const round = squad.divergeClose(id);
+        console.log(`round #${round.id} closed`);
+      } else {
+        throw new Error("usage: squad diverge [open|submit|status|close] ...");
+      }
+      break;
+    }
     case "who": {
       for (const m of squad.members()) console.log(`${m.persona}\tlast seen ${m.last_seen}`);
       break;
@@ -252,6 +318,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "claims",
       "claim",
       "release",
+      "diverge",
       "who",
       "clear",
       "nuke",
