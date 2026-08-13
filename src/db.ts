@@ -36,6 +36,25 @@ CREATE TABLE IF NOT EXISTS claims (
   persona TEXT NOT NULL,
   created_ts TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS divergence_rounds (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  card_id INTEGER,
+  topic TEXT NOT NULL,
+  opened_by TEXT NOT NULL,
+  opened_ts TEXT NOT NULL,
+  expected_participants TEXT,
+  status TEXT NOT NULL DEFAULT 'open',
+  closed_by TEXT,
+  closed_ts TEXT
+);
+CREATE TABLE IF NOT EXISTS divergence_submissions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  round_id INTEGER NOT NULL,
+  persona TEXT NOT NULL,
+  body TEXT NOT NULL,
+  submitted_ts TEXT NOT NULL,
+  UNIQUE(round_id, persona)
+);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */

@@ -191,6 +191,67 @@ export async function runMcpServer(): Promise<void> {
   );
 
   server.registerTool(
+    "squad_diverge_open",
+    {
+      description:
+        "Open a divergence round: a bounded window where each participant submits independently and " +
+        "nobody's submission -- including your own, when someone else checks -- is visible to anyone " +
+        "until the round closes, either explicitly via squad_diverge_close or automatically once every " +
+        "persona in expected_participants has submitted. The chat announcement carries only the topic, " +
+        "never a submission.",
+      inputSchema: {
+        topic: z.string().min(1).describe("What the round is diverging on"),
+        card_id: z.number().int().optional().describe("Optional Science Card id this round belongs to"),
+        expected_participants: z
+          .array(z.string())
+          .optional()
+          .describe(
+            "Personas expected to submit; once every one of them has submitted the round auto-closes",
+          ),
+      },
+    },
+    async ({ topic, card_id, expected_participants }) =>
+      json(squad.divergeOpen(topic, { cardId: card_id, expectedParticipants: expected_participants })),
+  );
+
+  server.registerTool(
+    "squad_diverge_submit",
+    {
+      description:
+        "Submit your independent entry to an open divergence round. Resubmitting overwrites your prior " +
+        "entry (idempotent, no duplicate). Never reveals another persona's submission -- those stay " +
+        "hidden until the round closes.",
+      inputSchema: {
+        round_id: z.number().int().describe("The divergence round id"),
+        body: z.string().min(1).describe("Your submission"),
+      },
+    },
+    async ({ round_id, body }) => json(squad.divergeSubmit(round_id, body)),
+  );
+
+  server.registerTool(
+    "squad_diverge_status",
+    {
+      description:
+        "Check a divergence round. While open: shows which personas have submitted so far (never what " +
+        "they submitted) plus your own submission, if you made one. Once closed: shows every submission.",
+      inputSchema: { round_id: z.number().int().describe("The divergence round id") },
+    },
+    async ({ round_id }) => json(squad.divergeStatus(round_id)),
+  );
+
+  server.registerTool(
+    "squad_diverge_close",
+    {
+      description:
+        "Explicitly close a divergence round: reveals every submission to everyone and announces the " +
+        "reveal in chat. Idempotent -- a no-op returning the current state if already closed.",
+      inputSchema: { round_id: z.number().int().describe("The divergence round id") },
+    },
+    async ({ round_id }) => json(squad.divergeClose(round_id)),
+  );
+
+  server.registerTool(
     "squad_clear",
     {
       description:
