@@ -184,6 +184,85 @@ test("squad --help documents the card subcommand family", () => {
   assert.match(res.stdout, /squad card show/);
   assert.match(res.stdout, /squad card transition/);
   assert.match(res.stdout, /squad card evidence/);
+  assert.match(res.stdout, /squad card edit/);
+});
+
+// --- card edit --------------------------------------------------------
+
+test("squad card edit changes a field and it's reflected in card show", () => {
+  const dir = freshDir();
+  try {
+    runCli(["card", "create", "--title", "Original", "editable question"], { SQUAD_DIR: dir });
+    const res = runCli(
+      ["card", "edit", "1", "--title", "Renamed", "--confidence", "0.75"],
+      { SQUAD_DIR: dir },
+    );
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /^card #1 updated \[QUESTION\]: Renamed$/m);
+
+    const show = runCli(["card", "show", "1"], { SQUAD_DIR: dir });
+    assert.equal(show.status, 0, show.stdout + show.stderr);
+    assert.match(show.stdout, /^#1 \[QUESTION\] Renamed/m);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("squad card edit accepts a comma-separated value for list fields", () => {
+  const dir = freshDir();
+  try {
+    runCli(["card", "create", "list field card"], { SQUAD_DIR: dir });
+    const res = runCli(
+      ["card", "edit", "1", "--insights", "first insight,second insight"],
+      { SQUAD_DIR: dir },
+    );
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("squad card edit requires at least one --field value pair", () => {
+  const dir = freshDir();
+  try {
+    runCli(["card", "create", "no fields"], { SQUAD_DIR: dir });
+    const res = runCli(["card", "edit", "1"], { SQUAD_DIR: dir });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /usage: squad card edit/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("squad card edit rejects an unrecognized flag (phase cannot be edited this way)", () => {
+  const dir = freshDir();
+  try {
+    runCli(["card", "create", "no phase edit"], { SQUAD_DIR: dir });
+    const res = runCli(["card", "edit", "1", "--phase", "SUPPORTED"], { SQUAD_DIR: dir });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /unrecognized flag '--phase'/);
+
+    const show = runCli(["card", "show", "1"], { SQUAD_DIR: dir });
+    assert.match(show.stdout, /^#1 \[QUESTION\]/m, "phase unchanged after a rejected edit");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("squad card edit reports missing id", () => {
+  const dir = freshDir();
+  try {
+    const res = runCli(["card", "edit", "999", "--title", "x"], { SQUAD_DIR: dir });
+    assert.notEqual(res.status, 0);
+    assert.match(res.stderr, /no science card/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("mcp.ts registers squad_card_update", () => {
+  const mcpSrc = readFileSync(join(repoRoot, "src", "mcp.ts"), "utf8");
+  assert.match(mcpSrc, /registerTool\(\s*"squad_card_update"/);
 });
 
 // --- MCP tool registration (no live transport; see issue #23's test plan:

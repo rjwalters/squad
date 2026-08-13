@@ -231,6 +231,44 @@ export interface CardCreateFields {
   post_mortems?: string[];
 }
 
+/**
+ * Fields `cardUpdate` may change: every field `cardCreate` accepts (the
+ * fields set at creation time), all optional since an update only touches
+ * what's supplied. Deliberately excludes `phase` (whose only legal path is
+ * `cardTransition`, which also validates the transition graph and writes
+ * `science_card_transitions` history) and evidence (only `cardEvidenceAdd`,
+ * which writes `science_card_evidence`) — this is a plain field edit, never
+ * a phase change or a history mutation.
+ */
+export type CardUpdateFields = Partial<CardCreateFields>;
+
+/**
+ * Runtime list of fields `cardUpdate` accepts, in the same order declared on
+ * `CardCreateFields` — the single source of truth callers (CLI flag parsing,
+ * an MCP zod schema) can iterate instead of re-declaring the field list.
+ */
+export const CARD_UPDATE_FIELDS: readonly (keyof CardUpdateFields)[] = [
+  "title",
+  "question",
+  "claim_kind",
+  "origin_method",
+  "origin_contributors",
+  "changed_assumptions",
+  "proposed_mechanism",
+  "math_model",
+  "standard_prediction",
+  "discriminating_prediction",
+  "decisive_falsifier",
+  "cheapest_test",
+  "prior_art_status",
+  "confidence",
+  "novelty",
+  "attempts",
+  "attacks",
+  "insights",
+  "post_mortems",
+];
+
 export interface CardEvidence {
   id: number;
   card_id: number;
@@ -637,6 +675,123 @@ export class Squad {
     row.id = Number(lastInsertRowid);
     this.send(`${this.persona} opened science card #${row.id}: ${row.title}`, "system");
     return rowToCard(row);
+  }
+
+  /**
+   * Edit a card's fields set at creation time (title, confidence, novelty,
+   * prior-art status, etc.) and announce the change in chat as a system
+   * message. Never touches `phase` or history — moving phase is exclusively
+   * `cardTransition`'s job (it validates the transition graph and records
+   * `science_card_transitions`), and evidence is exclusively
+   * `cardEvidenceAdd`'s job — so neither `phase` nor evidence/transition
+   * history are among `CARD_UPDATE_FIELDS` and passing them here has no
+   * effect. Only fields actually present in `fields` change; omitted fields
+   * keep their current value. Requires at least one recognized field.
+   */
+  cardUpdate(id: number, fields: CardUpdateFields): Card {
+    this.touch();
+    const row = this.db.prepare("SELECT * FROM science_cards WHERE id = ?").get(id) as
+      | CardRow
+      | undefined;
+    if (!row) throw new Error(`no science card with id ${id}`);
+
+    const changedKeys = (Object.keys(fields) as (keyof CardUpdateFields)[]).filter(
+      (k) => fields[k] !== undefined && (CARD_UPDATE_FIELDS as readonly string[]).includes(k),
+    );
+    if (changedKeys.length === 0) {
+      throw new Error(
+        `card update requires at least one field to change (allowed: ${CARD_UPDATE_FIELDS.join(", ")})`,
+      );
+    }
+    if (fields.title !== undefined && !fields.title.trim()) {
+      throw new Error("card title cannot be empty");
+    }
+    if (fields.question !== undefined && !fields.question.trim()) {
+      throw new Error("card question cannot be empty");
+    }
+    if (
+      fields.claim_kind !== undefined &&
+      fields.claim_kind !== "empirical" &&
+      fields.claim_kind !== "formal"
+    ) {
+      throw new Error(`invalid claim_kind "${fields.claim_kind}" (must be "empirical" or "formal")`);
+    }
+
+    const ts = now();
+    const merged: CardRow = {
+      ...row,
+      title: fields.title ?? row.title,
+      question: fields.question ?? row.question,
+      claim_kind: fields.claim_kind ?? row.claim_kind,
+      origin_method: fields.origin_method !== undefined ? fields.origin_method : row.origin_method,
+      origin_contributors:
+        fields.origin_contributors !== undefined
+          ? JSON.stringify(fields.origin_contributors)
+          : row.origin_contributors,
+      changed_assumptions:
+        fields.changed_assumptions !== undefined
+          ? JSON.stringify(fields.changed_assumptions)
+          : row.changed_assumptions,
+      proposed_mechanism:
+        fields.proposed_mechanism !== undefined ? fields.proposed_mechanism : row.proposed_mechanism,
+      math_model: fields.math_model !== undefined ? fields.math_model : row.math_model,
+      standard_prediction:
+        fields.standard_prediction !== undefined ? fields.standard_prediction : row.standard_prediction,
+      discriminating_prediction:
+        fields.discriminating_prediction !== undefined
+          ? fields.discriminating_prediction
+          : row.discriminating_prediction,
+      decisive_falsifier:
+        fields.decisive_falsifier !== undefined ? fields.decisive_falsifier : row.decisive_falsifier,
+      cheapest_test: fields.cheapest_test !== undefined ? fields.cheapest_test : row.cheapest_test,
+      prior_art_status:
+        fields.prior_art_status !== undefined ? fields.prior_art_status : row.prior_art_status,
+      confidence: fields.confidence !== undefined ? fields.confidence : row.confidence,
+      novelty: fields.novelty !== undefined ? fields.novelty : row.novelty,
+      attempts: fields.attempts !== undefined ? JSON.stringify(fields.attempts) : row.attempts,
+      attacks: fields.attacks !== undefined ? JSON.stringify(fields.attacks) : row.attacks,
+      insights: fields.insights !== undefined ? JSON.stringify(fields.insights) : row.insights,
+      post_mortems:
+        fields.post_mortems !== undefined ? JSON.stringify(fields.post_mortems) : row.post_mortems,
+      updated_ts: ts,
+    };
+
+    this.db
+      .prepare(
+        `UPDATE science_cards SET
+           title = ?, question = ?, claim_kind = ?, origin_method = ?, origin_contributors = ?,
+           changed_assumptions = ?, proposed_mechanism = ?, math_model = ?, standard_prediction = ?,
+           discriminating_prediction = ?, decisive_falsifier = ?, cheapest_test = ?, prior_art_status = ?,
+           confidence = ?, novelty = ?, attempts = ?, attacks = ?, insights = ?, post_mortems = ?,
+           updated_ts = ?
+         WHERE id = ?`,
+      )
+      .run(
+        merged.title,
+        merged.question,
+        merged.claim_kind,
+        merged.origin_method,
+        merged.origin_contributors,
+        merged.changed_assumptions,
+        merged.proposed_mechanism,
+        merged.math_model,
+        merged.standard_prediction,
+        merged.discriminating_prediction,
+        merged.decisive_falsifier,
+        merged.cheapest_test,
+        merged.prior_art_status,
+        merged.confidence,
+        merged.novelty,
+        merged.attempts,
+        merged.attacks,
+        merged.insights,
+        merged.post_mortems,
+        merged.updated_ts,
+        id,
+      );
+
+    this.send(`${this.persona} updated card #${id}: ${changedKeys.join(", ")}`, "system");
+    return rowToCard(merged);
   }
 
   /**

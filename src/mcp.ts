@@ -240,6 +240,51 @@ export async function runMcpServer(): Promise<void> {
   );
 
   server.registerTool(
+    "squad_card_update",
+    {
+      description:
+        "Edit a Science Card's fields set at creation time (title, confidence, novelty, " +
+        "prior-art status, etc.), announced in chat as a system message. Only the fields " +
+        "supplied change; everything else is left as-is. Never changes phase or history — " +
+        "moving phase is exclusively squad_card_transition's job (it validates the transition " +
+        "graph and records history) and evidence is exclusively squad_card_evidence_add's job, " +
+        "so neither is accepted here. Requires id plus at least one other field.",
+      inputSchema: {
+        id: z.number().int().describe("The card id"),
+        title: z.string().min(1).optional().describe("Short card title"),
+        question: z.string().min(1).optional().describe("The question under investigation"),
+        claim_kind: z
+          .enum(["empirical", "formal"])
+          .optional()
+          .describe(
+            "Whether SUPPORTED requires empirical evidence ('empirical') or can be reached " +
+              "on formal evidence alone ('formal', for pure math/logic claims)",
+          ),
+        origin_method: z.string().optional().describe("Where this card came from"),
+        origin_contributors: z.array(z.string()).optional().describe("Personas who contributed"),
+        changed_assumptions: z.array(z.string()).optional().describe("Assumptions this card revises"),
+        proposed_mechanism: z.string().optional().describe("The proposed mechanism"),
+        math_model: z.string().optional().describe("The math model, if any"),
+        standard_prediction: z.string().optional().describe("What the standard model predicts"),
+        discriminating_prediction: z
+          .string()
+          .optional()
+          .describe("What this card's mechanism predicts differently"),
+        decisive_falsifier: z.string().optional().describe("What observation would falsify this card"),
+        cheapest_test: z.string().optional().describe("The cheapest way to test the card"),
+        prior_art_status: z.string().optional().describe("Known prior art, if any"),
+        confidence: z.number().optional().describe("Current confidence, 0-1"),
+        novelty: z.number().optional().describe("Estimated novelty, 0-1"),
+        attempts: z.array(z.string()).optional().describe("Attempts made so far"),
+        attacks: z.array(z.string()).optional().describe("Attacks/critiques made so far"),
+        insights: z.array(z.string()).optional().describe("Insights gained so far"),
+        post_mortems: z.array(z.string()).optional().describe("Post-mortems, if any"),
+      },
+    },
+    async ({ id, ...fields }) => json(squad.cardUpdate(id, fields)),
+  );
+
+  server.registerTool(
     "squad_card_list",
     {
       description:

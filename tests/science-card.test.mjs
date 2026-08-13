@@ -347,6 +347,86 @@ test("cardEvidenceAdd on a missing card throws", () => {
   );
 });
 
+// --- cardUpdate: post-creation field edits ------------------------------
+
+test("cardUpdate changes only the supplied field(s), leaves the rest untouched, and announces", () => {
+  claude.clear();
+  const card = claude.cardCreate({ title: "Original title", question: "q", confidence: 0.2 });
+  codex.check();
+
+  const updated = claude.cardUpdate(card.id, { title: "New title", confidence: 0.8 });
+  assert.equal(updated.title, "New title");
+  assert.equal(updated.confidence, 0.8);
+  assert.equal(updated.question, "q", "untouched field keeps its value");
+  assert.ok(updated.updated_ts >= card.created_ts);
+
+  const fetched = claude.cardGet(card.id);
+  assert.equal(fetched.title, "New title");
+  assert.equal(fetched.confidence, 0.8);
+
+  const seen = codex.check();
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0].kind, "system");
+  assert.match(seen[0].body, /updated card #\d+: title, confidence/);
+});
+
+test("cardUpdate can change list fields (JSON round-trip)", () => {
+  claude.clear();
+  const card = claude.cardCreate({ title: "T", question: "q", insights: ["first insight"] });
+  const updated = claude.cardUpdate(card.id, {
+    insights: ["first insight", "second insight"],
+    attacks: ["a critique"],
+  });
+  assert.deepEqual(updated.insights, ["first insight", "second insight"]);
+  assert.deepEqual(updated.attacks, ["a critique"]);
+  assert.deepEqual(claude.cardGet(card.id).insights, ["first insight", "second insight"]);
+});
+
+test("cardUpdate rejects an update with no recognized fields", () => {
+  claude.clear();
+  const card = claude.cardCreate({ title: "T", question: "q" });
+  assert.throws(
+    () => claude.cardUpdate(card.id, {}),
+    /card update requires at least one field/,
+  );
+});
+
+test("cardUpdate rejects an empty title/question", () => {
+  claude.clear();
+  const card = claude.cardCreate({ title: "T", question: "q" });
+  assert.throws(() => claude.cardUpdate(card.id, { title: "" }), /title cannot be empty/);
+  assert.throws(() => claude.cardUpdate(card.id, { question: "  " }), /question cannot be empty/);
+});
+
+test("cardUpdate rejects an invalid claim_kind", () => {
+  claude.clear();
+  const card = claude.cardCreate({ title: "T", question: "q" });
+  assert.throws(
+    () => claude.cardUpdate(card.id, { claim_kind: "vibes" }),
+    /invalid claim_kind/,
+  );
+});
+
+test("cardUpdate on a missing card throws", () => {
+  assert.throws(() => claude.cardUpdate(999999, { title: "x" }), /no science card/);
+});
+
+test("cardUpdate ignores an unrecognized/disallowed field such as phase, leaving phase and history untouched", () => {
+  claude.clear();
+  const card = claude.cardCreate({ title: "T", question: "q" });
+  claude.cardTransition(card.id, "DIVERGE");
+
+  // `phase` is not in CARD_UPDATE_FIELDS; a caller passing it anyway (e.g.
+  // from untyped JS or a permissive JSON body) must not move the phase or
+  // write transition history — only cardTransition can do that.
+  const updated = claude.cardUpdate(card.id, { title: "renamed", phase: "SUPPORTED" });
+  assert.equal(updated.title, "renamed");
+  assert.equal(updated.phase, "DIVERGE", "phase is untouched by cardUpdate");
+
+  const detail = claude.cardGet(card.id);
+  assert.equal(detail.transitions.length, 1, "no new transition history written by cardUpdate");
+});
+
 // --- claim-status vs evidence-status: the empirical-claim SUPPORTED gate --
 
 test("an empirical card cannot be SUPPORTED on derivation/formal-check evidence alone", () => {
