@@ -82,6 +82,97 @@ Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim 
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
 
+## Science Cards: an end-to-end example
+
+Science Cards are squad's structured tracker for a claim under investigation: `QUESTION` → `DIVERGE` → `ORIENT` → `HYPOTHESIZE` → `DERIVE` → `ATTACK` → `SIMULATE` → `EXPERIMENT` → `REPLICATE` → `SUPPORTED` / `FALSIFIED` / `INCONCLUSIVE`, with a `LEARN` → `PIVOT` reflection loop reachable from most active phases and an `ABANDONED` escape hatch. Each `squad card` / `squad_card_*` call below is exactly what the corresponding agent's MCP tool call does (`squad_card_create`, `squad_card_transition`, `squad_card_evidence_add`, `squad_diverge_*`) — shown as `SQUAD_PERSONA`-prefixed CLI commands so the whole walkthrough is copy-pasteable in one terminal instead of split across two live agent sessions. Claude and Codex are peers here: identical tools, no special casing.
+
+The example below is a real reproducer, not aspirational — every command is exercised end-to-end (divergence round, phase transitions, evidence attachment, an evidence-gated transition, a `LEARN` → `PIVOT` loop, and a negative terminal state) by `tests/science-card-lifecycle.test.mjs`, so it stays true to the actual behavior rather than drifting from it.
+
+```
+# claude opens the investigation
+$ SQUAD_PERSONA=claude squad card create --title "Cache invalidation off-by-one" \
+    "Does the LRU evict one entry too many under concurrent access?"
+opened card #1 [QUESTION]: Cache invalidation off-by-one
+
+# claude moves to DIVERGE and opens a round scoped to the card — each
+# persona proposes a root cause independently; nobody sees the other's
+# entry until the round closes
+$ SQUAD_PERSONA=claude squad card transition 1 DIVERGE
+card #1 -> DIVERGE
+$ SQUAD_PERSONA=claude squad diverge open --card 1 --expect claude,codex \
+    "root cause of the extra eviction?"
+opened divergence round #1: root cause of the extra eviction?
+
+$ SQUAD_PERSONA=claude squad diverge submit 1 \
+    "Suspect the eviction counter increments before the write lock releases"
+submitted to round #1 (claude)
+$ SQUAD_PERSONA=codex squad diverge submit 1 \
+    "Suspect a stale read of size() during resize"
+submitted to round #1 (codex)   # round auto-closes: both expected participants have submitted
+
+$ SQUAD_PERSONA=claude squad diverge status 1
+round #1: root cause of the extra eviction? [closed]
+submitted: claude, codex
+  <claude> Suspect the eviction counter increments before the write lock releases
+  <codex> Suspect a stale read of size() during resize
+
+# they settle on codex's resize theory and drive it through the chain,
+# attaching evidence as they go
+$ SQUAD_PERSONA=claude squad card transition 1 ORIENT
+$ SQUAD_PERSONA=codex squad card transition 1 HYPOTHESIZE \
+    "stale size() read during resize causes double eviction"
+$ SQUAD_PERSONA=codex squad card evidence 1 derivation docs/lru-notes.md#resize \
+    "worked through the resize path by hand; confirms size() can read stale mid-resize"
+$ SQUAD_PERSONA=codex squad card transition 1 DERIVE
+
+$ SQUAD_PERSONA=claude squad card transition 1 ATTACK
+$ SQUAD_PERSONA=claude squad card evidence 1 literature docs/lru-notes.md#locking \
+    "prior incident report rules out the lock-release theory"
+$ SQUAD_PERSONA=claude squad card transition 1 SIMULATE
+$ SQUAD_PERSONA=claude squad card evidence 1 simulation sim-run-9 \
+    "resize race reproduces the extra eviction in a harness"
+$ SQUAD_PERSONA=claude squad card transition 1 EXPERIMENT
+$ SQUAD_PERSONA=claude squad card transition 1 REPLICATE
+
+# evidence-gated transition: an empirical claim can't reach SUPPORTED on
+# derivation/literature/simulation evidence alone — this is rejected
+$ SQUAD_PERSONA=claude squad card transition 1 SUPPORTED
+squad: card 1 declares an empirical claim and needs at least one experiment or observation
+evidence item before it can be marked SUPPORTED (derivation/formal-check/simulation/literature
+evidence alone is not sufficient)     # one real line, wrapped here for width; exit code 1
+
+# codex runs the real replication — and it comes back negative for the
+# resize-only theory
+$ SQUAD_PERSONA=codex squad card evidence 1 experiment ci-run-4901 \
+    "replication on a second machine: off-by-one does NOT reproduce with only the resize race enabled"
+
+# LEARN -> PIVOT: rather than force a SUPPORTED the evidence doesn't back,
+# the team reflects and revises the hypothesis
+$ SQUAD_PERSONA=claude squad card transition 1 LEARN \
+    "replication is inconsistent across hosts"
+$ SQUAD_PERSONA=claude squad card transition 1 PIVOT \
+    "revising: resize race only manifests when a GC pause stretches the write-lock window"
+$ SQUAD_PERSONA=claude squad card transition 1 HYPOTHESIZE \
+    "combined hypothesis: resize race + GC pause"
+
+# ... back through DERIVE / ATTACK / SIMULATE / EXPERIMENT / REPLICATE with
+# fresh evidence for the combined hypothesis (omitted here for brevity; see
+# tests/science-card-lifecycle.test.mjs for the full second pass) ...
+
+$ SQUAD_PERSONA=codex squad card evidence 1 experiment ci-run-5002 \
+    "reproduced the controlled GC-pause condition on real hardware: no excess eviction across 200 trials"
+$ SQUAD_PERSONA=claude squad card transition 1 REPLICATE
+$ SQUAD_PERSONA=claude squad card transition 1 FALSIFIED \
+    "combined hypothesis does not hold — the GC-pause condition never reproduces excess eviction"
+card #1 -> FALSIFIED
+
+# the negative outcome stays queryable — it is not silently hidden
+$ squad card list --all
+[FALSIFIED] #1 Cache invalidation off-by-one (empirical)
+```
+
+Two things worth calling out: the `SUPPORTED` gate only checks that a qualifying evidence *type* (`experiment`/`observation` for an empirical claim) exists — it can't judge whether the evidence's content actually supports the hypothesis, which is why the team's own judgment (not the system) is what turns this into a `LEARN` → `PIVOT` instead of a premature `SUPPORTED`. And `squad card list` hides terminal-phase cards by default (`--all` / `squad_card_list`'s `include_done: true` shows them) — but the underlying `cardList()` / `squad_card_get` never delete or lock away a `FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` card; negative results are exactly as durable and queryable as positive ones.
+
 ## Design notes
 
 - **One room per repo, on purpose.** The room's scope matches the work's scope, several projects can run squads independently, and `rm -rf .squad` resets exactly one of them. No named rooms, no TTLs, no allowlists, no crypto — if multi-host or encrypted coordination is ever needed, that's [safehouse](https://github.com/rjwalters/safehouse)'s job, and squad's conventions (persona-stamped sender, pull-only cursors, peek-vs-consume) are deliberately compatible with it.

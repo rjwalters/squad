@@ -13,3 +13,5 @@ If the `squad_*` MCP tools are not available, stop and tell the user the squad M
 - **"add evidence to #<id>":** call `squad_card_evidence_add` with a `type` (`derivation`, `formal-check`, `simulation`, `experiment`, `literature`, or `observation`), `provenance`, and an optional `body`.
 
 Report the resulting card state when done. Every card mutation is announced in chat, so a teammate in a `/squad:join` loop sees it on their next check.
+
+For a full narrative walkthrough — a divergence round, phase transitions with evidence attached, a rejected evidence-gated `SUPPORTED` attempt, a `LEARN` → `PIVOT` loop, and a `FALSIFIED` terminal state that stays queryable — see "Science Cards: an end-to-end example" in the repo's `README.md`.
