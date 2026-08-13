@@ -40,6 +40,53 @@ export interface ClaimView extends Claim {
   stale: boolean;
 }
 
+/**
+ * A divergence round: a bounded window where each participant submits
+ * independently and nobody's submission is visible to anyone (including the
+ * submitter checking others') until the round closes. `card_id` optionally
+ * references a Science Card but is nullable with no enforced foreign key —
+ * a round can stand alone.
+ */
+export interface DivergenceRound {
+  id: number;
+  card_id: number | null;
+  topic: string;
+  opened_by: string;
+  opened_ts: string;
+  /** Personas expected to submit, or null when the round only closes explicitly. */
+  expected_participants: string[] | null;
+  status: "open" | "closed";
+  closed_by: string | null;
+  closed_ts: string | null;
+}
+
+/** One persona's submission to a divergence round. */
+export interface DivergenceSubmission {
+  id: number;
+  round_id: number;
+  persona: string;
+  body: string;
+  submitted_ts: string;
+}
+
+/**
+ * Query-time view of a divergence round. While open, this is metadata only —
+ * which personas have submitted (not what) plus the caller's own submission,
+ * if any. Once closed, every submission is included.
+ */
+export type DivergenceStatus =
+  | {
+      round: DivergenceRound;
+      submitted_personas: string[];
+      submission_count: number;
+      /** The calling persona's own submission, or null if they haven't submitted yet. */
+      mine: DivergenceSubmission | null;
+    }
+  | {
+      round: DivergenceRound;
+      submissions: DivergenceSubmission[];
+    };
+
 const now = () => new Date().toISOString();
 
 /**
@@ -284,6 +331,148 @@ export class Squad {
     return released;
   }
 
+  private getRound(id: number): DivergenceRound {
+    const row = this.db.prepare("SELECT * FROM divergence_rounds WHERE id = ?").get(id) as
+      | (Omit<DivergenceRound, "expected_participants"> & { expected_participants: string | null })
+      | undefined;
+    if (!row) throw new Error(`no divergence round with id ${id}`);
+    return {
+      ...row,
+      expected_participants: row.expected_participants
+        ? (JSON.parse(row.expected_participants) as string[])
+        : null,
+    };
+  }
+
+  private submittedPersonas(roundId: number): string[] {
+    const rows = this.db
+      .prepare("SELECT DISTINCT persona FROM divergence_submissions WHERE round_id = ?")
+      .all(roundId) as unknown as Array<{ persona: string }>;
+    return rows.map((r) => r.persona);
+  }
+
+  /** Shared close path for both explicit close and auto-close-on-all-participants. */
+  private closeRound(round: DivergenceRound, mode: "explicit" | "auto"): void {
+    const ts = now();
+    this.db
+      .prepare(
+        "UPDATE divergence_rounds SET status = 'closed', closed_by = ?, closed_ts = ? WHERE id = ?",
+      )
+      .run(this.persona, ts, round.id);
+    const count = this.submittedPersonas(round.id).length;
+    const note = mode === "auto" ? " (all expected participants submitted)" : "";
+    this.send(
+      `${this.persona} closed divergence round #${round.id} (${round.topic})${note}: ` +
+        `${count} submission(s) revealed`,
+      "system",
+    );
+  }
+
+  /**
+   * Opens a divergence round and announces it to chat as a system message.
+   * The announcement carries only the topic — never a submission body, since
+   * none exist yet at open time. `card_id` is nullable and unenforced (no FK):
+   * a round can stand alone or reference a Science Card once one exists.
+   */
+  divergeOpen(
+    topic: string,
+    opts: { cardId?: number | null; expectedParticipants?: string[] | null } = {},
+  ): DivergenceRound {
+    this.touch();
+    const ts = now();
+    const cardId = opts.cardId ?? null;
+    const expected = opts.expectedParticipants ?? null;
+    const { lastInsertRowid } = this.db
+      .prepare(
+        `INSERT INTO divergence_rounds (card_id, topic, opened_by, opened_ts, expected_participants, status)
+         VALUES (?, ?, ?, ?, ?, 'open')`,
+      )
+      .run(cardId, topic, this.persona, ts, expected ? JSON.stringify(expected) : null);
+    const id = Number(lastInsertRowid);
+    this.send(`${this.persona} opened divergence round #${id}: ${topic}`, "system");
+    return {
+      id,
+      card_id: cardId,
+      topic,
+      opened_by: this.persona,
+      opened_ts: ts,
+      expected_participants: expected,
+      status: "open",
+      closed_by: null,
+      closed_ts: null,
+    };
+  }
+
+  /**
+   * Records this persona's submission to an open round. Resubmission by the
+   * same persona overwrites their prior submission (idempotent-per-persona, no
+   * duplicate rows) rather than creating a second entry. Auto-closes the round
+   * (and reveals it in chat) once every persona in `expected_participants` has
+   * submitted, when that list was provided at open time. Returns the same
+   * hidden-until-reveal view as divergeStatus — it never surfaces another
+   * persona's submission body while the round is still open.
+   */
+  divergeSubmit(roundId: number, body: string): DivergenceStatus {
+    this.touch();
+    const round = this.getRound(roundId);
+    if (round.status === "closed") {
+      throw new Error(`divergence round #${roundId} is already closed`);
+    }
+    const ts = now();
+    this.db
+      .prepare(
+        `INSERT INTO divergence_submissions (round_id, persona, body, submitted_ts) VALUES (?, ?, ?, ?)
+         ON CONFLICT(round_id, persona) DO UPDATE SET body = excluded.body, submitted_ts = excluded.submitted_ts`,
+      )
+      .run(roundId, this.persona, body, ts);
+
+    if (round.expected_participants && round.expected_participants.length > 0) {
+      const submitted = this.submittedPersonas(roundId);
+      const allIn = round.expected_participants.every((p) => submitted.includes(p));
+      if (allIn) this.closeRound(round, "auto");
+    }
+
+    return this.divergeStatus(roundId);
+  }
+
+  /**
+   * Query-time view of a round. While open, this never reveals another
+   * persona's submission body — only metadata (which personas have
+   * submitted, and how many) plus the caller's own submission, if any. Once
+   * closed, every submission is included.
+   */
+  divergeStatus(roundId: number): DivergenceStatus {
+    this.touch();
+    const round = this.getRound(roundId);
+    const rows = this.db
+      .prepare("SELECT * FROM divergence_submissions WHERE round_id = ? ORDER BY id ASC")
+      .all(roundId) as unknown as DivergenceSubmission[];
+    if (round.status === "closed") {
+      return { round, submissions: rows };
+    }
+    const mine = rows.find((r) => r.persona === this.persona) ?? null;
+    return {
+      round,
+      submitted_personas: rows.map((r) => r.persona),
+      submission_count: rows.length,
+      mine,
+    };
+  }
+
+  /**
+   * Explicitly closes a round, revealing every submission and announcing the
+   * reveal in chat (submission bodies stay out of the chat message itself —
+   * callers read them back via divergeStatus). Idempotent: closing an
+   * already-closed round is a silent no-op that just returns the current
+   * (already-revealed) status.
+   */
+  divergeClose(roundId: number): DivergenceStatus {
+    this.touch();
+    const round = this.getRound(roundId);
+    if (round.status === "open") this.closeRound(round, "explicit");
+    return this.divergeStatus(roundId);
+  }
+
   members(): Member[] {
     return this.db
       .prepare("SELECT * FROM members ORDER BY last_seen DESC")
@@ -308,10 +497,11 @@ export class Squad {
     return { members: this.members(), goals: this.goals(), claims: this.claims(), recent };
   }
 
-  /** Wipe the room: all messages, goals, claims, cursors, and members. */
+  /** Wipe the room: all messages, goals, claims, cursors, members, and divergence rounds. */
   clear(): void {
     this.db.exec(
-      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; DELETE FROM members;",
+      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; " +
+        "DELETE FROM members; DELETE FROM divergence_submissions; DELETE FROM divergence_rounds;",
     );
   }
 }
