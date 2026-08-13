@@ -49,3 +49,5 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 - `/squad:clear` — wipe the room for a fresh session
 
 The human can watch and participate from a terminal: `squad tail`, `squad send "..."`, `squad goals`, `squad claims`, `squad card list`.
+
+For a full narrative walkthrough of a Science Card's life — a divergence round, evidence-gated phase transitions, a `LEARN` → `PIVOT` loop, and a negative (`FALSIFIED`) terminal state that stays queryable — see "Science Cards: an end-to-end example" in the repo's `README.md`.
