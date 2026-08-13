@@ -388,13 +388,6 @@ export class Squad {
     }
   }
 
-  unreadCount(): number {
-    const row = this.db
-      .prepare("SELECT COUNT(*) AS n FROM messages WHERE id > ? AND sender != ?")
-      .get(this.cursor(), this.persona) as { n: number };
-    return row.n;
-  }
-
   goals(includeDone = false): Goal[] {
     this.touch();
     const sql = includeDone
