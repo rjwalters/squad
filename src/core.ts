@@ -124,7 +124,7 @@ export type EvidenceType =
   | "literature"
   | "observation";
 
-const EVIDENCE_TYPES: readonly EvidenceType[] = [
+export const EVIDENCE_TYPES: readonly EvidenceType[] = [
   "derivation",
   "formal-check",
   "simulation",
@@ -156,6 +156,27 @@ const TRANSITIONS: Record<CardPhase, readonly CardPhase[]> = {
   INCONCLUSIVE: ["LEARN"],
   ABANDONED: [],
 };
+
+/**
+ * Every `CardPhase` value, in the same order as the TRANSITIONS graph above.
+ * The single runtime source of truth for the phase enum, so callers building
+ * an input validator (e.g. an MCP tool's zod schema) or a CLI usage message
+ * reuse this instead of re-declaring the 15-name list themselves.
+ */
+export const CARD_PHASES: readonly CardPhase[] = Object.keys(TRANSITIONS) as CardPhase[];
+
+/**
+ * The chain's terminal/outcome phases: a card here is "done" investigating
+ * (barring a LEARN/PIVOT reopen). Used to give `cardList` callers a
+ * `squad_goals`-style "active by default, opt in to also see done" view even
+ * though `cardList` itself always returns every phase unless narrowed.
+ */
+export const CARD_TERMINAL_PHASES: readonly CardPhase[] = [
+  "SUPPORTED",
+  "FALSIFIED",
+  "INCONCLUSIVE",
+  "ABANDONED",
+];
 
 /** Evidence types that count as "empirical" for the SUPPORTED gate. */
 const EMPIRICAL_EVIDENCE_TYPES: readonly EvidenceType[] = ["experiment", "observation"];

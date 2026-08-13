@@ -1,5 +1,11 @@
 import { openDb, dbPath, squadDir } from "./db.js";
-import { Squad, type Message } from "./core.js";
+import {
+  Squad,
+  CARD_TERMINAL_PHASES,
+  type CardPhase,
+  type EvidenceType,
+  type Message,
+} from "./core.js";
 import { rmSync } from "node:fs";
 
 const HELP = `squad — local cross-agent chat room with shared goals
@@ -26,6 +32,18 @@ Human CLI usage:
                                full submissions only once the round is closed
   squad diverge close <round_id>
                                Explicitly close a round and reveal all submissions
+  squad card create [--title <text>] [--claim-kind empirical|formal] <question...>
+                               Open a Science Card in the QUESTION phase
+  squad card list [--all]     Show cards (active only; --all also shows
+                               SUPPORTED/FALSIFIED/INCONCLUSIVE/ABANDONED)
+  squad card show <id>        Full detail: card fields + evidence + transitions
+  squad card transition <id> <phase> [note...]
+                               Move a card to a new phase (validated)
+  squad card evidence <id> <type> <provenance> [body...]
+                               Attach an evidence item (type: derivation,
+                               formal-check, simulation, experiment, literature,
+                               observation; provenance is one token — quote it
+                               if it contains spaces)
   squad who                   Show members and last-seen times
   squad clear                 Wipe messages, goals, claims, cursors, members, and
                                divergence rounds/submissions
@@ -286,6 +304,99 @@ export async function runCli(argv: string[]): Promise<void> {
       }
       break;
     }
+    case "card": {
+      const [sub, ...args] = rest;
+      if (sub === "create") {
+        const tokens = [...args];
+        let title: string | undefined;
+        let claimKind: "empirical" | "formal" | undefined;
+        while (tokens[0] === "--title" || tokens[0] === "--claim-kind") {
+          const flag = tokens.shift();
+          const val = tokens.shift();
+          if (flag === "--title") {
+            title = (val ?? "").trim();
+          } else {
+            if (val !== "empirical" && val !== "formal") {
+              throw new Error("usage: squad card create --claim-kind empirical|formal ...");
+            }
+            claimKind = val;
+          }
+        }
+        const question = tokens.join(" ").trim();
+        if (!question) {
+          throw new Error(
+            "usage: squad card create [--title <text>] [--claim-kind empirical|formal] <question...>",
+          );
+        }
+        const card = squad.cardCreate({
+          title: title || question,
+          question,
+          claim_kind: claimKind,
+        });
+        console.log(`opened card #${card.id} [${card.phase}]: ${card.title}`);
+      } else if (sub === "list") {
+        const showAll = args.includes("--all");
+        const cards = squad.cardList();
+        const filtered = showAll
+          ? cards
+          : cards.filter((c) => !CARD_TERMINAL_PHASES.includes(c.phase));
+        if (filtered.length === 0) {
+          console.log(
+            showAll
+              ? "no cards yet — squad card create <question...>"
+              : "no active cards — squad card create <question...> (or pass --all to include done cards)",
+          );
+        }
+        for (const c of filtered) {
+          console.log(`[${c.phase}] #${c.id} ${c.title} (${c.claim_kind})`);
+        }
+      } else if (sub === "show") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error("usage: squad card show <id>");
+        const card = squad.cardGet(id);
+        console.log(`#${card.id} [${card.phase}] ${card.title} (${card.claim_kind})`);
+        console.log(`  question: ${card.question}`);
+        console.log(`  created by ${card.created_by} at ${card.created_ts}`);
+        if (card.transitions.length === 0) {
+          console.log("  transitions: none");
+        } else {
+          console.log("  transitions:");
+          for (const t of card.transitions) {
+            console.log(`    ${t.ts} ${t.persona} ${t.from_phase} -> ${t.to_phase}${t.note ? `: ${t.note}` : ""}`);
+          }
+        }
+        if (card.evidence.length === 0) {
+          console.log("  evidence: none");
+        } else {
+          console.log("  evidence:");
+          for (const e of card.evidence) {
+            console.log(`    #${e.id} [${e.type}] ${e.provenance} (${e.persona})${e.body ? `: ${e.body}` : ""}`);
+          }
+        }
+      } else if (sub === "transition") {
+        const id = parseInt(args[0] ?? "", 10);
+        const toPhase = args[1] as CardPhase | undefined;
+        const note = args.slice(2).join(" ").trim() || undefined;
+        if (Number.isNaN(id) || !toPhase) {
+          throw new Error("usage: squad card transition <id> <phase> [note...]");
+        }
+        const card = squad.cardTransition(id, toPhase, note);
+        console.log(`card #${card.id} -> ${card.phase}`);
+      } else if (sub === "evidence") {
+        const id = parseInt(args[0] ?? "", 10);
+        const type = args[1] as EvidenceType | undefined;
+        const provenance = args[2];
+        const body = args.slice(3).join(" ").trim() || undefined;
+        if (Number.isNaN(id) || !type || !provenance) {
+          throw new Error("usage: squad card evidence <id> <type> <provenance> [body...]");
+        }
+        const ev = squad.cardEvidenceAdd(id, type, provenance, body);
+        console.log(`added ${ev.type} evidence #${ev.id} to card #${id}: ${ev.provenance}`);
+      } else {
+        throw new Error("usage: squad card [create|list|show|transition|evidence] ...");
+      }
+      break;
+    }
     case "who": {
       for (const m of squad.members()) console.log(`${m.persona}\tlast seen ${m.last_seen}`);
       break;
@@ -319,6 +430,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "claim",
       "release",
       "diverge",
+      "card",
       "who",
       "clear",
       "nuke",

@@ -35,6 +35,11 @@ Everything is **pull-only**: nothing ever pushes into an agent's context or wake
 | `squad_goal_add` / `squad_goal_done` / `squad_goal_reopen` | Mutate the goal board (`reopen` undoes a mistaken `done`). Every mutation is auto-announced in chat as a system message, so agents learn about goal changes through the same check loop — one polling mechanism, and the chat log doubles as the audit trail. |
 | `squad_claims` | List the advisory file claims: who holds what, since when, and whether the claim is `stale` (its holder has been absent). |
 | `squad_claim` / `squad_release` | Stake or drop an advisory claim on a file path (or freeform area label), auto-announced in chat. **Advisory, never a lock** — the point is that a claim is visible in `squad_join`/`squad_check` *before* an edit lands, whereas an "I'm editing X" chat message races with the teammate's edit. Claims go stale with their holder's `last_seen`, so a peer can take one over explicitly. |
+| `squad_card_create` | Open a Science Card (`title` + `question` required; everything else optional) in the `QUESTION` phase, auto-announced in chat. |
+| `squad_card_list` | List Science Cards — active phases only by default; `include_done: true` also shows `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` cards. |
+| `squad_card_get` | Full detail for one card: its fields plus complete evidence and phase-transition history. |
+| `squad_card_transition` | Move a card to a new phase, validated against the allowed-transition graph (illegal moves are rejected with an error naming what's actually allowed); an empirical-claim card also needs experiment/observation evidence before reaching `SUPPORTED`. Auto-announced in chat. |
+| `squad_card_evidence_add` | Attach an evidence item (`type` + `provenance`, optional `body`) to a card, auto-announced in chat. |
 | `squad_clear` | Wipe the room. |
 
 Goals are squad-scoped, not assigned: agents negotiate division of labor in chat, which is exactly the collaboration you want to see in the transcript.
@@ -73,7 +78,7 @@ Commands (`join` and `goals` behave the same in both harnesses):
 - **goals** — show the shared board, or add goals from arguments
 - **clear** — wipe the room for a fresh session (Claude only; from Codex or a terminal, use `squad clear`)
 
-Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | who | clear | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset.
+Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | card [create|list|show|transition|evidence] | who | clear | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` — see `squad help` for the full subcommand list.
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
 

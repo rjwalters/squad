@@ -20,7 +20,7 @@ usage: ./install.sh [options] [target-repo]
 Installs into the target repo (default .):
   .mcp.json                        squad MCP entry for Claude Code, with the
                                    room pinned to <repo>/.squad (persona "$CLAUDE_PERSONA")
-  .claude/commands/squad/*.md      /squad:join, /squad:goals, /squad:clear
+  .claude/commands/squad/*.md      /squad:join, /squad:goals, /squad:card, /squad:clear
   .claude/skills/squad/SKILL.md    conventions + tool reference
   .claude/skills/squad/install-metadata.json
                                    installed version + commit (tracked), so
@@ -38,7 +38,7 @@ one-time-per-machine, not per target repo:
                                    finds each repo's room from Codex's working
                                    directory, so start codex inside the repo
   squad CLI on PATH                \`npm link\` from $SRC, so the human CLI
-                                   (\`squad send|read|tail|goals|claims|claim|release|who|clear|path\`)
+                                   (\`squad send|read|tail|goals|claims|claim|release|card|who|clear|path\`)
                                    works from any target repo. If it's skipped
                                    or npm can't write the global prefix, the
                                    closing output prints the equivalent
@@ -107,7 +107,7 @@ if [[ $DRY -eq 1 ]]; then
     echo
   fi
   echo "target repo ($TARGET):"
-  echo "  .claude/commands/squad/*.md          copy /squad:join, /squad:goals, /squad:clear"
+  echo "  .claude/commands/squad/*.md          copy /squad:join, /squad:goals, /squad:card, /squad:clear"
   echo "  .claude/skills/squad/SKILL.md        copy skill"
   echo "  .claude/skills/squad/install-metadata.json"
   echo "                                       version $VERSION_VALUE, commit $COMMIT, layout_version 1 (tracked)"
@@ -259,6 +259,12 @@ Tools (all pull-based; nothing ever wakes you):
   change is auto-announced and current claims ride along in \`squad_join\`, so
   a claim is visible before an edit lands. Advisory, never a lock; a claim
   lists as \`stale\` once its holder has been absent, so it can be taken over
+- \`squad_card_create\` / \`squad_card_list\` / \`squad_card_get\` /
+  \`squad_card_transition\` / \`squad_card_evidence_add\` — Science Cards: a
+  structured tracker for a claim moving through QUESTION -> ... ->
+  SUPPORTED/FALSIFIED/INCONCLUSIVE/ABANDONED. Transitions are validated
+  against the allowed graph and evidence-gated for SUPPORTED; every mutation
+  is auto-announced
 - \`squad_clear\` — wipe the room (destructive; needs explicit user intent)
 
 Conventions: claim a goal in chat before working on it; report results when
@@ -270,7 +276,8 @@ delete files you did not create, however scratch-like they look — untracked
 a teammate left you a message.
 
 Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
-the loop: check(wait 25s) → respond/work → repeat.
+the loop: check(wait 25s) → respond/work → repeat. Claude also gets
+\`/squad:card\` for Science Card operations.
 EOF
 write_block "$TARGET/CLAUDE.md" "$BLOCK"
 write_block "$TARGET/AGENTS.md" "$BLOCK"
