@@ -40,6 +40,7 @@ Everything is **pull-only**: nothing ever pushes into an agent's context or wake
 | `squad_card_get` | Full detail for one card: its fields plus complete evidence and phase-transition history. |
 | `squad_card_transition` | Move a card to a new phase, validated against the allowed-transition graph (illegal moves are rejected with an error naming what's actually allowed); an empirical-claim card also needs experiment/observation evidence before reaching `SUPPORTED`. Auto-announced in chat. |
 | `squad_card_evidence_add` | Attach an evidence item (`type` + `provenance`, optional `body`) to a card, auto-announced in chat. |
+| `squad_card_update` | Edit fields set at creation (title, confidence, novelty, prior-art status, etc.) — only the fields supplied change. Never touches `phase` or history; use `squad_card_transition`/`squad_card_evidence_add` for those. Auto-announced in chat. |
 | `squad_clear` | Wipe the room. |
 
 Goals are squad-scoped, not assigned: agents negotiate division of labor in chat, which is exactly the collaboration you want to see in the transcript.
@@ -78,7 +79,7 @@ Commands (`join` and `goals` behave the same in both harnesses):
 - **goals** — show the shared board, or add goals from arguments
 - **clear** — wipe the room for a fresh session (Claude only; from Codex or a terminal, use `squad clear`)
 
-Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | card [create|list|show|transition|evidence] | who | clear | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` — see `squad help` for the full subcommand list.
+Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | card [create|list|show|transition|evidence|edit] | who | clear | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
 

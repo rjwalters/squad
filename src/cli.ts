@@ -3,10 +3,56 @@ import {
   Squad,
   CARD_TERMINAL_PHASES,
   type CardPhase,
+  type CardUpdateFields,
   type EvidenceType,
   type Message,
 } from "./core.js";
 import { rmSync } from "node:fs";
+
+/**
+ * `squad card edit` flag -> `CardUpdateFields` key. Deliberately has no
+ * `--phase`/`--status`/`--history` entry: an unrecognized flag is rejected
+ * (see the `card edit` branch below), so phase/status/history can never be
+ * changed through this path — only `squad card transition` moves phase.
+ */
+const CARD_EDIT_FLAGS: Record<string, keyof CardUpdateFields> = {
+  "--title": "title",
+  "--question": "question",
+  "--claim-kind": "claim_kind",
+  "--origin-method": "origin_method",
+  "--origin-contributors": "origin_contributors",
+  "--changed-assumptions": "changed_assumptions",
+  "--proposed-mechanism": "proposed_mechanism",
+  "--math-model": "math_model",
+  "--standard-prediction": "standard_prediction",
+  "--discriminating-prediction": "discriminating_prediction",
+  "--decisive-falsifier": "decisive_falsifier",
+  "--cheapest-test": "cheapest_test",
+  "--prior-art-status": "prior_art_status",
+  "--confidence": "confidence",
+  "--novelty": "novelty",
+  "--attempts": "attempts",
+  "--attacks": "attacks",
+  "--insights": "insights",
+  "--post-mortems": "post_mortems",
+};
+
+/** `card edit` fields that take a comma-separated list rather than free text. */
+const CARD_EDIT_LIST_FIELDS = new Set<keyof CardUpdateFields>([
+  "origin_contributors",
+  "changed_assumptions",
+  "attempts",
+  "attacks",
+  "insights",
+  "post_mortems",
+]);
+
+/** `card edit` fields that take a number rather than free text. */
+const CARD_EDIT_NUMBER_FIELDS = new Set<keyof CardUpdateFields>(["confidence", "novelty"]);
+
+const CARD_EDIT_USAGE =
+  "usage: squad card edit <id> --field value [--field value ...] " +
+  `(fields: ${Object.keys(CARD_EDIT_FLAGS).join(", ")})`;
 
 const HELP = `squad — local cross-agent chat room with shared goals
 
@@ -44,6 +90,13 @@ Human CLI usage:
                                formal-check, simulation, experiment, literature,
                                observation; provenance is one token — quote it
                                if it contains spaces)
+  squad card edit <id> --field value [--field value ...]
+                               Edit fields set at creation (title, confidence,
+                               novelty, prior-art status, etc.) — never phase;
+                               use 'squad card transition' for that. Each flag
+                               takes one token (quote multi-word values). List
+                               fields (e.g. --insights) take a comma-separated
+                               value.
   squad who                   Show members and last-seen times
   squad clear                 Wipe messages, goals, claims, cursors, members, and
                                divergence rounds/submissions
@@ -392,8 +445,39 @@ export async function runCli(argv: string[]): Promise<void> {
         }
         const ev = squad.cardEvidenceAdd(id, type, provenance, body);
         console.log(`added ${ev.type} evidence #${ev.id} to card #${id}: ${ev.provenance}`);
+      } else if (sub === "edit") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error(CARD_EDIT_USAGE);
+        const tokens = args.slice(1);
+        if (tokens.length === 0) throw new Error(CARD_EDIT_USAGE);
+        const fields: Partial<Record<keyof CardUpdateFields, unknown>> = {};
+        while (tokens.length > 0) {
+          const flag = tokens.shift();
+          const fieldKey = flag !== undefined ? CARD_EDIT_FLAGS[flag] : undefined;
+          if (!fieldKey) {
+            throw new Error(`${CARD_EDIT_USAGE} (unrecognized flag '${flag ?? ""}')`);
+          }
+          const raw = tokens.shift();
+          if (raw === undefined) {
+            throw new Error(`${CARD_EDIT_USAGE} (${flag} needs a value)`);
+          }
+          if (CARD_EDIT_LIST_FIELDS.has(fieldKey)) {
+            fields[fieldKey] = raw
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean);
+          } else if (CARD_EDIT_NUMBER_FIELDS.has(fieldKey)) {
+            const n = Number(raw);
+            if (Number.isNaN(n)) throw new Error(`${CARD_EDIT_USAGE} (${flag} needs a number)`);
+            fields[fieldKey] = n;
+          } else {
+            fields[fieldKey] = raw;
+          }
+        }
+        const card = squad.cardUpdate(id, fields as CardUpdateFields);
+        console.log(`card #${card.id} updated [${card.phase}]: ${card.title}`);
       } else {
-        throw new Error("usage: squad card [create|list|show|transition|evidence] ...");
+        throw new Error("usage: squad card [create|list|show|transition|evidence|edit] ...");
       }
       break;
     }
