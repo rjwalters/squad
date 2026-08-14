@@ -285,11 +285,17 @@ Tools (all pull-based; nothing ever wakes you):
   lists as \`stale\` once its holder's presence lease expires, so it can be
   taken over
 - \`squad_card_create\` / \`squad_card_list\` / \`squad_card_get\` /
-  \`squad_card_transition\` / \`squad_card_evidence_add\` — Science Cards: a
-  structured tracker for a claim moving through QUESTION -> ... ->
+  \`squad_card_transition\` / \`squad_card_evidence_add\` /
+  \`squad_card_update\` — Science Cards: a structured tracker for a claim
+  moving through QUESTION -> ... ->
   SUPPORTED/FALSIFIED/INCONCLUSIVE/ABANDONED. Transitions are validated
-  against the allowed graph and evidence-gated for SUPPORTED; every mutation
-  is auto-announced
+  against the allowed graph and evidence-gated for SUPPORTED; \`update\` edits
+  creation-time fields only, never phase; every mutation is auto-announced
+- \`squad_diverge_open\` / \`squad_diverge_submit\` / \`squad_diverge_status\` /
+  \`squad_diverge_close\` — divergence rounds: each participant submits
+  independently and nothing is revealed until the round closes (explicitly,
+  or automatically once every expected participant has submitted) — use one
+  before discussing, when independent takes matter
 - \`squad_clear\` — wipe the room (destructive; needs explicit user intent)
 
 Conventions: claim a goal in chat before working on it; report results when

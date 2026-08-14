@@ -55,6 +55,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets the active→idle window inside the existing `SQUAD_STALE_MINUTES`
   (default 30) lease; `squad who` shows presence state, and `squad clear` /
   `squad_clear` wipe sessions along with everything else.
+- Science Card update surface (#37): `squad_card_update` MCP tool and
+  `squad card edit <id> --field value ...` CLI subcommand for editing fields
+  set at creation (title, confidence, novelty, prior-art status, etc.) without
+  touching `phase` or history, plus a DB-migration test.
+- End-to-end Science Card walkthrough (#35): a full-lifecycle README example —
+  divergence round, phase transitions with evidence, the evidence gate on
+  `SUPPORTED`, a `LEARN` → `PIVOT` loop, and a `FALSIFIED` terminal state —
+  kept honest by `tests/science-card-lifecycle.test.mjs`.
+- Science Card CLI + MCP surface (#33): `squad card
+  [create|list|show|transition|evidence]` subcommands and the
+  `squad_card_create` / `squad_card_list` / `squad_card_get` /
+  `squad_card_transition` / `squad_card_evidence_add` MCP tools; `CARD_PHASES`,
+  `CARD_TERMINAL_PHASES`, and `EVIDENCE_TYPES` exported as the single runtime
+  source of truth.
+- Science Card schema, storage, and phase-transition core (#29): cards move
+  `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` along a
+  validated transition graph; an empirical claim needs `experiment` or
+  `observation` evidence before `SUPPORTED`. Canonical JSON Schema in
+  `schema/science-card.schema.json`.
+- Divergence rounds (#27): `squad_diverge_open` / `squad_diverge_submit` /
+  `squad_diverge_status` / `squad_diverge_close` MCP tools and `squad diverge
+  open|submit|status|close` CLI subcommands — a bounded window where each
+  participant submits independently and nothing is revealed until the round
+  closes (explicitly, or automatically once every expected participant has
+  submitted); resubmission upserts.
 - `squad doctor` (#15): a preflight/diagnostic CLI subcommand that checks
   whether the MCP server's runtime dependencies (`@modelcontextprotocol/sdk`,
   `zod`) actually resolve, whether the database is reachable, and how the
@@ -74,6 +99,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `squad clear` / `squad_clear` wipe claims along with the other tables.
 
 ### Changed
+- Bump `@types/node` 26.1.2 → 26.2.0 (#14).
 - Squad conventions now say: claim a file before editing it, and never delete
   files you did not create, however scratch-like they look — untracked ≠ yours
   (#12, mirrored across `skills/squad/SKILL.md`, `commands/squad/join.md`, and

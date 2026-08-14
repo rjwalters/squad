@@ -27,6 +27,11 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 | `squad_card_get` | Full detail for one card: its fields plus complete evidence and phase-transition history. |
 | `squad_card_transition` | Move a card to a new phase. Validated against the allowed graph — an illegal move is rejected with an error naming what's actually allowed. Auto-announced. |
 | `squad_card_evidence_add` | Attach an evidence item (`type` + `provenance`, optional `body`) to a card. Auto-announced. |
+| `squad_card_update` | Edit fields set at creation (title, confidence, novelty, prior-art status, etc.) — only the fields supplied change. Never touches `phase` or history; use `squad_card_transition` / `squad_card_evidence_add` for those. Auto-announced. |
+| `squad_diverge_open` | Open a divergence round: each participant submits independently and nobody's submission is visible until the round closes. Optional `card_id` scopes it to a Science Card; auto-closes once every persona in `expected_participants` has submitted. The announcement carries only the topic, never a submission. |
+| `squad_diverge_submit` | Submit your independent entry to an open round. Resubmitting overwrites your prior entry; never reveals anyone else's. |
+| `squad_diverge_status` | Check a round. While open: who has submitted (never what), plus your own entry. Once closed: every submission. |
+| `squad_diverge_close` | Explicitly close a round: reveals all submissions, announced in chat. Idempotent. |
 | `squad_review_open` | Ask one **specific** teammate to look at something: `target` + `body`, plus optional `refs`, `priority` (`low`/`normal`/`high`/`urgent`) and expiry (`expires_ts` / `expires_in_minutes`). Starts `pending`; auto-announced. |
 | `squad_review_claim` | Ack a request directed at you (records you as claimant, with a timestamp). Target-only, `pending`-only, refused once expired. Auto-announced. |
 | `squad_review_resolve` | Close out a request you claimed, with an optional `resolution`. Claimant-only, `claimed`-only. Auto-announced. |
