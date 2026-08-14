@@ -2,8 +2,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { openDb, dbPath } from "./db.js";
-import { Squad, CARD_PHASES, CARD_TERMINAL_PHASES, EVIDENCE_TYPES, REVIEW_PRIORITIES } from "./core.js";
-import type { CardPhase, EvidenceType, ReviewPriority } from "./core.js";
+import {
+  Squad,
+  CARD_PHASES,
+  CARD_TERMINAL_PHASES,
+  EVIDENCE_TYPES,
+  REVIEW_PRIORITIES,
+  REVIEW_STATUSES,
+} from "./core.js";
+import type { CardPhase, EvidenceType, ReviewPriority, ReviewStatus } from "./core.js";
 
 const MAX_WAIT_SECONDS = 240;
 
@@ -14,6 +21,7 @@ const MAX_WAIT_SECONDS = 240;
 const CARD_PHASE_ENUM = CARD_PHASES as unknown as [CardPhase, ...CardPhase[]];
 const EVIDENCE_TYPE_ENUM = EVIDENCE_TYPES as unknown as [EvidenceType, ...EvidenceType[]];
 const REVIEW_PRIORITY_ENUM = REVIEW_PRIORITIES as unknown as [ReviewPriority, ...ReviewPriority[]];
+const REVIEW_STATUS_ENUM = REVIEW_STATUSES as unknown as [ReviewStatus, ...ReviewStatus[]];
 
 function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -537,7 +545,7 @@ export async function runMcpServer(): Promise<void> {
         target: z.string().optional().describe("Only requests directed at this persona"),
         requested_by: z.string().optional().describe("Only requests opened by this persona"),
         status: z
-          .enum(["pending", "claimed", "resolved", "cancelled"])
+          .enum(REVIEW_STATUS_ENUM)
           .optional()
           .describe("Only requests in this state"),
         include_terminal: z

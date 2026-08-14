@@ -287,17 +287,24 @@ test("an expired pending request stops gating without any explicit cancel", () =
   assert.equal(codex.reviewGet(live.id).expired, false);
 });
 
-test("a request that expires while claimed also stops gating", () => {
+test("a request that expires while claimed also stops gating", async () => {
   claude.clear();
-  const req = claude.reviewOpen("codex", "claimed then expired", { expiresTs: future() });
+  // A short expiry that lapses *after* the claim lands, so the request is
+  // genuinely in the `claimed` state when its deadline passes.
+  const req = claude.reviewOpen("codex", "claimed then expired", {
+    expiresTs: new Date(Date.now() + 120).toISOString(),
+  });
   codex.reviewClaim(req.id);
-  assert.equal(codex.pendingReviews().length, 1);
+  assert.equal(codex.pendingReviews().length, 1, "gates while claimed and unexpired");
 
-  // Re-open the same ask with an expiry already in the past, claimed.
-  claude.clear();
-  const stale = claude.reviewOpen("codex", "expires under us", { expiresTs: past() });
-  assert.equal(codex.reviewGet(stale.id).expired, true);
-  assert.equal(codex.pendingReviews().length, 0);
+  await new Promise((r) => setTimeout(r, 250));
+
+  const view = codex.reviewGet(req.id);
+  assert.equal(view.status, "claimed", "expiry never mutates the stored status");
+  assert.equal(view.expired, true);
+  assert.equal(codex.pendingReviews().length, 0, "an expired claimed request stops gating");
+  assert.equal(codex.checkSummary().pending_review_count, 0);
+  assert.equal(codex.join().pending_reviews.length, 0);
 });
 
 test("an expired request cannot be claimed, but can still be resolved or cancelled", () => {

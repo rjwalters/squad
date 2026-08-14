@@ -163,6 +163,15 @@ const REVIEW_TRANSITIONS: Record<ReviewStatus, readonly ReviewStatus[]> = {
   cancelled: [],
 };
 
+/**
+ * Every `ReviewStatus`, derived from the transition graph so the runtime list
+ * and the type can never drift — the source of truth for CLI validation and
+ * the MCP tool enums.
+ */
+export const REVIEW_STATUSES: readonly ReviewStatus[] = Object.keys(
+  REVIEW_TRANSITIONS,
+) as ReviewStatus[];
+
 /** Statuses a request can still move out of — i.e. still open work. */
 export const REVIEW_OPEN_STATUSES: readonly ReviewStatus[] = ["pending", "claimed"];
 
@@ -1787,7 +1796,7 @@ export class Squad {
     const statuses: readonly ReviewStatus[] = opts.status
       ? [opts.status]
       : opts.includeTerminal
-        ? (Object.keys(REVIEW_TRANSITIONS) as ReviewStatus[])
+        ? REVIEW_STATUSES
         : REVIEW_OPEN_STATUSES;
     const where: string[] = [`status IN (${statuses.map(() => "?").join(",")})`];
     const params: string[] = [...statuses];

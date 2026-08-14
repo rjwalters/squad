@@ -3,6 +3,7 @@ import {
   Squad,
   CARD_TERMINAL_PHASES,
   REVIEW_PRIORITIES,
+  REVIEW_STATUSES,
   type CardPhase,
   type CardUpdateFields,
   type EvidenceType,
@@ -436,10 +437,24 @@ export async function runCli(argv: string[]): Promise<void> {
           const flag = tokens.shift();
           if (flag === "--all") continue;
           const val = tokens.shift();
-          if (flag === "--to") target = (val ?? "").trim();
-          else if (flag === "--from") requestedBy = (val ?? "").trim();
-          else if (flag === "--status") status = val as ReviewStatus;
-          else throw new Error(`${REVIEW_LIST_USAGE} (unrecognized flag '${flag ?? ""}')`);
+          if (flag === "--to" || flag === "--from" || flag === "--status") {
+            // A missing value would otherwise silently read as "" (or, for
+            // --status, as a typo'd status that matches nothing) — a filter
+            // that quietly says "nothing to do" is the worst failure mode for
+            // a gating primitive, so reject it loudly instead.
+            const value = (val ?? "").trim();
+            if (!value) throw new Error(`${REVIEW_LIST_USAGE} (${flag} needs a value)`);
+            if (flag === "--to") target = value;
+            else if (flag === "--from") requestedBy = value;
+            else {
+              if (!REVIEW_STATUSES.includes(value as ReviewStatus)) {
+                throw new Error(
+                  `${REVIEW_LIST_USAGE} (invalid status "${value}" — must be one of ${REVIEW_STATUSES.join(", ")})`,
+                );
+              }
+              status = value as ReviewStatus;
+            }
+          } else throw new Error(`${REVIEW_LIST_USAGE} (unrecognized flag '${flag ?? ""}')`);
         }
         const requests = squad.reviewList({
           target,

@@ -168,6 +168,41 @@ test("an expired request is hidden by default and cannot be claimed", () => {
   }
 });
 
+test("squad review list rejects a bad --status instead of silently listing nothing", () => {
+  const dir = freshDir();
+  try {
+    const opened = runCli(["review", "open", "--to", "codex", "look at this"], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "claude",
+    });
+    assert.equal(opened.status, 0, opened.stdout + opened.stderr);
+
+    // A typo must error, not read as "nothing to do".
+    const typo = runCli(["review", "list", "--status", "pendign"], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "codex",
+    });
+    assert.notEqual(typo.status, 0);
+    assert.match(typo.stderr, /invalid status "pendign"/);
+    assert.match(typo.stderr, /pending, claimed, resolved, cancelled/);
+
+    // A missing flag value is an error too, not an empty-string filter.
+    const missing = runCli(["review", "list", "--to"], { SQUAD_DIR: dir, SQUAD_PERSONA: "codex" });
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /--to needs a value/);
+
+    // The valid spelling still works.
+    const ok = runCli(["review", "list", "--status", "pending"], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "codex",
+    });
+    assert.equal(ok.status, 0, ok.stdout + ok.stderr);
+    assert.match(ok.stdout, /\[pending\] #1 claude -> codex/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("squad help documents the review command family", () => {
   const res = runCli(["help"]);
   assert.equal(res.status, 0);
