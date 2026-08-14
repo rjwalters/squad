@@ -2,8 +2,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { openDb, dbPath } from "./db.js";
-import { Squad, CARD_PHASES, CARD_TERMINAL_PHASES, EVIDENCE_TYPES } from "./core.js";
-import type { CardPhase, EvidenceType } from "./core.js";
+import {
+  Squad,
+  CARD_PHASES,
+  CARD_TERMINAL_PHASES,
+  EVIDENCE_TYPES,
+  REVIEW_PRIORITIES,
+  REVIEW_STATUSES,
+} from "./core.js";
+import type { CardPhase, EvidenceType, ReviewPriority, ReviewStatus } from "./core.js";
 
 const MAX_WAIT_SECONDS = 240;
 
@@ -13,6 +20,8 @@ const MAX_WAIT_SECONDS = 240;
 // here rather than re-declared.
 const CARD_PHASE_ENUM = CARD_PHASES as unknown as [CardPhase, ...CardPhase[]];
 const EVIDENCE_TYPE_ENUM = EVIDENCE_TYPES as unknown as [EvidenceType, ...EvidenceType[]];
+const REVIEW_PRIORITY_ENUM = REVIEW_PRIORITIES as unknown as [ReviewPriority, ...ReviewPriority[]];
+const REVIEW_STATUS_ENUM = REVIEW_STATUSES as unknown as [ReviewStatus, ...ReviewStatus[]];
 
 function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
@@ -49,7 +58,8 @@ export async function runMcpServer(): Promise<void> {
       description:
         "Join the squad room: opens a presence lease (returning your session_id and " +
         "lease_expires_at) and returns who else is here — each member annotated active/idle/" +
-        "stale — plus the current open goals, the advisory file claims, and recent chat " +
+        "stale — plus the current open goals, the advisory file claims, any directed review " +
+        "requests still gating you (pending_reviews, most urgent first), and recent chat " +
         "history. Your lease renews on every squad_* call, so nothing extra is needed to stay " +
         "active; call squad_leave when you are done. Advances your read cursor past the " +
         "returned history, so squad_check afterwards yields only new messages. Idempotent — " +
@@ -93,6 +103,8 @@ export async function runMcpServer(): Promise<void> {
         "consume them. Also returns your peers with their presence — active (mid-turn), idle " +
         "(paused but lease still good), or stale (lease expired; treat as gone) — so you can " +
         "tell a pause from a dead session without re-joining, plus your own renewed lease. " +
+        "Also returns pending_review_count/pending_reviews: the directed review requests still " +
+        "gating you, most urgent first, so you can work by priority instead of by chat order. " +
         "Pass wait_seconds to long-poll: the call blocks until a new message " +
         "arrives or the wait expires, which is how to hold a live conversation without busy-" +
         "polling. Keep wait_seconds at 25 or below unless the MCP tool timeout has been raised.",
@@ -112,15 +124,7 @@ export async function runMcpServer(): Promise<void> {
     },
     async ({ wait_seconds, peek }) => {
       const messages = await squad.checkWait(wait_seconds ?? 0, { peek });
-      const session = squad.session();
-      return json({
-        messages,
-        peers: squad.peers(),
-        session_id: session?.session_id ?? null,
-        lease_expires_at: session?.lease_expires_at ?? null,
-        open_goals: squad.goals().length,
-        active_claims: squad.claims().length,
-      });
+      return json({ messages, ...squad.checkSummary() });
     },
   );
 
@@ -442,11 +446,137 @@ export async function runMcpServer(): Promise<void> {
   );
 
   server.registerTool(
+    "squad_review_open",
+    {
+      description:
+        "Ask one specific teammate to look at something, as a durable directed request rather " +
+        "than a prose message that competes with ordinary chat. Carries a target persona, refs " +
+        "(commits/files/artifacts), a priority, and an optional expiry; starts in the pending " +
+        "state and is announced in chat as a system message. The target sees it as a " +
+        "pending-directed request in their next squad_join/squad_check, so re-entry can be " +
+        "priority-ordered instead of chronological. Use this when a specific peer's answer gates " +
+        "your progress; use squad_send for ordinary conversation.",
+      inputSchema: {
+        target: z.string().min(1).describe("The persona you are asking (e.g. 'codex')"),
+        body: z.string().min(1).describe("What you need them to look at, and why"),
+        refs: z
+          .array(z.string())
+          .optional()
+          .describe("Commit hashes, file paths, or artifact ids the request points at"),
+        priority: z
+          .enum(REVIEW_PRIORITY_ENUM)
+          .optional()
+          .describe("How urgent the ask is (default 'normal'); orders the target's inbox"),
+        expires_ts: z
+          .string()
+          .optional()
+          .describe("ISO timestamp after which the request stops gating the target"),
+        expires_in_minutes: z
+          .number()
+          .optional()
+          .describe("Alternative to expires_ts: expire this many minutes from now"),
+      },
+    },
+    async ({ target, body, refs, priority, expires_ts, expires_in_minutes }) =>
+      json(
+        squad.reviewOpen(target, body, {
+          refs,
+          priority,
+          expiresTs: expires_ts,
+          expiresInMinutes: expires_in_minutes,
+        }),
+      ),
+  );
+
+  server.registerTool(
+    "squad_review_claim",
+    {
+      description:
+        "Acknowledge a review request directed at you: records you as the claimant with a claim " +
+        "timestamp (the ack the requester is waiting on) and announces it in chat. Only the " +
+        "request's target may claim it, only from the pending state, and only before it expires " +
+        "— an expired request has already released its gate.",
+      inputSchema: { id: z.number().int().describe("The review request id") },
+    },
+    async ({ id }) => json(squad.reviewClaim(id)),
+  );
+
+  server.registerTool(
+    "squad_review_resolve",
+    {
+      description:
+        "Close out a review request you claimed, announced in chat as a system message. Only the " +
+        "claimant may resolve, and only from the claimed state — a pending request must be " +
+        "claimed first, so an ack is never skipped.",
+      inputSchema: {
+        id: z.number().int().describe("The review request id"),
+        resolution: z.string().optional().describe("What you found / what you did"),
+      },
+    },
+    async ({ id, resolution }) => json(squad.reviewResolve(id, resolution)),
+  );
+
+  server.registerTool(
+    "squad_review_cancel",
+    {
+      description:
+        "Withdraw or decline a review request, announced in chat as a system message. Either " +
+        "side may cancel — the requester when the ask no longer matters, the target when it " +
+        "cannot take it — from either pending or claimed. Nobody else may cancel someone else's " +
+        "gate.",
+      inputSchema: {
+        id: z.number().int().describe("The review request id"),
+        reason: z.string().optional().describe("Why it is being cancelled"),
+      },
+    },
+    async ({ id, reason }) => json(squad.reviewCancel(id, reason)),
+  );
+
+  server.registerTool(
+    "squad_review_list",
+    {
+      description:
+        "List directed review requests, most urgent first. Open (pending/claimed) and unexpired " +
+        "by default; narrow with target/requested_by/status, or widen with include_terminal " +
+        "(also show resolved/cancelled) and include_expired. Your own pending-directed requests " +
+        "already come back from squad_join and squad_check — use this to see the room's other " +
+        "requests or to look back at closed ones.",
+      inputSchema: {
+        target: z.string().optional().describe("Only requests directed at this persona"),
+        requested_by: z.string().optional().describe("Only requests opened by this persona"),
+        status: z
+          .enum(REVIEW_STATUS_ENUM)
+          .optional()
+          .describe("Only requests in this state"),
+        include_terminal: z
+          .boolean()
+          .optional()
+          .describe("Also include resolved/cancelled requests (default false)"),
+        include_expired: z
+          .boolean()
+          .optional()
+          .describe("Also include expired requests (default false)"),
+      },
+    },
+    async ({ target, requested_by, status, include_terminal, include_expired }) =>
+      json(
+        squad.reviewList({
+          target,
+          requestedBy: requested_by,
+          status,
+          includeTerminal: include_terminal,
+          includeExpired: include_expired,
+        }),
+      ),
+  );
+
+  server.registerTool(
     "squad_clear",
     {
       description:
-        "Wipe the room: deletes all messages, goals, claims, cursors, member records, and presence " +
-        "sessions for a fresh session. Destructive — only call when the user has asked for a reset.",
+        "Wipe the room: deletes all messages, goals, claims, cursors, member records, presence " +
+        "sessions, and review requests for a fresh session. Destructive — only call when the " +
+        "user has asked for a reset.",
       inputSchema: {},
     },
     async () => {

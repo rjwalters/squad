@@ -366,12 +366,17 @@ test("clear wipes claims and sessions along with everything else", () => {
 // MCP tool registration / response shape: no live transport here (same
 // approach as the card tools' registration tests), just a check that the
 // presence surface is wired into src/mcp.ts.
-test("mcp.ts registers squad_leave and returns peers from squad_check", () => {
+test("mcp.ts registers squad_leave and returns the check summary from squad_check", () => {
   const mcpSrc = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
   assert.match(mcpSrc, /registerTool\(\s*"squad_leave"/, "squad_leave must be registered");
   const check = mcpSrc.slice(mcpSrc.indexOf('"squad_check"'), mcpSrc.indexOf('"squad_leave"'));
-  assert.match(check, /peers: squad\.peers\(\)/, "squad_check must return peer presence");
-  assert.match(check, /lease_expires_at/, "squad_check must report the renewed lease");
+  assert.match(check, /squad\.checkSummary\(\)/, "squad_check must return the room-state summary");
+  // ...and that summary is what carries peer presence and the renewed lease.
+  const summary = claude.checkSummary();
+  assert.ok(Array.isArray(summary.peers), "squad_check must return peer presence");
+  assert.ok("lease_expires_at" in summary, "squad_check must report the renewed lease");
+  assert.equal(typeof summary.open_goals, "number");
+  assert.equal(typeof summary.active_claims, "number");
 });
 
 test("checkWait returns promptly when a message lands", async () => {

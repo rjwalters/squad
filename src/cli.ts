@@ -2,12 +2,23 @@ import { openDb, dbPath, squadDir } from "./db.js";
 import {
   Squad,
   CARD_TERMINAL_PHASES,
+  REVIEW_PRIORITIES,
+  REVIEW_STATUSES,
   type CardPhase,
   type CardUpdateFields,
   type EvidenceType,
   type Message,
+  type ReviewPriority,
+  type ReviewStatus,
 } from "./core.js";
 import { rmSync } from "node:fs";
+
+const REVIEW_OPEN_USAGE =
+  "usage: squad review open --to <persona> [--priority low|normal|high|urgent] " +
+  "[--refs <r1,r2,...>] [--expires-in <minutes>] <body...>";
+
+const REVIEW_LIST_USAGE =
+  "usage: squad review list [--to <persona>] [--from <persona>] [--status <s>] [--all]";
 
 /**
  * `squad card edit` flag -> `CardUpdateFields` key. Deliberately has no
@@ -78,6 +89,20 @@ Human CLI usage:
                                full submissions only once the round is closed
   squad diverge close <round_id>
                                Explicitly close a round and reveal all submissions
+  squad review open --to <persona> [--priority low|normal|high|urgent]
+                    [--refs <r1,r2,...>] [--expires-in <minutes>] <body...>
+                               Ask one teammate to look at something (a durable
+                               directed request, not a prose message)
+  squad review list [--to <persona>] [--from <persona>] [--status <s>]
+                    [--all]     Show review requests (open + unexpired by
+                               default; --all also shows resolved/cancelled
+                               and expired ones)
+  squad review show <id>      Full detail for one review request
+  squad review claim <id>     Acknowledge a request directed at you
+  squad review resolve <id> [note...]
+                               Close out a request you claimed
+  squad review cancel <id> [reason...]
+                               Withdraw (requester) or decline (target)
   squad card create [--title <text>] [--claim-kind empirical|formal] <question...>
                                Open a Science Card in the QUESTION phase
   squad card list [--all]     Show cards (active only; --all also shows
@@ -102,7 +127,8 @@ Human CLI usage:
   squad leave                 End this persona's presence lease(s) and announce
                                the departure in chat
   squad clear                 Wipe messages, goals, claims, cursors, members,
-                               presence sessions, and divergence rounds/submissions
+                               presence sessions, divergence rounds/submissions,
+                               and review requests
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad help                  Show this help
@@ -362,6 +388,140 @@ export async function runCli(argv: string[]): Promise<void> {
       }
       break;
     }
+    case "review": {
+      const [sub, ...args] = rest;
+      if (sub === "open") {
+        const tokens = [...args];
+        let target: string | undefined;
+        let priority: ReviewPriority | undefined;
+        let refs: string[] | undefined;
+        let expiresInMinutes: number | undefined;
+        while (
+          tokens[0] === "--to" ||
+          tokens[0] === "--priority" ||
+          tokens[0] === "--refs" ||
+          tokens[0] === "--expires-in"
+        ) {
+          const flag = tokens.shift();
+          const val = tokens.shift();
+          if (flag === "--to") {
+            target = (val ?? "").trim();
+          } else if (flag === "--priority") {
+            if (!REVIEW_PRIORITIES.includes(val as ReviewPriority)) {
+              throw new Error(`usage: squad review open --priority ${REVIEW_PRIORITIES.join("|")} ...`);
+            }
+            priority = val as ReviewPriority;
+          } else if (flag === "--refs") {
+            refs = (val ?? "")
+              .split(",")
+              .map((r) => r.trim())
+              .filter(Boolean);
+          } else {
+            expiresInMinutes = Number(val);
+            if (!Number.isFinite(expiresInMinutes)) {
+              throw new Error("usage: squad review open --expires-in <minutes> ...");
+            }
+          }
+        }
+        const body = tokens.join(" ").trim();
+        if (!target || !body) throw new Error(REVIEW_OPEN_USAGE);
+        const req = squad.reviewOpen(target, body, { refs, priority, expiresInMinutes });
+        console.log(`opened review #${req.id} for ${req.target} [${req.priority}]: ${req.body}`);
+      } else if (sub === "list" || sub === undefined) {
+        const tokens = [...args];
+        const all = tokens.includes("--all");
+        let target: string | undefined;
+        let requestedBy: string | undefined;
+        let status: ReviewStatus | undefined;
+        while (tokens.length > 0) {
+          const flag = tokens.shift();
+          if (flag === "--all") continue;
+          const val = tokens.shift();
+          if (flag === "--to" || flag === "--from" || flag === "--status") {
+            // A missing value would otherwise silently read as "" (or, for
+            // --status, as a typo'd status that matches nothing) — a filter
+            // that quietly says "nothing to do" is the worst failure mode for
+            // a gating primitive, so reject it loudly instead.
+            const value = (val ?? "").trim();
+            if (!value) throw new Error(`${REVIEW_LIST_USAGE} (${flag} needs a value)`);
+            if (flag === "--to") target = value;
+            else if (flag === "--from") requestedBy = value;
+            else {
+              if (!REVIEW_STATUSES.includes(value as ReviewStatus)) {
+                throw new Error(
+                  `${REVIEW_LIST_USAGE} (invalid status "${value}" — must be one of ${REVIEW_STATUSES.join(", ")})`,
+                );
+              }
+              status = value as ReviewStatus;
+            }
+          } else throw new Error(`${REVIEW_LIST_USAGE} (unrecognized flag '${flag ?? ""}')`);
+        }
+        const requests = squad.reviewList({
+          target,
+          requestedBy,
+          status,
+          includeTerminal: all,
+          includeExpired: all,
+        });
+        if (requests.length === 0) {
+          console.log(
+            all
+              ? "no review requests yet — squad review open --to <persona> <body...>"
+              : "no open review requests",
+          );
+        }
+        for (const r of requests) {
+          const mark = r.expired ? " (expired)" : "";
+          console.log(
+            `[${r.status}] #${r.id} ${r.requested_by} -> ${r.target} [${r.priority}]${mark} ${r.body}`,
+          );
+        }
+      } else if (sub === "show") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error("usage: squad review show <id>");
+        const r = squad.reviewGet(id);
+        console.log(
+          `#${r.id} [${r.status}${r.expired ? ", expired" : ""}] ` +
+            `${r.requested_by} -> ${r.target} [${r.priority}]`,
+        );
+        console.log(`  ${r.body}`);
+        if (r.refs.length > 0) console.log(`  refs: ${r.refs.join(", ")}`);
+        console.log(`  opened ${r.created_ts}${r.expires_ts ? `, expires ${r.expires_ts}` : ""}`);
+        if (r.claimed_by) console.log(`  claimed by ${r.claimed_by} at ${r.claimed_ts}`);
+        if (r.resolved_by) {
+          console.log(
+            `  resolved by ${r.resolved_by} at ${r.resolved_ts}` +
+              `${r.resolution ? `: ${r.resolution}` : ""}`,
+          );
+        }
+        if (r.cancelled_by) {
+          console.log(
+            `  cancelled by ${r.cancelled_by} at ${r.cancelled_ts}` +
+              `${r.cancel_reason ? `: ${r.cancel_reason}` : ""}`,
+          );
+        }
+      } else if (sub === "claim") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error("usage: squad review claim <id>");
+        const r = squad.reviewClaim(id);
+        console.log(`claimed review #${r.id} (${r.claimed_by})`);
+      } else if (sub === "resolve") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error("usage: squad review resolve <id> [note...]");
+        const resolution = args.slice(1).join(" ").trim() || undefined;
+        const r = squad.reviewResolve(id, resolution);
+        console.log(`resolved review #${r.id}${r.resolution ? `: ${r.resolution}` : ""}`);
+      } else if (sub === "cancel") {
+        const id = parseInt(args[0] ?? "", 10);
+        if (Number.isNaN(id)) throw new Error("usage: squad review cancel <id> [reason...]");
+        const reason = args.slice(1).join(" ").trim() || undefined;
+        const r = squad.reviewCancel(id, reason);
+        console.log(`cancelled review #${r.id}${r.cancel_reason ? `: ${r.cancel_reason}` : ""}`);
+      } else {
+        throw new Error("usage: squad review [open|list|show|claim|resolve|cancel] ...");
+      }
+      break;
+    }
     case "card": {
       const [sub, ...args] = rest;
       if (sub === "create") {
@@ -530,6 +690,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "claim",
       "release",
       "diverge",
+      "review",
       "card",
       "who",
       "leave",

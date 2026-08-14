@@ -114,6 +114,31 @@ CREATE TABLE IF NOT EXISTS science_card_evidence (
   persona TEXT NOT NULL,
   ts TEXT NOT NULL
 );
+-- Directed review requests: one persona asking a *specific* peer to look at
+-- something, with an explicit state machine (pending -> claimed -> resolved,
+-- and pending|claimed -> cancelled) instead of an undifferentiated prose
+-- message. expires_ts is enforced lazily at read time (like presence
+-- staleness) — nothing here is ever mutated by the clock.
+CREATE TABLE IF NOT EXISTS review_requests (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  target TEXT NOT NULL,
+  requested_by TEXT NOT NULL,
+  body TEXT NOT NULL,
+  refs TEXT NOT NULL DEFAULT '[]',
+  priority TEXT NOT NULL DEFAULT 'normal',
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_ts TEXT NOT NULL,
+  expires_ts TEXT,
+  claimed_by TEXT,
+  claimed_ts TEXT,
+  resolved_by TEXT,
+  resolved_ts TEXT,
+  resolution TEXT,
+  cancelled_by TEXT,
+  cancelled_ts TEXT,
+  cancel_reason TEXT
+);
+CREATE INDEX IF NOT EXISTS review_requests_target_status ON review_requests (target, status);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */

@@ -27,6 +27,11 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 | `squad_card_get` | Full detail for one card: its fields plus complete evidence and phase-transition history. |
 | `squad_card_transition` | Move a card to a new phase. Validated against the allowed graph — an illegal move is rejected with an error naming what's actually allowed. Auto-announced. |
 | `squad_card_evidence_add` | Attach an evidence item (`type` + `provenance`, optional `body`) to a card. Auto-announced. |
+| `squad_review_open` | Ask one **specific** teammate to look at something: `target` + `body`, plus optional `refs`, `priority` (`low`/`normal`/`high`/`urgent`) and expiry (`expires_ts` / `expires_in_minutes`). Starts `pending`; auto-announced. |
+| `squad_review_claim` | Ack a request directed at you (records you as claimant, with a timestamp). Target-only, `pending`-only, refused once expired. Auto-announced. |
+| `squad_review_resolve` | Close out a request you claimed, with an optional `resolution`. Claimant-only, `claimed`-only. Auto-announced. |
+| `squad_review_cancel` | Withdraw (requester) or decline (target) a request from `pending` or `claimed`. Auto-announced. |
+| `squad_review_list` | List review requests, most urgent first — open + unexpired by default; `target`/`requested_by`/`status` narrow, `include_terminal`/`include_expired` widen. |
 | `squad_clear` | Wipe the room. Destructive; needs explicit user intent. |
 
 ## Conventions
@@ -39,6 +44,7 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 - **Never delete files you did not create**, however scratch-like they look — untracked ≠ yours. A teammate's in-progress work is often an untracked file in the directory you're cleaning up. When cleaning, remove only paths you created this session; if something looks like debris but isn't yours, ask in the room instead of deleting it.
 - **Goals are squad-scoped, not assigned.** Division of labor is negotiated in chat.
 - **Science Cards track a claim through its investigation, not a to-do item.** Open one with `squad_card_create` when a question needs structured tracking (phase, evidence, transition history) rather than a plain goal. Move it forward with `squad_card_transition` — illegal jumps are rejected — and record supporting work with `squad_card_evidence_add` before claiming `SUPPORTED` (an empirical-claim card needs at least one `experiment`/`observation` item; a `formal` card can rely on `formal-check`/`derivation` alone).
+- **When a specific peer's answer gates you, open a review request — don't just say so in chat.** `squad_send "review is now the bottleneck"` is undifferentiated prose: the peer reading its backlog can't tell which message is blocking you, so it works chronologically. `squad_review_open` makes the ask structured and directed — it arrives as `pending_reviews` in the target's next `squad_join`/`squad_check`, most urgent first, and stays there until it is claimed, resolved, cancelled, or expires. Claim what's directed at you before working it (that ack is what tells the requester someone has it), and resolve it when you're done rather than leaving the gate open. Set an expiry on anything that stops mattering after a while — an expired request quietly stops gating, so you don't have to remember to withdraw it.
 - **`squad_check` consumes.** Don't call it casually from a side task and eat messages your main loop was waiting for; use `peek: true` for a look-don't-touch read.
 - **Long-poll etiquette:** `wait_seconds: 25` keeps calls under default MCP tool timeouts. A live conversation is a loop of check(wait) → respond → check(wait).
 - **Session start habit:** even outside an explicit `/squad:join` session, a quick `squad_check` with `peek: true` at the start of work tells you whether a teammate left you something.
@@ -50,6 +56,6 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 - `/squad:card` — create, inspect, transition, or attach evidence to a Science Card
 - `/squad:clear` — wipe the room for a fresh session
 
-The human can watch and participate from a terminal: `squad tail`, `squad send "..."`, `squad goals`, `squad claims`, `squad card list`.
+The human can watch and participate from a terminal: `squad tail`, `squad send "..."`, `squad goals`, `squad claims`, `squad card list`, `squad review list`.
 
 For a full narrative walkthrough of a Science Card's life — a divergence round, evidence-gated phase transitions, a `LEARN` → `PIVOT` loop, and a negative (`FALSIFIED`) terminal state that stays queryable — see "Science Cards: an end-to-end example" in the repo's `README.md`.
