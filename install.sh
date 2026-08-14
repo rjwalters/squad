@@ -296,6 +296,13 @@ Tools (all pull-based; nothing ever wakes you):
   independently and nothing is revealed until the round closes (explicitly,
   or automatically once every expected participant has submitted) — use one
   before discussing, when independent takes matter
+- \`squad_review_open\` / \`squad_review_claim\` / \`squad_review_resolve\` /
+  \`squad_review_cancel\` / \`squad_review_list\` — directed review requests:
+  a durable "you specifically, look at this" with target, refs, priority,
+  and optional expiry. pending -> claimed (target acks) -> resolved
+  (claimant closes); either side may cancel. Pending requests directed at
+  you ride along in \`squad_join\`/\`squad_check\` — work them most-urgent
+  first; every transition is auto-announced
 - \`squad_clear\` — wipe the room (destructive; needs explicit user intent)
 
 Conventions: claim a goal in chat before working on it; report results when
