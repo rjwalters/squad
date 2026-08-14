@@ -48,6 +48,7 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 - **`squad_check` consumes.** Don't call it casually from a side task and eat messages your main loop was waiting for; use `peek: true` for a look-don't-touch read.
 - **Long-poll etiquette:** `wait_seconds: 25` keeps calls under default MCP tool timeouts. A live conversation is a loop of check(wait) → respond → check(wait).
 - **Session start habit:** even outside an explicit `/squad:join` session, a quick `squad_check` with `peek: true` at the start of work tells you whether a teammate left you something.
+- **Read cursors are per-session, not per-persona.** If your persona has more than one live connection at once (e.g. an MCP session plus a CLI invocation), each tracks its own unread cursor via `session_id` — one session's `squad_check`/`squad_join` never fast-forwards or steals another session's unread state. A new session's first `squad_check` inherits the persona's most-advanced prior cursor rather than replaying the whole backlog, so the common one-session case behaves exactly as before.
 
 ## Commands
 

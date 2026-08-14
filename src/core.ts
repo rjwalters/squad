@@ -751,18 +751,69 @@ export class Squad {
     return rows.reverse();
   }
 
+  /**
+   * This connection's session-scoped read cursor (#41). Keyed by session_id,
+   * not persona, so two live sessions of one persona (an MCP connection and a
+   * CLI invocation, or two concurrent MCP clients) never consume each other's
+   * unread state. A session with no cursor row yet is seeded once — from the
+   * persona's most-advanced other session (live or recently-ended) or its
+   * durable high-water mark in `cursors`, whichever is further along — falling
+   * back to 0 only for the persona's very first session ever, so it matches
+   * today's single-session steady-state UX instead of replaying the whole
+   * backlog as unread every time a second session opens.
+   *
+   * The `cursors` half is what keeps that true across *time* as well as across
+   * sessions: session rows (and their cursor rows) are swept after
+   * SESSION_RETENTION_HOURS, so a persona quiet for longer than that would
+   * otherwise have nothing left to seed from and would replay the entire room
+   * history on its next join. It also carries a pre-#41 room forward: a DB
+   * written by the old persona-keyed code already has these rows, so upgrading
+   * seeds from the persona's real last read rather than 0.
+   */
   private cursor(): number {
+    // touch() always assigns _sessionId before cursor()/setCursor() run.
+    const sessionId = this._sessionId;
+    if (!sessionId) return 0;
     const row = this.db
-      .prepare("SELECT last_seen_id FROM cursors WHERE persona = ?")
-      .get(this.persona) as { last_seen_id: number } | undefined;
-    return row?.last_seen_id ?? 0;
+      .prepare("SELECT last_seen_id FROM session_cursors WHERE session_id = ?")
+      .get(sessionId) as { last_seen_id: number } | undefined;
+    if (row) return row.last_seen_id;
+    const seed = this.db
+      .prepare(
+        `SELECT MAX(
+                  COALESCE((SELECT MAX(sc.last_seen_id)
+                              FROM session_cursors sc
+                              JOIN sessions s ON s.session_id = sc.session_id
+                             WHERE s.persona = ? AND s.session_id != ?), 0),
+                  COALESCE((SELECT last_seen_id FROM cursors WHERE persona = ?), 0)
+                ) AS m`,
+      )
+      .get(this.persona, sessionId, this.persona) as { m: number };
+    this.setCursor(seed.m);
+    return seed.m;
   }
 
+  /**
+   * Advance this session's cursor, and with it the persona's durable
+   * high-water mark. The per-session row is the one `check()` reads; the
+   * persona row in `cursors` exists purely so cursor state outlives session
+   * retention (see cursor()). It only ever moves forward — a lagging session
+   * consuming its own older backlog must never drag the persona's mark
+   * backwards and re-mark read messages as unread for a future session.
+   */
   private setCursor(id: number): void {
+    const sessionId = this._sessionId;
+    if (!sessionId) return;
+    this.db
+      .prepare(
+        `INSERT INTO session_cursors (session_id, last_seen_id) VALUES (?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET last_seen_id = excluded.last_seen_id`,
+      )
+      .run(sessionId, id);
     this.db
       .prepare(
         `INSERT INTO cursors (persona, last_seen_id) VALUES (?, ?)
-         ON CONFLICT(persona) DO UPDATE SET last_seen_id = excluded.last_seen_id`,
+         ON CONFLICT(persona) DO UPDATE SET last_seen_id = MAX(last_seen_id, excluded.last_seen_id)`,
       )
       .run(this.persona, id);
   }
@@ -980,12 +1031,26 @@ export class Squad {
     return this.members().filter((m) => m.persona !== this.persona);
   }
 
-  /** Sweep session rows nobody has touched in SESSION_RETENTION_HOURS. */
+  /**
+   * Sweep session rows nobody has touched in SESSION_RETENTION_HOURS, plus
+   * any session_cursors rows left behind for a session that's gone — mirrors
+   * the sessions table's own retention rationale so cursor rows don't
+   * accumulate forever either. Safe to prune in lockstep because it is not
+   * where cursor durability lives: setCursor() mirrors every advance into the
+   * never-pruned persona-keyed `cursors` table, so a persona whose sessions
+   * have all aged out still seeds its next session from where it actually
+   * left off (see cursor()).
+   */
   private pruneSessions(): void {
     const cutoff = new Date(Date.now() - SESSION_RETENTION_HOURS * 3_600_000).toISOString();
     this.db
       .prepare("DELETE FROM sessions WHERE last_seen < ? AND session_id IS NOT ?")
       .run(cutoff, this._sessionId);
+    this.db
+      .prepare(
+        "DELETE FROM session_cursors WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+      )
+      .run();
   }
 
   /**
@@ -1374,7 +1439,8 @@ export class Squad {
    */
   clear(): void {
     this.db.exec(
-      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; DELETE FROM members; " +
+      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; " +
+        "DELETE FROM session_cursors; DELETE FROM members; " +
         "DELETE FROM sessions; " +
         "DELETE FROM divergence_submissions; DELETE FROM divergence_rounds; " +
         "DELETE FROM review_requests; " +

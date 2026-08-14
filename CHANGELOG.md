@@ -80,6 +80,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codex/prompts/squad-join.md`).
 
 ### Fixed
+- Session-scoped read cursors (#41): two live sessions of one persona (e.g.
+  an MCP connection and a CLI invocation, or two concurrent MCP clients) no
+  longer share one read cursor and silently steal each other's unread state.
+  `squad_check`'s durable cursor is now keyed by `session_id` (new
+  `session_cursors` table) instead of persona — previously `squad_join`
+  unconditionally fast-forwarded the shared persona cursor to "now" on every
+  call, including a second session's rejoin, which could mark a first
+  session's still-unread messages as read out from under it. A brand-new
+  session's cursor is seeded once from the persona's most-advanced other
+  session, or from the persona's durable high-water mark in the long-lived
+  `cursors` table (falling back to the room's start only for that persona's
+  very first session ever), so the common single-session case keeps today's
+  steady-state behavior. Session cursor rows are still swept with their
+  session after `SESSION_RETENTION_HOURS`, but cursor *durability* no longer
+  rides on that retention: every advance also bumps the never-pruned
+  per-persona mark, so a persona that goes quiet for more than a day and comes
+  back sees only what arrived while it was away instead of replaying the whole
+  room as unread. That mark is the same `cursors` table the pre-#41 code used,
+  so an existing room upgrades with its read state intact.
+  Own-messages-via-another-session still never return as unread (unchanged —
+  that filter stays keyed on persona, not session).
 - A wiped/missing `node_modules` in the source clone silently disabled the
   room for every agent at once (#15): `index.ts` now imports `mcp.js` (the
   only module that depends on anything outside Node's built-ins) lazily,
