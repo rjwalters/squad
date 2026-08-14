@@ -4,6 +4,42 @@ import { existsSync, mkdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
+/**
+ * Bumped whenever a table is added to (or removed from) SCHEMA / ROOM_TABLES
+ * below. Stamped into every db via `PRAGMA user_version` in openDb(), and
+ * checked by `Squad.importRoom()` (src/core.ts) to refuse importing an
+ * export produced by an incompatible squad build rather than silently
+ * merging or corrupting state. The migration strategy for *this* build's own
+ * schema stays the existing idempotent `CREATE TABLE IF NOT EXISTS` below --
+ * this version number exists purely as an export/import compatibility
+ * check, not a migration-ordering mechanism.
+ */
+export const SCHEMA_VERSION = 1;
+
+/**
+ * Every room table -- the complete unit of state `Squad.clear()`,
+ * `Squad.exportRoom()`, and `Squad.importRoom()` (src/core.ts) all operate
+ * over. Single source of truth so those three never drift out of sync with
+ * each other or with SCHEMA below. Order is insignificant: no table here
+ * declares a SQL `FOREIGN KEY`, so neither DELETE nor INSERT ordering
+ * matters.
+ */
+export const ROOM_TABLES = [
+  "messages",
+  "goals",
+  "claims",
+  "cursors",
+  "session_cursors",
+  "members",
+  "sessions",
+  "divergence_rounds",
+  "divergence_submissions",
+  "review_requests",
+  "science_cards",
+  "science_card_transitions",
+  "science_card_evidence",
+] as const;
+
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -280,5 +316,12 @@ export function openDb(): DatabaseSync {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
+  // Every open of a db by the current build stamps it current: SCHEMA's
+  // migration strategy is additive-only (CREATE TABLE IF NOT EXISTS above),
+  // so once this build has opened a db it *is* SCHEMA_VERSION, regardless of
+  // what it was stamped as before. This pragma exists for export/import
+  // compatibility checks (Squad.importRoom(), src/core.ts), not to gate
+  // opening a db directly.
+  db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   return db;
 }

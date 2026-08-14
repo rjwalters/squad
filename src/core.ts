@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, backup } from "node:sqlite";
+import { existsSync } from "node:fs";
+import { ROOM_TABLES, SCHEMA_VERSION } from "./db.js";
 
 export interface Message {
   id: number;
@@ -1438,14 +1440,134 @@ export class Squad {
    * operation.
    */
   clear(): void {
-    this.db.exec(
-      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; " +
-        "DELETE FROM session_cursors; DELETE FROM members; " +
-        "DELETE FROM sessions; " +
-        "DELETE FROM divergence_submissions; DELETE FROM divergence_rounds; " +
-        "DELETE FROM review_requests; " +
-        "DELETE FROM science_card_evidence; DELETE FROM science_card_transitions; DELETE FROM science_cards;",
-    );
+    this.db.exec(ROOM_TABLES.map((t) => `DELETE FROM ${t};`).join(" "));
+  }
+
+  /**
+   * Export every room table (ROOM_TABLES, src/db.ts -- the same set clear()
+   * empties) to a single portable SQLite file at destPath, via node:sqlite's
+   * built-in backup() (SQLite's Online Backup API). WAL-safe: backup() reads
+   * committed pages straight through any pending WAL frames, so a
+   * concurrently-open MCP server or CLI process never produces a torn copy
+   * the way a raw `cp` of squad.db can (which can race a WAL checkpoint), and
+   * the destination is a self-contained file -- no `-wal`/`-shm` sidecars for
+   * a caller (or a later `squad import`) to know about.
+   *
+   * Refuses to overwrite an existing file at destPath rather than silently
+   * clobbering it.
+   *
+   * Returns the row count exported per table, for a human-readable summary.
+   *
+   * node:sqlite's module-level `backup()` (as opposed to `DatabaseSync`
+   * instance methods, present since node:sqlite's v22.5.0 debut) landed
+   * later, in Node v22.16.0/v23.8.0 -- package.json's `engines.node` floor
+   * is pinned to v22.16.0 specifically because of this dependency.
+   */
+  async exportRoom(destPath: string): Promise<Record<string, number>> {
+    if (existsSync(destPath)) {
+      throw new Error(`squad export: refusing to overwrite existing file: ${destPath}`);
+    }
+    await backup(this.db, destPath);
+    const copy = new DatabaseSync(destPath, { readOnly: true });
+    try {
+      const counts: Record<string, number> = {};
+      for (const t of ROOM_TABLES) {
+        counts[t] = (copy.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+      }
+      return counts;
+    } finally {
+      copy.close();
+    }
+  }
+
+  /**
+   * Import a room previously produced by exportRoom() into this (already
+   * open) room's database, via a temporary ATTACH DATABASE + table-by-table
+   * INSERT ... SELECT (all within one transaction) rather than replacing the
+   * destination file outright -- so the destination keeps its own on-disk
+   * identity (WAL mode, pragmas) and the "must be empty" refusal below has
+   * something to check.
+   *
+   * Refuses (throws) rather than partially writing or silently merging when:
+   *  - srcPath does not exist (checked before ATTACH, which would otherwise
+   *    silently create an empty file there)
+   *  - srcPath is not a readable SQLite database
+   *  - srcPath's `PRAGMA user_version` does not match this build's
+   *    SCHEMA_VERSION (src/db.ts) -- the export was produced by an
+   *    incompatible (older or newer) squad build
+   *  - srcPath is missing one or more ROOM_TABLES -- not a squad export
+   *  - this room is not empty (any ROOM_TABLES row already present) --
+   *    import is not a merge; run `squad clear` first
+   *
+   * On success, every row in every ROOM_TABLES table is copied verbatim
+   * (ids included); SQLite's own AUTOINCREMENT bookkeeping picks up from the
+   * imported max id per table, so a post-import `squad send` etc. can never
+   * collide with an imported row's id.
+   *
+   * Returns the row count imported per table, for a human-readable summary.
+   */
+  importRoom(srcPath: string): Record<string, number> {
+    if (!existsSync(srcPath)) {
+      throw new Error(`squad import: no such file: ${srcPath}`);
+    }
+    try {
+      this.db.prepare("ATTACH DATABASE ? AS import_src").run(srcPath);
+    } catch (err) {
+      throw new Error(
+        `squad import: could not open ${srcPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      let srcVersion: number;
+      try {
+        srcVersion = (this.db.prepare("PRAGMA import_src.user_version").get() as { user_version: number })
+          .user_version;
+      } catch (err) {
+        throw new Error(`squad import: ${srcPath} is not a valid SQLite database`);
+      }
+      if (srcVersion !== SCHEMA_VERSION) {
+        throw new Error(
+          `squad import: schema version mismatch (export is v${srcVersion}, this squad build expects ` +
+            `v${SCHEMA_VERSION}) -- install a matching squad version before importing`,
+        );
+      }
+      const srcTables = new Set(
+        (
+          this.db.prepare("SELECT name FROM import_src.sqlite_master WHERE type = 'table'").all() as {
+            name: string;
+          }[]
+        ).map((r) => r.name),
+      );
+      const missing = ROOM_TABLES.filter((t) => !srcTables.has(t));
+      if (missing.length > 0) {
+        throw new Error(`squad import: ${srcPath} is not a squad export (missing table(s): ${missing.join(", ")})`);
+      }
+      const existing = ROOM_TABLES.map((t) => ({
+        table: t,
+        n: (this.db.prepare(`SELECT COUNT(*) AS n FROM main.${t}`).get() as { n: number }).n,
+      })).filter((c) => c.n > 0);
+      if (existing.length > 0) {
+        throw new Error(
+          "squad import: refusing to import into a non-empty room " +
+            `(${existing.map((c) => `${c.table}: ${c.n}`).join(", ")}) -- run 'squad clear' first`,
+        );
+      }
+      const counts: Record<string, number> = {};
+      this.db.exec("BEGIN");
+      try {
+        for (const t of ROOM_TABLES) {
+          this.db.exec(`INSERT INTO main.${t} SELECT * FROM import_src.${t}`);
+          counts[t] = (this.db.prepare(`SELECT COUNT(*) AS n FROM main.${t}`).get() as { n: number }).n;
+        }
+        this.db.exec("COMMIT");
+      } catch (err) {
+        this.db.exec("ROLLBACK");
+        throw err;
+      }
+      return counts;
+    } finally {
+      this.db.exec("DETACH DATABASE import_src");
+    }
   }
 
   private rowToDivergenceRound(row: {
