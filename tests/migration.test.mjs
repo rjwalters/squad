@@ -78,9 +78,12 @@ CREATE TABLE divergence_submissions (
 const SCIENCE_CARD_TABLES = ["science_cards", "science_card_transitions", "science_card_evidence"];
 /**
  * Tables added after the fixture above by later features (#38: presence
- * leases; #39: directed review requests).
+ * leases; #39: directed review requests; #41: session-scoped read cursors —
+ * session_cursors holds the per-session cursor, while the pre-existing
+ * persona-keyed `cursors` table stays in PRE_EXISTING_TABLES and keeps the
+ * persona's durable high-water mark).
  */
-const LATER_TABLES = [...SCIENCE_CARD_TABLES, "sessions", "review_requests"];
+const LATER_TABLES = [...SCIENCE_CARD_TABLES, "sessions", "review_requests", "session_cursors"];
 const PRE_EXISTING_TABLES = [
   "messages",
   "cursors",
@@ -145,6 +148,9 @@ test("opening an old-schema .squad/squad.db adds the Science Card tables without
     // ...the presence-lease table starts empty: an upgrade does not invent
     // sessions for personas that were merely in the old members table.
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n, 0);
+    // ...and the session-scoped cursor table starts empty too — an upgrade
+    // never migrates the old persona-keyed `cursors` rows into it.
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM session_cursors").get().n, 0);
     // ...and the science_cards table is empty (freshly created), not
     // pre-populated with anything.
     const cardCount = db.prepare("SELECT COUNT(*) AS n FROM science_cards").get();

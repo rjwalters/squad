@@ -751,20 +751,45 @@ export class Squad {
     return rows.reverse();
   }
 
+  /**
+   * This connection's session-scoped read cursor (#41). Keyed by session_id,
+   * not persona, so two live sessions of one persona (an MCP connection and a
+   * CLI invocation, or two concurrent MCP clients) never consume each other's
+   * unread state. A session with no cursor row yet is seeded once — from the
+   * persona's most-advanced other session (live or recently-ended), falling
+   * back to 0 for the persona's very first session ever — matching today's
+   * single-session steady-state UX instead of replaying the whole backlog as
+   * unread every time a second session opens.
+   */
   private cursor(): number {
+    // touch() always assigns _sessionId before cursor()/setCursor() run.
+    const sessionId = this._sessionId;
+    if (!sessionId) return 0;
     const row = this.db
-      .prepare("SELECT last_seen_id FROM cursors WHERE persona = ?")
-      .get(this.persona) as { last_seen_id: number } | undefined;
-    return row?.last_seen_id ?? 0;
+      .prepare("SELECT last_seen_id FROM session_cursors WHERE session_id = ?")
+      .get(sessionId) as { last_seen_id: number } | undefined;
+    if (row) return row.last_seen_id;
+    const seed = this.db
+      .prepare(
+        `SELECT COALESCE(MAX(sc.last_seen_id), 0) AS m
+           FROM session_cursors sc
+           JOIN sessions s ON s.session_id = sc.session_id
+          WHERE s.persona = ? AND s.session_id != ?`,
+      )
+      .get(this.persona, sessionId) as { m: number };
+    this.setCursor(seed.m);
+    return seed.m;
   }
 
   private setCursor(id: number): void {
+    const sessionId = this._sessionId;
+    if (!sessionId) return;
     this.db
       .prepare(
-        `INSERT INTO cursors (persona, last_seen_id) VALUES (?, ?)
-         ON CONFLICT(persona) DO UPDATE SET last_seen_id = excluded.last_seen_id`,
+        `INSERT INTO session_cursors (session_id, last_seen_id) VALUES (?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET last_seen_id = excluded.last_seen_id`,
       )
-      .run(this.persona, id);
+      .run(sessionId, id);
   }
 
   private maxMessageId(): number {
@@ -980,12 +1005,22 @@ export class Squad {
     return this.members().filter((m) => m.persona !== this.persona);
   }
 
-  /** Sweep session rows nobody has touched in SESSION_RETENTION_HOURS. */
+  /**
+   * Sweep session rows nobody has touched in SESSION_RETENTION_HOURS, plus
+   * any session_cursors rows left behind for a session that's gone — mirrors
+   * the sessions table's own retention rationale so cursor rows don't
+   * accumulate forever either.
+   */
   private pruneSessions(): void {
     const cutoff = new Date(Date.now() - SESSION_RETENTION_HOURS * 3_600_000).toISOString();
     this.db
       .prepare("DELETE FROM sessions WHERE last_seen < ? AND session_id IS NOT ?")
       .run(cutoff, this._sessionId);
+    this.db
+      .prepare(
+        "DELETE FROM session_cursors WHERE session_id NOT IN (SELECT session_id FROM sessions)",
+      )
+      .run();
   }
 
   /**
@@ -1374,7 +1409,8 @@ export class Squad {
    */
   clear(): void {
     this.db.exec(
-      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; DELETE FROM members; " +
+      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; " +
+        "DELETE FROM session_cursors; DELETE FROM members; " +
         "DELETE FROM sessions; " +
         "DELETE FROM divergence_submissions; DELETE FROM divergence_rounds; " +
         "DELETE FROM review_requests; " +

@@ -51,6 +51,94 @@ test("join catches up and advances cursor", () => {
   assert.equal(claude.check().length, 0, "join marked history read");
 });
 
+// --- session-scoped read cursors (#41) ------------------------------------
+
+test("two live sessions of one persona don't steal each other's unread stream", () => {
+  claude.clear();
+  const claudeA = new Squad(db, "claude"); // e.g. an MCP connection
+  claudeA.join();
+
+  // A message arrives while session A hasn't read it yet.
+  codex.send("urgent update");
+
+  // A second session of the same persona joins mid-conversation (e.g. a CLI
+  // invocation). Before #41, join() unconditionally fast-forwarded the
+  // shared persona-keyed cursor to "now", silently marking A's still-unread
+  // message as read out from under it.
+  const claudeB = new Squad(db, "claude");
+  claudeB.join();
+
+  const unreadA = claudeA.check();
+  assert.deepEqual(
+    unreadA.map((m) => m.body),
+    ["urgent update"],
+    "session A's next check() still returns the message it hadn't consumed yet",
+  );
+});
+
+test("check() and join() from independent same-persona sessions see new messages independently", () => {
+  claude.clear();
+  const claudeA = new Squad(db, "claude");
+  const claudeB = new Squad(db, "claude");
+  claudeA.join();
+  claudeB.join();
+
+  codex.send("new for both");
+  assert.deepEqual(claudeA.check().map((m) => m.body), ["new for both"]);
+  assert.deepEqual(
+    claudeB.check().map((m) => m.body),
+    ["new for both"],
+    "a message posted after both sessions joined is unread for both, independently",
+  );
+  // Each session consumed its own copy — neither affects the other's cursor.
+  assert.equal(claudeA.check().length, 0);
+  assert.equal(claudeB.check().length, 0);
+});
+
+test("a brand-new session's cursor seeds from the persona's most-advanced prior session", () => {
+  claude.clear();
+  const claudeA = new Squad(db, "claude");
+  claudeA.join();
+  codex.send("m1");
+  codex.send("m2");
+  claudeA.check(); // consumes m1, m2 — advances session A's cursor to "now"
+
+  // A brand-new session of the same persona (never joined before) should
+  // inherit that advanced cursor instead of replaying the whole backlog.
+  const claudeC = new Squad(db, "claude");
+  assert.deepEqual(
+    claudeC.check({ peek: true }),
+    [],
+    "new session sees no backlog — seeded from the persona's most-advanced session",
+  );
+});
+
+test("a persona's very first session ever starts at the room's beginning", () => {
+  claude.clear();
+  codex.send("before anyone joined");
+  const brandNew = new Squad(db, "brand-new-persona");
+  assert.deepEqual(
+    brandNew.check().map((m) => m.body),
+    ["before anyone joined"],
+    "no prior session for this persona to seed from, so the cursor falls back to 0",
+  );
+});
+
+test("own messages via another session of the same persona never return as unread", () => {
+  claude.clear();
+  const claudeA = new Squad(db, "claude");
+  const claudeB = new Squad(db, "claude");
+  claudeA.join();
+  claudeB.join();
+
+  claudeA.send("posted via session A");
+  assert.equal(
+    claudeB.check().length,
+    0,
+    "session B never sees session A's message as unread — both are 'claude'",
+  );
+});
+
 // --- presence leases (#38) ------------------------------------------------
 
 /**
