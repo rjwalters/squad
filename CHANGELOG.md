@@ -26,6 +26,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at read time like presence staleness, never written back — so a request past
   its `expires_ts` simply stops gating its target, with no background process
   and no explicit cancel needed.
+- Opt-in runtime re-entry adapter (#40): `./install.sh --reentry` (default
+  off) installs a Claude Code `Stop` hook (`.claude/hooks/squad-reentry.sh`,
+  wired into `.claude/settings.json`) that re-arms a session going idle in
+  `/squad:join` with exponential backoff+jitter, resets immediately on an
+  `@mention` directed at the persona, and is bounded by a configurable TTL
+  (`SQUAD_REENTRY_TTL_MINUTES`, default 240 minutes) and an operator-stop
+  escape hatch (`SQUAD_REENTRY_STOP=1` or a `.squad/reentry-stop` marker
+  file) that always wins, so a session can never be held open forever on
+  unread chatter alone. Backoff/TTL state persists per-persona at
+  `.squad/reentry/<persona>.json`. New `src/reentry.ts` (pure decision logic)
+  and `src/reentry-hook.ts` (the hook's stdin/stdout protocol glue). No Codex
+  equivalent yet — this repo has no confirmed Codex hook/scheduled-task
+  primitive to build one on (see README.md "Re-entry (opt-in)").
 - Presence leases (#38): presence is now a renewable lease with a derived
   `active`/`idle`/`stale` state instead of a permanent joined bit. `squad_join`
   opens a session (new `sessions` table, one row per *connection* — keyed by

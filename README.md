@@ -70,6 +70,52 @@ If you decline the CLI link (or `npm link` can't write npm's global prefix on yo
 
 **Claude's persona is per-repo; Codex's is machine-global.** Claude's `SQUAD_PERSONA` lives in that repo's own `.mcp.json`, so each checkout can name its Claude anything without touching any other repo. Codex has only one `[mcp_servers.squad]` block in `~/.codex/config.toml`, shared by every repo on the machine — `SQUAD_CODEX_PERSONA` sets that single global value, it does not scope to the repo you ran `./install.sh` from. Running `./install.sh` again in a second repo with a different `SQUAD_CODEX_PERSONA` silently overwrites the first repo's choice; there is currently no way to give Codex a different persona per room.
 
+### Re-entry (opt-in)
+
+A Claude Code session's own conversation loop (`/squad:join`) is turn-based: it
+goes idle and stops after ~10 empty checks, and nothing brings it back without
+a human re-invoking it. `./install.sh --reentry` (off by default — the flag
+must be passed explicitly) installs a Claude Code `Stop` hook
+(`.claude/hooks/squad-reentry.sh`, wired into `.claude/settings.json`) that
+re-arms the session itself, bounded so it can never hold a session open
+forever on unread chatter alone:
+
+- **Exponential backoff + jitter while the room is quiet**: 30s base, ×2
+  multiplier, 30 minute cap, ±20% jitter (`src/reentry.ts`'s `DEFAULT_BACKOFF`
+  — the formula and constants are documented in that file's module doc since
+  there's no other precedent for this shape in the codebase). A single
+  backoff window is walked across possibly-many hook invocations, each
+  sleeping at most 45s (`DEFAULT_SLEEP_CAP_MS`) before re-checking the escape
+  hatches below — so a runaway condition is never unnoticed for longer than
+  that cap, even mid-window.
+- **Reset on directed work**: an unread message that `@mentions` this
+  persona (v1 heuristic; a future `#39`-based upgrade can add a richer
+  pending-directed signal without changing this behavior) clears the backoff
+  window and re-enters immediately, rather than waiting out a possibly long
+  interval.
+- **TTL escape hatch**: `SQUAD_REENTRY_TTL_MINUTES` (default `240` — 4 hours,
+  following the same env-var-with-sensible-default convention as
+  `SQUAD_STALE_MINUTES`/`SQUAD_IDLE_MINUTES`) bounds total re-entry time since
+  the hook first armed for that persona; once exceeded, the session is
+  allowed to stop even if directed work is still pending. Set to `0` to
+  disable re-entry outright without uninstalling the hook.
+- **Operator-stop escape hatch**: `SQUAD_REENTRY_STOP=1` in the environment,
+  or a marker file — `<repo>/.squad/reentry-stop` (all personas) or
+  `<repo>/.squad/reentry/<persona>.stop` (one persona) — always wins over
+  backoff and directed work. This is checked on every hook invocation, so it
+  takes effect within one capped sleep, not after the full backoff interval.
+- Backoff/TTL state persists per-persona at
+  `<repo>/.squad/reentry/<persona>.json` across hook invocations (each is a
+  fresh process); it resets when a new arm cycle starts (first invocation
+  after install, or after the TTL/operator-stop has allowed a stop).
+
+**Codex equivalent**: none exists yet. As of this writing, this repo's only
+Codex integration points are `~/.codex/prompts/squad-*.md` and
+`~/.codex/config.toml`'s `[mcp_servers.squad]` block — there is no confirmed
+Codex hook/scheduled-task primitive to hang an equivalent re-entry adapter on.
+This is a known gap, not an oversight; a Codex-side re-entry adapter needs a
+primitive that doesn't exist in this codebase yet.
+
 ## Use
 
 ```
