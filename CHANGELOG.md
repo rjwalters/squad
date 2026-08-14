@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Presence leases (#38): presence is now a renewable lease with a derived
+  `active`/`idle`/`stale` state instead of a permanent joined bit. `squad_join`
+  opens a session (new `sessions` table, one row per *connection* — keyed by
+  `session_id` with a `persona` column, so a persona can be in the room twice
+  and session-scoped state has somewhere to live) and returns `session_id` /
+  `joined_at` / `lease_expires_at`; every `squad_*` call renews the lease, so
+  there is no heartbeat to remember. **`squad_check` now returns `peers` with
+  their presence on every call** — previously the only way to see a peer's
+  `last_seen` was to call `squad_join` again — and a new `squad_leave` tool
+  (plus `squad leave` CLI) ends a session explicitly, announced in chat with
+  any claims the leaver still holds. Advisory claim staleness is derived from
+  that same lease (`squad_claims` gained a `holder_state`), so a claim and its
+  holder can never disagree about being stale. `SQUAD_IDLE_MINUTES` (default 5)
+  sets the active→idle window inside the existing `SQUAD_STALE_MINUTES`
+  (default 30) lease; `squad who` shows presence state, and `squad clear` /
+  `squad_clear` wipe sessions along with everything else.
 - `squad doctor` (#15): a preflight/diagnostic CLI subcommand that checks
   whether the MCP server's runtime dependencies (`@modelcontextprotocol/sdk`,
   `zod`) actually resolve, whether the database is reachable, and how the

@@ -47,8 +47,11 @@ export async function runMcpServer(): Promise<void> {
     "squad_join",
     {
       description:
-        "Join the squad room: registers your presence and returns who else is here, the " +
-        "current open goals, the advisory file claims, and recent chat history. Advances your read cursor past the " +
+        "Join the squad room: opens a presence lease (returning your session_id and " +
+        "lease_expires_at) and returns who else is here — each member annotated active/idle/" +
+        "stale — plus the current open goals, the advisory file claims, and recent chat " +
+        "history. Your lease renews on every squad_* call, so nothing extra is needed to stay " +
+        "active; call squad_leave when you are done. Advances your read cursor past the " +
         "returned history, so squad_check afterwards yields only new messages. Idempotent — " +
         "call again anytime to re-sync. Your identity autofills from the host harness; the " +
         "optional persona argument renames this connection, but is ignored (with a note in " +
@@ -87,7 +90,10 @@ export async function runMcpServer(): Promise<void> {
     {
       description:
         "Fetch your unread messages (your durable read cursor; excludes your own messages) and " +
-        "consume them. Pass wait_seconds to long-poll: the call blocks until a new message " +
+        "consume them. Also returns your peers with their presence — active (mid-turn), idle " +
+        "(paused but lease still good), or stale (lease expired; treat as gone) — so you can " +
+        "tell a pause from a dead session without re-joining, plus your own renewed lease. " +
+        "Pass wait_seconds to long-poll: the call blocks until a new message " +
         "arrives or the wait expires, which is how to hold a live conversation without busy-" +
         "polling. Keep wait_seconds at 25 or below unless the MCP tool timeout has been raised.",
       inputSchema: {
@@ -106,12 +112,30 @@ export async function runMcpServer(): Promise<void> {
     },
     async ({ wait_seconds, peek }) => {
       const messages = await squad.checkWait(wait_seconds ?? 0, { peek });
+      const session = squad.session();
       return json({
         messages,
+        peers: squad.peers(),
+        session_id: session?.session_id ?? null,
+        lease_expires_at: session?.lease_expires_at ?? null,
         open_goals: squad.goals().length,
         active_claims: squad.claims().length,
       });
     },
+  );
+
+  server.registerTool(
+    "squad_leave",
+    {
+      description:
+        "End your presence lease and leave the room, announced in chat as a system message so " +
+        "peers stop waiting on you (the announcement names any advisory claims you still hold). " +
+        "Call this when your session is wrapping up. You are dropped from peers' member lists " +
+        "immediately rather than lingering until your lease expires; any later squad_* call " +
+        "simply opens a fresh session. Your claims, messages, and goals are left untouched.",
+      inputSchema: {},
+    },
+    async () => json(squad.leave()),
   );
 
   server.registerTool(
@@ -421,8 +445,8 @@ export async function runMcpServer(): Promise<void> {
     "squad_clear",
     {
       description:
-        "Wipe the room: deletes all messages, goals, claims, cursors, and member records for a fresh " +
-        "session. Destructive — only call when the user has asked for a reset.",
+        "Wipe the room: deletes all messages, goals, claims, cursors, member records, and presence " +
+        "sessions for a fresh session. Destructive — only call when the user has asked for a reset.",
       inputSchema: {},
     },
     async () => {

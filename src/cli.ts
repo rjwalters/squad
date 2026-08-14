@@ -97,9 +97,12 @@ Human CLI usage:
                                takes one token (quote multi-word values). List
                                fields (e.g. --insights) take a comma-separated
                                value.
-  squad who                   Show members and last-seen times
-  squad clear                 Wipe messages, goals, claims, cursors, members, and
-                               divergence rounds/submissions
+  squad who                   Show who is in the room: presence (active/idle/
+                               stale) and last-seen times
+  squad leave                 End this persona's presence lease(s) and announce
+                               the departure in chat
+  squad clear                 Wipe messages, goals, claims, cursors, members,
+                               presence sessions, and divergence rounds/submissions
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad help                  Show this help
@@ -111,8 +114,10 @@ a git worktree the room is the primary clone's, so every worktree shares one.
 Environment:
   SQUAD_PERSONA   Identity stamped on messages (default: human)
   SQUAD_DIR       Override the data directory (skips repo-root resolution)
-  SQUAD_STALE_MINUTES  Minutes of holder absence after which a claim lists as
-                  stale (default 30)
+  SQUAD_STALE_MINUTES  Presence lease length: minutes of absence after which a
+                  member (and its claims) list as stale (default 30)
+  SQUAD_IDLE_MINUTES   Minutes of quiet after which a member drops from active
+                  to idle — still leased, just paused (default 5)
 `;
 
 function fmt(m: Message): string {
@@ -482,7 +487,18 @@ export async function runCli(argv: string[]): Promise<void> {
       break;
     }
     case "who": {
-      for (const m of squad.members()) console.log(`${m.persona}\tlast seen ${m.last_seen}`);
+      const members = squad.members();
+      if (members.length === 0) console.log("nobody in the room");
+      for (const m of members) {
+        const extra = m.sessions > 1 ? ` (${m.sessions} sessions)` : "";
+        console.log(`${m.persona}\t${m.state}\tlast seen ${m.last_seen}${extra}`);
+      }
+      break;
+    }
+    case "leave": {
+      const left = squad.leave();
+      if (left.sessions_ended.length === 0) console.log(`${persona} is not in the room`);
+      else console.log(`${persona} left the room (${left.sessions_ended.length} session(s) ended)`);
       break;
     }
     case "clear": {
@@ -516,6 +532,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "diverge",
       "card",
       "who",
+      "leave",
       "clear",
       "nuke",
       "path",

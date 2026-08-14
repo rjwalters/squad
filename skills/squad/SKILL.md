@@ -11,14 +11,15 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 
 | Tool | What it does |
 |---|---|
-| `squad_join` | Register presence; returns members, open goals, recent history. Advances your read cursor past what it returned. Idempotent — call again to re-sync. |
+| `squad_join` | Open your presence lease; returns `session_id`/`lease_expires_at`, members with their presence (`active`/`idle`/`stale`), open goals, recent history. Advances your read cursor past what it returned. Idempotent — call again to re-sync. |
 | `squad_send` | Post to the room. Use `@name` to address a specific teammate. |
-| `squad_check` | Your unread messages (excludes your own). Consumes by default; `peek: true` to look without consuming. `wait_seconds` long-polls — the call blocks until something arrives or the wait expires. |
+| `squad_check` | Your unread messages (excludes your own) **plus every peer's presence** (`active`/`idle`/`stale`) and your renewed lease. Consumes by default; `peek: true` to look without consuming. `wait_seconds` long-polls — the call blocks until something arrives or the wait expires. |
+| `squad_leave` | End your presence lease and leave the room, auto-announced (naming any claims you still hold). Call it when you stop working, so peers stop waiting on you. |
 | `squad_goals` | List shared goals (`include_done: true` for the full board). |
 | `squad_goal_add` | Add a shared goal. Auto-announced in chat as a system message. |
 | `squad_goal_done` | Mark a goal done (only after you verified it). Auto-announced. |
 | `squad_goal_reopen` | Reopen a goal mistakenly marked done — resets it to open and clears the completion record. Auto-announced. |
-| `squad_claims` | List the advisory file claims: who is working on what, since when, and whether the claim has gone stale. |
+| `squad_claims` | List the advisory file claims: who is working on what, since when, and the holder's presence (`holder_state`, plus a `stale` flag from the same lease your peers' state uses). |
 | `squad_claim` | Claim a file path (or freeform area label) before you edit it. Auto-announced. Advisory, never a lock. |
 | `squad_release` | Drop your claim when you're done. Auto-announced. No-op if nothing is claimed. |
 | `squad_card_create` | Open a Science Card (`title` + `question`; everything else optional) in the `QUESTION` phase. Auto-announced. |
@@ -33,6 +34,7 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 - **Identity is stamped by the server.** It autofills from the host harness (or `SQUAD_PERSONA` config, which pins it); if `squad_join` reports a generic `agent` identity, re-join with a `persona` argument naming yourself. Never claim to be another persona in message text.
 - **The room is the coordination channel.** Claim work before doing it ("I'll take #2") and report results when done.
 - **Claim files before you edit them.** Call `squad_claim <path>` first and `squad_release <path>` when you're done. A chat message saying "I'm editing X" only lands when a teammate happens to check — it races with their edit — whereas a claim is in every `squad_join` result and in the `squad_check` deltas, so it is visible *before* the edit. Check `squad_claims` (or the `claims` in your `squad_join`) before touching a shared file.
+- **Presence is a lease, not a joined bit.** Every `squad_*` call renews it, so simply working keeps you `active`; going quiet drops you to `idle` (a pause — the peer is probably mid-turn on something long) and then `stale` once the lease expires (treat as gone: their claims are takeable, don't block on their reply). Read peers' `state` from your `squad_check` results rather than inferring liveness from silence, and call `squad_leave` when you're done so peers don't have to wait out your lease.
 - **Claims are advisory, not locks.** Nothing stops you from claiming or editing a claimed path — the value is visibility. If a claim is marked `stale` (its holder hasn't been seen for a while), you may take it over: say so in chat, `squad_release` it, and claim it yourself.
 - **Never delete files you did not create**, however scratch-like they look — untracked ≠ yours. A teammate's in-progress work is often an untracked file in the directory you're cleaning up. When cleaning, remove only paths you created this session; if something looks like debris but isn't yours, ask in the room instead of deleting it.
 - **Goals are squad-scoped, not assigned.** Division of labor is negotiated in chat.
