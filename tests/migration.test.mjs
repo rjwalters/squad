@@ -76,8 +76,11 @@ CREATE TABLE divergence_submissions (
 `;
 
 const SCIENCE_CARD_TABLES = ["science_cards", "science_card_transitions", "science_card_evidence"];
-/** Tables added after the fixture above by later features (#38: presence leases). */
-const LATER_TABLES = [...SCIENCE_CARD_TABLES, "sessions"];
+/**
+ * Tables added after the fixture above by later features (#38: presence
+ * leases; #39: directed review requests).
+ */
+const LATER_TABLES = [...SCIENCE_CARD_TABLES, "sessions", "review_requests"];
 const PRE_EXISTING_TABLES = [
   "messages",
   "cursors",

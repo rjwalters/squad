@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Directed review requests (#39): `squad_review_open` / `squad_review_claim` /
+  `squad_review_resolve` / `squad_review_cancel` / `squad_review_list` MCP
+  tools and a matching `squad review` CLI family, backed by a new
+  `review_requests` table. A review request is a durable, directed ask — a
+  `target` persona, `refs`, a `priority` (`low`/`normal`/`high`/`urgent`), a
+  body, and an optional expiry — with a server-enforced state machine
+  (`pending → claimed → resolved`, and `pending|claimed → cancelled`), so
+  "you specifically need to look at this" no longer has to compete with
+  ordinary prose in the chat log. Claiming records the claimant and a claim
+  timestamp (the ack/lease the requester is waiting on); only the target may
+  claim, only the claimant may resolve, and either side may cancel. Every
+  transition is announced in chat as a system message. `squad_join` returns
+  `pending_reviews` and `squad_check` adds `pending_review_count` /
+  `pending_reviews` alongside `open_goals`/`active_claims`, both scoped to the
+  caller and ordered most-urgent-first, so a re-entering peer can work by
+  priority instead of replaying chat chronologically. Expiry is lazy — derived
+  at read time like presence staleness, never written back — so a request past
+  its `expires_ts` simply stops gating its target, with no background process
+  and no explicit cancel needed.
 - Presence leases (#38): presence is now a renewable lease with a derived
   `active`/`idle`/`stale` state instead of a permanent joined bit. `squad_join`
   opens a session (new `sessions` table, one row per *connection* — keyed by
