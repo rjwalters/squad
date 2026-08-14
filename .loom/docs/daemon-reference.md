@@ -118,7 +118,8 @@ issue** — the v0.10.0 set is intentionally frozen.
 | `daemon.drain.started`     | Drain supervisor (#4090)       | `{in_flight, timeout_secs, force_after_timeout, deadline}` |
 | `daemon.drain.completed`   | Drain supervisor (#4090)       | `{in_flight}` (always `0`) |
 | `daemon.drain.aborted`     | Daemon IPC (#4090)             | `{was_draining}` |
-| `daemon.drain.timeout`     | Drain supervisor (#4090)       | `{in_flight, forced, cancelled?}` |
+| `daemon.drain.timeout`     | Drain supervisor (#4090)       | `{in_flight, forced, cancelled?, then_exit?, roll_pending?, attempts?, elapsed_secs?}` |
+| `daemon.drain.roll_pending` | Drain supervisor (#6007)      | `{in_flight, attempt, window_secs, budget_secs}` |
 
 The four `epic.issue.{N}.*` topics were authorized by **#3873** (epic #3842
 Phase 4) and are documented in full under [Epic supervisor](#epic-supervisor-3842)
@@ -127,11 +128,16 @@ below. The `daemon.capacity.advisory` topic was authorized by **#3902** (epic
 state change** (entered/left the token-bound state), never every tick, so the
 operator gets one add-capacity advisory on the way in and one recovery on the way
 out. See [Token-capacity backpressure](#token-capacity-backpressure-3902) below.
-The four `daemon.drain.*` topics were authorized by **#4090** for the scheduled
+Four of the `daemon.drain.*` topics were authorized by **#4090** for the scheduled
 drain-and-restart primitive — `started` when a drain is accepted, `completed`
 when the last in-flight sweep finishes (right before the supervised relaunch),
 `aborted` when an operator cancels a drain, and `timeout` when the deadline is
-reached (`forced` distinguishes a refusal from a force-cancel restart). See
+reached *terminally* (`forced` distinguishes a refusal from a force-cancel
+restart). **#6007** adds a fifth, `roll_pending`: a relaunch drain whose deadline
+passed with work still in flight now **retains** the roll (dispatch stays paused,
+the restart re-arms itself at quiescence) and publishes `roll_pending` per re-arm;
+`timeout` then fires only if the whole paused-dispatch budget is spent and the roll
+is abandoned. See
 [Supervised restart primitive](#supervised-restart-primitive-4054) below.
 They ride the same in-memory bus as the sweep topics and are tailable via
 `subscribe_to_events` / `tail_event_bus`.
@@ -406,9 +412,18 @@ Inputs:
   repo root to list the sweeps tracked by that repo's registry — the way to
   observe sweeps the daemon autonomously dispatched into a non-default managed
   repo. Each returned `SweepInfo` also carries a `repo` field naming its owner,
-  so a response is self-describing even without filtering. Cross-repo
-  aggregation in a single call is deferred to phase d (#3930). `#[serde(default)]`
-  on the wire.
+  so a response is self-describing even without filtering. Ignored when
+  `all_workspaces` is `true`. `#[serde(default)]` on the wire.
+- `all_workspaces` (optional, issue #6006) — fan out across every registered
+  managed workspace (`WorkspaceRegistry::effective_roots`, the same enumeration
+  `list_quarantines`'s `None` case and `loom-daemon status`'s `per_repo` use)
+  and return the aggregated fleet-wide sweep set in one call, sorted by
+  `(repo, started_at)`. No prior knowledge of individual repo roots is needed —
+  an empty registry still yields exactly the default workspace, so a
+  single-workspace daemon's fan-out equals `workspace_root: None`. `false` (or
+  absent — `#[serde(default)]`) preserves the existing `workspace_root`-scoped
+  (or default-workspace-only) behavior byte-for-byte; `workspace_root` is
+  ignored when this is `true`.
 
 The same optional `workspace_root` input (default = default workspace, unchanged)
 is accepted by `get_sweep_status`, `tail_sweep_log`, and `cancel_sweep` — so a
@@ -745,7 +760,21 @@ the plan/ordering/checklist; the per-phase shell is rendered in
 9. **idle-shutdown** (optional, `--idle-shutdown-minutes N`) — a cron guard that
    powers the host off after N idle minutes. This is stage 2:
    `autonomous.idleExit` is stage 1. On daemon-managed hosts use a short guard
-   window (typically 15–30 minutes); the running-daemon veto remains.
+   window (typically 15–30 minutes).
+
+   **The guard vetoes on the daemon's own reported eligibility, not on bare
+   process presence (#5565).** Under the fleet's own `daemon-unit` systemd
+   `Restart=on-success` supervision (step 8 above), a stage-1 `autonomous.idleExit`
+   self-exit is respawned immediately — so a veto on `pgrep -f loom-daemon`
+   (the pre-#5565 behavior) could never observe an absent daemon, making
+   `--idle-shutdown-minutes` a silent no-op on every `fleet add-worker`-provisioned
+   host. The guard now calls `loom-daemon status --json` and reads its
+   `idle_exit.eligible` field — the SAME 0-in-flight / no-active-role /
+   no-lifecycle-activity-within-the-window (or token-starvation) determination
+   `autonomous.idleExit`'s own tracker computes — and vetoes on *that* instead. A
+   daemon too old to report eligibility (no `idle_exit` block on the wire) falls
+   back to the raw in-flight-sweep count; a genuinely unreachable daemon (socket
+   gone) contributes no veto of its own, since there is nothing left to ask.
 
    **This is a real power-off, not a suspend** — the box goes fully dark (no
    SSH, no tailnet, nothing) until an operator brings it back (#4697). Wake
@@ -1277,14 +1306,15 @@ own registry from the `WorkspacePool` (`get_or_provision`). It returns:
 
 `loom-daemon status` prints a **Managed repos** section (root, in-flight count,
 gate state); `loom-daemon status --json` adds the `per_repo` array. The
-dynamic-cap inputs (token pool, disk headroom, cpu/load headroom (#3978),
-configured ceiling) remain computed once from the daemon's primary workspace —
+dynamic-cap inputs (disk headroom, ram headroom, configured ceiling) remain
+computed once from the daemon's primary workspace —
 they are *machine-level* resources, so
 they stay a single global figure, not per-repo. `resolve_registry` (the
 per-request `workspace_root` targeting used by `dispatch_sweep` / `list_sweeps` /
 etc.) is unchanged: the cross-repo aggregation is a read-only snapshot for
-`DaemonStatus` only. A merged `list_sweeps` across all repos without an explicit
-`workspace_root` remains a deferred follow-up.
+`DaemonStatus`. `list_sweeps` gained its own opt-in fleet-wide fan-out
+(`all_workspaces`, issue #6006 — see the `list_sweeps` reference above) so a
+merged view across every registered repo no longer requires one call per repo.
 
 ### Per-repo main-health gate (AC2)
 
@@ -2324,7 +2354,17 @@ dynamic_cap = min(disk headroom, ram headroom, configured maxConcurrent)
 ```
 
 from live inputs, so disk/RAM/backlog changes are honored without a daemon
-restart. **#5270 removed the token axis from this formula entirely**, on any
+restart.
+
+> **This cap bounds SWEEP dispatch only (#6102).** Role-runner agents
+> (Curator / Judge / Doctor / Champion / Guide / …) are spawned by the role
+> runner's own interval and idle-edge loops and **never pass through this
+> admission path**, so none of the three terms above — including
+> `maxConcurrent` — has ever bounded them. Since #6102 they have their own
+> ceiling, `autonomous.roleRunner.maxConcurrent` (default: the number of
+> interval-cadence default roles); this host's worst-case agent count is
+> `dynamic_cap + roleRunner.maxConcurrent`. See
+> [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102). **#5270 removed the token axis from this formula entirely**, on any
 auth path (API key or subscription pool, overage-enabled or not) — operator
 direction: "we should only ever limit parallelism based on the machine
 disk/RAM/CPU." A metered `ANTHROPIC_API_KEY` has no 5h/7d subscription window,
@@ -2348,7 +2388,7 @@ touching running work.
 |-------|--------|-------------------|
 | **disk headroom** | `floor(free_gb / LOOM_PER_WORKTREE_GB)` on the worktree-root volume (`disk_headroom::disk_headroom_limit`, a Rust port of `disk-headroom.sh` that shells to `df -Pk`) | never provision more worktrees than the scratch volume can hold |
 | **ram headroom** (#5270) | `floor(available_gb / LOOM_PER_WORKTREE_RAM_GB)` on the host's currently-available memory (`ram_headroom::ram_headroom_limit`, modeled on `disk_headroom`'s shape: `/proc/meminfo`'s `MemAvailable` on Linux, `vm_stat` free+inactive pages × page size on macOS) | never provision more worktrees than available RAM can hold; the second "dumb mode" machine-headroom axis alongside disk |
-| **configured maxConcurrent** | `LOOM_WORK_FINDER_MAX_CONCURRENT` / `autonomous.workFinder.maxConcurrent` (repurposed from Phase A's fixed target into an operator ceiling) | **the** per-machine admission knob (#4512) — tuned empirically by the operator, the only *policy* term in the `min(...)` (the other two meter exhaustible resources: bytes of disk and bytes of RAM) |
+| **configured maxConcurrent** | `LOOM_WORK_FINDER_MAX_CONCURRENT` / `autonomous.workFinder.maxConcurrent` (repurposed from Phase A's fixed target into an operator ceiling) | the per-machine **sweep-dispatch** admission knob (#4512) — tuned empirically by the operator, the only *policy* term in the `min(...)` (the other two meter exhaustible resources: bytes of disk and bytes of RAM). **Not the whole host's agent budget**: role-runner agents are admitted outside this formula entirely (#6102) |
 
 Retired as cap inputs (informational-only now — see `capacity::token_axis_limit` / `tokens_pool::select`):
 
@@ -2384,12 +2424,15 @@ it anyway**, because it had become the binding constraint on fleet throughput:
 The replacement is two-part, and the protection moved to **where the load
 actually is**:
 
-1. **Admission is one per-machine knob.** `autonomous.workFinder.maxConcurrent`
-   is the whole policy, tuned empirically by the operator (expect 10+ on an
+1. **Sweep admission is one per-machine knob.** `autonomous.workFinder.maxConcurrent`
+   is the whole *sweep* policy, tuned empirically by the operator (expect 10+ on an
    8-core API-bound worker). The two remaining terms — disk headroom and (since
    #5270) RAM headroom — stay because they meter genuinely *exhaustible*
    resources (bytes), not an estimate. (The token axis sat here too until
-   #5270 removed it — see the section above.)
+   #5270 removed it — see the section above.) **It is not the whole *host*
+   policy**: role-runner agents are admitted outside this formula entirely and
+   carry their own ceiling since #6102 — see
+   [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102).
 2. **The genuinely heavy stages serialize where they occur**, via the
    [machine-wide build slot](#machine-wide-build-slot-4512). N sweeps run
    concurrently; at most `LOOM_BUILD_SLOTS` of them hold the slot while running
@@ -2601,6 +2644,111 @@ the `admission_brake` status/JSON block, and `loom-daemon status`'s
 `Admission brake: HOLDING …` line appends a `⚠ STARVING` clause once the
 current hold has zero sweeps in flight.
 
+**#5715 is about starvation, not about bounding role-runner load.** The escape
+hatch stops role-driven load from *permanently blocking sweep admission*; it
+does nothing to bound or surface role-agent concurrency itself. That gap is
+closed separately, by the ceiling described next (#6102), and the two
+compose: the ceiling caps how much role-driven load can accumulate, the escape
+hatch guarantees that whatever load does accumulate cannot livelock sweeps.
+
+##### What the brake can and cannot hold back (#6102)
+
+The brake's guarantee is narrower than "it protects the host from overload",
+and stating it precisely matters because an operator reads this line when
+deciding what to tune:
+
+| | |
+|---|---|
+| **It samples** | host-wide load-per-core. A role agent's CPU absolutely counts toward the hold threshold |
+| **It can hold back** | a **new sweep admission**, and nothing else |
+| **It cannot hold back** | a role-runner agent — those are admitted by the role runner's own loops, bounded only by `autonomous.roleRunner.maxConcurrent` (#6102) |
+| **It cannot shed** | anything already running. In-flight sweeps and in-flight role agents both run to completion; the brake is an *admission* gate, never a preemption mechanism |
+
+Two practical consequences:
+
+- **"Held with 0 sweeps in flight" does not mean an idle host.** The starvation
+  log lines now say so explicitly, naming the live role-agent count when there
+  is one (`… — NOTE: 3 role-runner agent(s) ARE running; the brake cannot hold
+  those back …`). Before #6102 they asserted "nothing is running to relieve
+  it", which was false in exactly the case that matters.
+- **If load is high while few sweeps are in flight, lowering `maxConcurrent`
+  will not reach that load.** Lower the role-agent ceiling instead.
+
+#### The other half of the agent budget: role-runner agents (#6102)
+
+`autonomous.workFinder.maxConcurrent` is the knob an operator reaches for after
+a load-induced crash — and until #6102 it delivered materially less protection
+than its own documentation implied, because **it bounds sweep dispatch only**.
+
+On `robb-studio` (Mac Studio M3 Ultra, 28 logical cores) an overnight hard halt
+under 1m load averages of **126–136** was remediated by lowering
+`maxConcurrent` from 16 to 8. Afterwards the host still measured:
+
+```
+In-flight sweeps: 1
+Dynamic concurrency cap: 8
+host cpu: 28 logical cores, 8% idle (~25.8 cores consumed), 1m loadavg 32.41
+$ pgrep -f "claude-wrapper.sh" | wc -l
+11
+```
+
+1.15 load-per-core — above the `0.95` brake threshold — with a *single* sweep
+in flight against a cap of 8. The other ten agents were role-runner ticks
+(25 registered workspaces × 7 interval roles = up to 175 potentially
+concurrent), admitted entirely outside `min(disk, ram, maxConcurrent)`.
+
+**The fix is a distinct ceiling for the distinct population.**
+
+| | Value |
+|---|---|
+| Config | `autonomous.roleRunner.maxConcurrent` |
+| Env | `LOOM_ROLE_RUNNER_MAX_CONCURRENT` |
+| Default | the count of interval-cadence default roles (`role_runner::default_max_concurrent`) — **7** today |
+| Precedence | env > config > default, re-read every tick (a config edit hot-applies, unlike `maxConcurrent`) |
+| Scope | **process-wide across every managed workspace**, because the resource it protects (host CPU/RAM) is shared by all of them |
+
+Design notes:
+
+- **Counted across roots, resolved per root.** The count compared against the
+  ceiling spans every managed workspace — a per-root ceiling would have bounded
+  nothing on a 25-workspace host. The *value* comes from whichever root's tick
+  is asking, exactly like `architectMaxProposals`; where roots disagree, the
+  tighter root simply refuses sooner.
+- **A derived default, not a magic number.** Defaulting to the number of
+  interval-cadence default roles bounds role-agent load at roughly *one wave of
+  distinct roles* instead of letting it scale with workspace count, and adding a
+  role raises the ceiling by exactly one rather than silently squeezing the
+  others.
+- **Refusals are `WARN`, and distinct from cadence overlap.** A ceiling refusal
+  logs `role_runner: <role> tick for <root> not admitted — N role agent(s)
+  already in flight at the ceiling of M …` and retries next tick. The pre-existing
+  per-`(root, role)` overlap skip (#4364) stays at `debug!` — it is routine
+  cadence overlap, not a resource limit, and conflating the two is what made
+  role-agent load invisible.
+- **Not folded into `dynamic_cap`.** Sweeps and role agents are admitted by
+  different subsystems against different queues; one `min(...)` over both would
+  misreport which is actually binding. They are reported as two ceilings whose
+  sum is the host's worst-case agent count.
+
+**Observability.** `loom-daemon status` prints the live count and its ceiling
+immediately under the in-flight sweep table, plus the total:
+
+```
+Role-runner agents in flight: 3 (ceiling 7)
+  (a SEPARATE ceiling from the sweep cap below — autonomous.workFinder.maxConcurrent
+   bounds sweep dispatch only; tune these agents with
+   autonomous.roleRunner.maxConcurrent / LOOM_ROLE_RUNNER_MAX_CONCURRENT, #6102)
+  total agents on this host = 1 sweep(s) + 3 role agent(s) = 4
+```
+
+`--json` carries the same under a `role_agents` object (`active`,
+`max_concurrent`, `total_with_sweeps`,
+`bounded_by_work_finder_max_concurrent: false`); a pre-#6102 daemon sends
+neither field, which parses as `0` active and a `null` ceiling — read `null` as
+**unknown**, not as "unbounded". `loom-daemon calibrate` reports the ceiling
+next to `maxConcurrent` in its "Currently configured" block, and its one-line
+reading appends the worst-case agent sum whenever the role runner is enabled.
+
 #### Sizing `maxConcurrent`: per-machine **and** per-workload (#4512, #4903)
 
 `autonomous.workFinder.maxConcurrent` is the only *policy* term in the cap, and
@@ -2634,7 +2782,11 @@ Consequences worth internalizing:
   reports.
 - **The brake is a backstop, not a substitute.** A correctly-tuned
   `maxConcurrent` should mean the saturation brake never engages. If it *is*
-  engaging, that is the signal to lower the knob for this machine's workload.
+  engaging, that is the signal to lower the knob for this machine's workload —
+  **unless few sweeps are in flight**, in which case the load is not coming
+  from the population this knob bounds. Check `loom-daemon status`'s
+  role-agent line before touching `maxConcurrent`: lowering it cannot reach
+  role-driven load (#6102).
 
 #### Machine-wide build slot (#4512)
 
@@ -2749,7 +2901,8 @@ loom-daemon calibrate --write         # DEPRECATED, ignored (prints a notice)
   1m loadavg, disk headroom, ram headroom, healthy/total accounts — informational
   only, build slots), the currently resolved knobs, the `min(disk, ram,
   maxConcurrent)` breakdown (#5270 — no token term), which term binds (`disk` /
-  `ram` / `ceiling`), and one line of advice.
+  `ram` / `ceiling`), the **role-agent ceiling** and this host's worst-case
+  agent count (#6102), and one line of advice.
 - **How to read it** (this is the tuning loop that replaces the old
   recommendation):
   - binds on `ceiling` **while the host sits idle** ⇒ raise `maxConcurrent`;
@@ -2758,6 +2911,13 @@ loom-daemon calibrate --write         # DEPRECATED, ignored (prints a notice)
     sustains — leave it or lower it;
   - binds on `disk` / `ram` ⇒ raising `maxConcurrent` changes nothing; free
     scratch space or memory.
+- **`maxConcurrent` is only half the budget (#6102).** Every reading above
+  concerns **sweep** dispatch. When the role runner is enabled, the advice line
+  appends the role-agent ceiling and the worst-case sum
+  (`maxConcurrent + roleRunner.maxConcurrent`) — because a host that is
+  saturated with *few sweeps in flight* is not telling you to lower
+  `maxConcurrent`; lowering it cannot reach role-driven load. Use
+  `loom-daemon status`'s live role-agent count to tell the two apart.
 - **Deprecation surface**: `calibrate` also prints the retired-knob notice to
   **stderr** — an operator running it to size a host is exactly who needs to hear
   that a stale `estCoresPerSweep` is doing nothing (see the previous
@@ -2988,6 +3148,35 @@ bad), `classification_is_transient` keeps it retryable, and
 The pool has no per-model account state, so it must stay that way — the distinct
 name exists for the orchestrator's remedy choice and for forensics, not for a
 different pool policy.
+
+**Auth-dead (401 invalid-bearer-token) rotation, distinct from exhaustion
+(#6030).** A wave of daemon-dispatched children died within minutes ending in
+`Failed to authenticate. API Error: 401 Invalid bearer token`. This is a
+different failure class from every pattern above: an exhausted account
+recovers on its own once its quota window resets, but an auth-dead one (a
+revoked/invalid OAuth token) fails **every** dispatch forever until a human
+re-authenticates it. The phrase matched no `classify_error` category, so it
+fell through to the `RECOVERABLE` catch-all — the wrapper retried the same
+dead credential with backoff until `MAX_RETRIES`, then died without ever
+marking the account bad, so the next spawn could pick the exact same
+auth-dead account again. `classify_error` now matches `invalid bearer token`
+(alongside the existing `401 … authentication_error` / `token has expired`
+patterns) as `TOKEN_EXPIRED`, and a new `is_account_auth_dead` /
+`rotate_auth_dead_account` pair in `claude-wrapper.sh` — structurally
+parallel to `is_account_exhaustion` / `rotate_exhausted_account` — marks the
+account bad with an `"auth-dead: ..."` reason (not `"exhausted: ..."`) before
+rotating, sharing the same `rotations`/`max_rotations` cap. `bad_tokens`'s
+existing `auth_reason_regex` already classifies any reason string containing
+`auth` as `BadReasonClass::Auth` (permanent, clears only via `tokens
+unblock`), so no format change was needed there — only the wrapper-side gap
+(the account was never marked bad in the first place) needed closing. `tokens
+check`'s probe path (`discover_tokens`) also switched from a naive
+whole-line-equality `.bad_tokens` check to the same `blocking_entry_in_dir`
+parser `select.rs` uses, so a bad-marked account's real class/reason (e.g.
+`auth: auth-dead: 401 Invalid bearer token`) now surfaces in the table/JSON
+output instead of the opaque `bad_token_listed` — telling an operator whether
+an account needs `claude login` + `tokens unblock` or will simply clear on
+its own cooldown.
 
 The **effective** per-tick concurrency is then `min(dynamic_cap, backlog_depth)`:
 `tick()` iterates the ready `loom:issue` rows and stops at the cap, so
@@ -3250,7 +3439,7 @@ knobs not yet audited here.
 | `autonomous.model` | *(per-dispatch `dispatch_sweep` `model` param)* | `sonnet` | Model pinned on **every** daemon-dispatched child (work-finder, epic supervisor, and `dispatch_sweep` when its `model` param is absent). See below (#3944) |
 | `autonomous.workFinder.enabled` | `LOOM_WORK_FINDER` | `false` | Master on/off for the finder loop. **Restart required** — read once, before the loop is spawned; flipping it in config alone does not start/stop an already-running daemon's loop (#5963) |
 | `autonomous.workFinder.intervalSecs` | `LOOM_WORK_FINDER_INTERVAL_SECS` | `60` | Zero/invalid → default |
-| `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | **The** per-machine admission knob since #4512 — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. **Restart required** — `resolve_max_concurrent_with_config` runs once during bring-up and the resulting `configured_max` is threaded into the loop as a frozen value; the per-tick `dynamic_cap` recomputes only its `disk`/`ram` headroom terms around that fixed operator ceiling, so retuning this key in config alone changes nothing until the daemon restarts (#5963). See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
+| `autonomous.workFinder.maxConcurrent` | `LOOM_WORK_FINDER_MAX_CONCURRENT` | `3` | The per-machine **sweep-dispatch** admission knob since #4512 — **it bounds sweeps only; role-runner agents are admitted outside it and carry their own `autonomous.roleRunner.maxConcurrent` ceiling (#6102)** — an operator ceiling, not a fixed target, tuned empirically from `loom-daemon calibrate` / `status`. Per-machine **and workload-dependent** (#4903): ~10+ on an 8-core API-bound (software) worker, but **2–3** on the same 8 cores running analog/simulation sweeps. **Restart required** — `resolve_max_concurrent_with_config` runs once during bring-up and the resulting `configured_max` is threaded into the loop as a frozen value; the per-tick `dynamic_cap` recomputes only its `disk`/`ram` headroom terms around that fixed operator ceiling, so retuning this key in config alone changes nothing until the daemon restarts (#5963). See [Sizing `maxConcurrent`](#sizing-maxconcurrent-per-machine-and-per-workload-4512-4903) below |
 | `autonomous.workFinder.maxAdmissionsPerTick` | `LOOM_WORK_FINDER_MAX_ADMISSIONS_PER_TICK` | `3` | Per-tick **ramp** cap (#4234) — bounds how many *new* sweeps one tick may admit, independent of `maxConcurrent`/the dynamic cap. Zero/invalid → default; resolved once at startup, the same startup-capture pattern as `maxConcurrent`. **Restart required** to pick up a change (#5963) |
 | `autonomous.workFinder.saturationBrake.enabled` | `LOOM_ADMISSION_BRAKE` | `true` | Saturation admission brake on/off (#4903). A safety backstop — **defaults on**. Holds *new* admissions while the host is already saturated; never preempts a running sweep. Env truthy (`1`/`true`/`yes`/`on`) enables, any other value disables; wins over config. **Restart required** — resolved once at startup and registered as a process-global handle alongside the host breaker (#5963). See [Saturation admission brake](#saturation-admission-brake-4903) below |
 | `autonomous.workFinder.saturationBrake.loadPerCoreHold` | `LOOM_ADMISSION_BRAKE_LOAD_PER_CORE` | `0.95` (`4.0` before #5270) | Load-per-core at/over which new admissions are held for that tick. `<= 0`/invalid → default. Since #5270 sits deliberately *below* the host breaker's `2.5` trip: the brake is now the primary "dumb mode" CPU gate and engages first (a single over-threshold reading), the breaker remains the slower sustained-distress trip. **Restart required** — same startup-resolved global as `enabled` above (#5963) |
@@ -3280,6 +3469,7 @@ knobs not yet audited here.
 | `autonomous.roleRunner.enabled` | `LOOM_ROLE_RUNNER` | `false` | Periodic standalone support-role runner on/off (#4015). **Resolved per registered root** (#4377) — see the callout below the table. **Live** — every `roleRunner.*` key (`enabled`, `roles`, `onIdle`, `model`, …) is re-read from that root's config on every role-runner tick, not cached at daemon startup; no restart needed for a config-only change (#5963) |
 | `autonomous.roleRunner.roles` | *(config only)* | the 7 **interval-default** roles (`architect` excluded, #5656) | Subset of `champion`/`curator`/`judge`/`doctor`/`auditor`/`guide`/`hermit`/`architect` to dispatch on the interval cadence; explicit empty array runs none. **The absent-key default is the interval-default subset, not the whole table**: `architect` is idle-addressable-only (see `onIdle` below) and is never swept in by the "unset ⇒ all defaults" fallback — naming it here explicitly is the deliberate opt-in to a timer-driven architect (1h cadence). **Allowlist, not an addition** — must be updated by hand when a new interval-default role ships, or it silently never dispatches (#5339); a non-empty pinned list missing an interval-default entry warns (omitting `architect` never warns — that is correct, not stale). Also resolved from each root's own config |
 | `autonomous.roleRunner.intervalSecs` | `LOOM_ROLE_RUNNER_INTERVAL_SECS` | per-role built-in (5–15 min) | Uniform override applied to every enabled role's cadence |
+| `autonomous.roleRunner.maxConcurrent` | `LOOM_ROLE_RUNNER_MAX_CONCURRENT` | the 7 interval-default roles | **The ceiling on concurrently-running role agents (#6102)** — the role-runner counterpart of `workFinder.maxConcurrent`, which bounds sweep dispatch **only**. Counted **process-wide across every managed workspace** (the host is shared; a per-root ceiling would bound nothing on a 25-workspace box) but resolved from each root's own config, like `architectMaxProposals`. A refused tick logs at `WARN` and retries next tick — distinct from the `debug!`-level per-`(root, role)` overlap skip (#4364). Zero/non-integer at either tier drops to the next (a `0` ceiling is `enabled: false` spelled confusingly). **Live** — re-read every tick. See [The other half of the agent budget](#the-other-half-of-the-agent-budget-role-runner-agents-6102) |
 | `autonomous.roleRunner.model` | *(config only)* | `sonnet` | Model every role child is pinned to via `--model` (#4501). Resolved through the same `resolve_dispatch_model` chain as sweep dispatch: this key > `autonomous.model` > shipped default; blanks treated as unset. A role child never inherits the account's interactive CLI default |
 | `autonomous.roleRunner.onIdle` | *(config only)* | `[]` (none) | Subset of all **8** shipped roles — the 7 above **plus `architect`**, which is reachable here and nowhere else by default (#5656) — to fire on the work-finder **idle edge** (#4364) — the non-idle → idle transition (0 in-flight sweeps AND nothing dispatched this tick), in addition to the interval cadence. Absent → none (opposite default from `roles`); unknown names ignored with a warning. Debounced to min 60s per (root, role) and skipped while that role's interval/idle run is in progress. **Requires the work finder enabled** to observe idleness (a startup warning fires if set with the work finder off). **Also gated by that same root's own `enabled`** (#4377) — see below |
 | `autonomous.roleRunner.architectMaxProposals` | `LOOM_ARCHITECT_MAX_PROPOSALS` | `5` | **Per-invocation** cap on how many proposal issues one `architect` dispatch may file (#5656) — the actuator-saturation limit of the idle-edge control loop. Passed to the session as `/loom:architect --max-proposals <n>`, which `architect.md` enforces as a hard ceiling. Per-repo on purpose (the workable cap grows with a repo's maturity — ~5 while work is narrow, 7+ once it fans out), so it is read from each root's own config. Zero/negative/non-integer at either tier drops to the next one (a cap of `0` would spend a whole session forbidden from producing anything). Ignored for every other role |
@@ -3332,12 +3522,20 @@ and exits 0. It never calls `shutdown`, `sudo`, or a provider API.
 
 The fleet add-worker systemd unit uses `Restart=on-success` (#4640, matching
 `loom-daemon-start.sh`'s canonical unit), so exit 0 relaunches — same as macOS
-launchd's `KeepAlive:SuccessfulExit`. Idle exit is only meaningful under
-on-failure-style supervision (e.g. a non-systemd/nohup Linux host); enabling it
-on a fleet worker or under launchd defeats its own purpose, since the
-supervisor immediately relaunches the daemon it just exited. A loud warning is
-logged when it is enabled under launchd; the same caveat applies to any
-systemd-supervised daemon (fleet workers included).
+launchd's `KeepAlive:SuccessfulExit`. Taken **in isolation**, idle exit only
+meaningfully *stops the process* under on-failure-style supervision (e.g. a
+non-systemd/nohup Linux host); under `Restart=on-success` (fleet workers,
+launchd's `KeepAlive:SuccessfulExit`) the supervisor immediately relaunches
+the daemon it just exited, so this stage alone never leaves the host
+observably idle for long. A loud warning is logged when it is enabled under
+launchd; the same caveat applies to any systemd-supervised daemon (fleet
+workers included). **This no longer means the combination is pointless on a
+fleet worker (#5565)**: the freshly-relaunched daemon re-runs the identical
+tracker, so stage 2's cron guard — which asks the daemon's *current*
+eligibility on every poll rather than checking whether the process is
+merely alive — still correctly observes "idle" once the window elapses
+again, relaunch or not. See step 9's `idle-shutdown` entry above for the
+guard-side half of this.
 
 **This is stage 1 only — it never powers off the host.** `autonomous.idleExit`
 above just makes `loom-daemon` itself exit; under `Restart=on-success`
@@ -4264,8 +4462,32 @@ build slot** for the duration of the removal, so it can never delete `target/`
 under a running build gate — if the slot cannot be taken it defers to the next
 tick rather than proceeding unserialized (a consequence worth knowing:
 `LOOM_BUILD_SLOTS=0` therefore also disables scheduled deep cleans, and the log
-line says so). It never deletes the directory holding the running binary, and an
+line says so). It never deletes a directory holding a running binary, and an
 unmeasurable `df` never fires a deletion (unknown != zero, #4164).
+
+**Live-binary protection (#6127).** "Never deletes the directory holding the
+running binary" originally meant *this daemon's own* binary — a `current_exe()`
+comparison, which cannot see a co-located service. It now also means **anyone
+else's**: before removing `target/`/`node_modules/`, the shared engine both this
+pass and the CLI `clean --deep` go through scans the process table (Linux
+`/proc/<pid>/exe`, macOS/BSD `ps -o comm=`) and keeps the whole directory if a
+live process is executing a binary inside it, logging at `WARN`:
+
+```
+deep_clean: /home/u/GitHub/safehouse kept target/ is backing 1 live process(es)
+[pid 4127 → /home/u/GitHub/safehouse/target/release/safehoused] — refusing to
+unlink a running program's binary. Stop the service (or, better, stop launching
+it from a build-output path) and re-run.
+```
+
+That check is an ungated floor: no `--force` override, no config toggle, since
+an escape hatch a scheduled job could set would restore the original bug (the
+deletion is silent — a running process survives its binary being unlinked, and
+the outage only fires at the next restart). It cannot see a service that is
+**stopped** when the pass runs, so the operator-side rule still holds: install
+what you run, and never point a launchd/systemd unit at a path under `target/`.
+See [troubleshooting → Never launch a service from a build-output
+path](troubleshooting.md#never-launch-a-service-from-a-build-output-path-6127).
 
 ```json
 {
@@ -4678,6 +4900,7 @@ leaves the daemon's behavior byte-for-byte unchanged:
 |---------|-----------|------------|---------|
 | `LOOM_ROLE_RUNNER` | `autonomous.roleRunner.enabled` | env > config > default | `false` (off) |
 | `LOOM_ROLE_RUNNER_INTERVAL_SECS` | `autonomous.roleRunner.intervalSecs` | env > config > default | per-role built-in (see above) |
+| `LOOM_ROLE_RUNNER_MAX_CONCURRENT` | `autonomous.roleRunner.maxConcurrent` | env > config > default | the 7 interval-default roles (concurrent role-agent ceiling, #6102 — bounds the agents `workFinder.maxConcurrent` does not) |
 | — | `autonomous.roleRunner.roles` | config only | the 7 interval-default roles (`architect` excluded, #5656) |
 | — | `autonomous.roleRunner.onIdle` | config only | `[]` (none; may name any of the 8 shipped roles, `architect` included) |
 | — | `autonomous.roleRunner.model` | config only (`roleRunner.model` > `autonomous.model` > default) | `sonnet` (`DEFAULT_DISPATCH_MODEL`) |
@@ -5205,6 +5428,82 @@ made `#[tokio::main]` drop its `Runtime`, which blocks until every in-flight
 `spawn_blocking` task finishes — so a refusing second daemon kept running its
 already-spawned periodic loops for ~10s after announcing it would not start, long
 enough to look like a hang under any short timeout.
+
+### Fleet quiesce — stopping the daemon is NOT a fleet stop (#6129)
+
+**The incident this closes.** On 2026-08-13, `loom-worker-2` (Ubuntu 24.04,
+`systemd --user`) was drained before an operator-ordered instance stop.
+`systemctl --user stop loom-daemon.service` reported success, but role agents
+(Champion/Curator/Judge/Doctor/Guide) kept running and drawing on the token
+pool — `pgrep -af "claude-wrapper.sh -p /loom:"` still showed them, fluctuating
+7→6→10→6 rather than draining. The cause: `spawn-claude.sh`'s per-spawn
+CPU-quota mechanism (#5111, default-on whenever a `systemd --user` manager is
+reachable) wraps the final `claude`/`claude-wrapper.sh` exec in `systemd-run
+--user --scope`, which creates a **transient scope owned by the `systemd --user`
+manager itself** — a sibling unit, not a descendant of `loom-daemon.service`'s
+own cgroup — so an ordinary stop has no parent/cgroup relationship through
+which to reach it. This is architecturally the same shape as a launchd child
+reparenting to `pid 1`: the agent survives the dispatcher's exit **by design**
+(see the "sweeps survive by design" note above) — the gap #6129 closes is that
+operators had no *deliberate, explicit* way to reap them as a group when they
+actually want to.
+
+**`loom-daemon-quiesce.sh` is that explicit action** — a single command that
+(1) stops dispatch via `loom-daemon-stop.sh` and (2) enumerates and stops every
+in-flight role/sweep child, the same way on launchd and systemd:
+
+```bash
+./.loom/scripts/cli/loom-daemon-quiesce.sh              # full quiesce
+./.loom/scripts/cli/loom-daemon-quiesce.sh --dry-run     # resolve every target, mutate nothing
+./.loom/scripts/cli/loom-daemon-quiesce.sh --force       # skip the grace window (SIGKILL immediately)
+```
+
+It never runs automatically and nothing else in this repo invokes it — a bare
+`systemctl --user stop`/`launchctl bootout`/`loom-daemon-stop.sh` continues to
+leave in-flight work running exactly as documented above; this is the
+opt-in "actually drain the host" tool an operator reaches for when the ordinary
+stop is not enough (host maintenance, cost, or — the incident's own trigger —
+stopping a host from continuing to draw on an exhausted token pool). Its two
+enumeration mechanisms:
+- **Linux systemd --user**: every active `loom-agent-*.scope` unit — the
+  predictable per-spawn naming (`loom-agent-<pid>-<rand>.scope`, grouped under
+  `loom-agents.slice`) `spawn-claude.sh`'s CPU-quota wrap assigns as of #6129,
+  replacing the opaque `run-r<hex>.scope` name systemd generates by default —
+  via `systemctl --user stop`.
+- **Every platform** (the *only* mechanism on launchd, which has no
+  scope/unit construct): any process whose command line names a
+  `claude`/`claude-wrapper.sh` binary AND a `-p /loom:` prompt flag — SIGTERM
+  first, escalating survivors to SIGKILL after a grace window.
+
+A bare `systemctl --user stop loom-daemon` (or the daemon's own SIGTERM
+handler log, for a raw stop that never goes through `loom-daemon-stop.sh` at
+all) now names this script explicitly, so an operator does not have to already
+know the distinction to discover it.
+
+**`failed` vs `inactive` on a clean systemd stop (#6129).** A clean operator
+stop was also landing the `loom-daemon.service` unit in `failed`, not
+`inactive` — `EXIT_SIGTERM`/`EXIT_SHUTDOWN` (143) and `EXIT_SIGINT` (130) are
+non-zero, and `Type=simple`'s default "clean exit" criterion is exit `0` or
+termination BY one of SIGHUP/SIGINT/SIGTERM/SIGPIPE, neither of which matches
+a `std::process::exit(143)` *exit code*. `render_systemd_unit()` now sets
+`SuccessExitStatus=143 130` (reclassifies both as a clean exit) paired with
+`RestartPreventExitStatus=143 130` (belt-and-braces: vetoes `Restart=on-success`
+firing on those codes regardless of *how* the process died, since
+`SuccessExitStatus=` widens what a bare `kill -TERM` outside `systemctl`
+would count as "clean" — see the rationale comment at the `printf` site in
+`loom-daemon-start.sh` for the full systemd.service(5)-sourced argument).
+
+**Known caveat, deliberately left unresolved here.** `restart_scheduled_message`'s (in the loom source repo's `loom-daemon/src/ipc.rs`)
+systemd wording — "in-flight sweeps and role runs do NOT survive on systemd,
+they run inside this service's cgroup" — is only true for a child this daemon
+execs *directly*; a CPU-quota-wrapped scope child behaves like the launchd
+case instead (survives, silently). Which shape applies to a given child is
+invisible to the daemon (the wrapping decision is entirely inside
+`spawn-claude.sh`, an opaque subprocess boundary), so the message is not
+rewritten to guess — treat it as accurate for the *unwrapped* case only, and
+use `loom-daemon-quiesce.sh` (which enumerates real scopes/processes instead
+of asserting a platform-wide claim) when you need a definite answer either
+way.
 
 ### Autonomy-loss watchdog + heartbeat (#4011)
 
@@ -6241,15 +6540,47 @@ loom-daemon restart --abort-drain                 # cancel an in-progress drain,
   registry; `--force`/`force: true` still overrides for an operator who
   deliberately wants a dispatch to land during a drain.
 - **Fail-safe timeout:** reaching `--timeout` without `--force-after-timeout`
-  **refuses** the restart (clears the drain flag, resumes dispatch, stays up) and
-  reports the reason via `loom-daemon status` — it never silently restarts or
-  silently gives up. `--force-after-timeout` opts into cancelling the stragglers
-  via the existing `cancel_sweep` path, then restarts. The refusal note (rendered
-  as `Drain: not draining (last: …)`) names the exact local retry —
+  **refuses** the restart — it never cancels a sweep, never silently restarts, and
+  never silently gives up. `--force-after-timeout` opts into cancelling the
+  stragglers via the existing `cancel_sweep` path, then restarts. What happens to
+  *dispatch* at that refusal depends on which kind of drain it is (#6007):
+  - **A relaunch drain (the version roll)** keeps the roll **pending**: the drain
+    flag stays set, so dispatch stays paused, and the supervisor keeps polling and
+    fires the restart the instant in-flight reaches **zero** — no operator, no
+    re-run, no guessed `--timeout`. Retry windows widen geometrically from the
+    requested timeout (`base × 2ⁿ`, capped at 2h each) and the whole sequence is
+    bounded by a total paused-dispatch budget of `4 × --timeout` (capped at 4h).
+    Once that budget is spent the roll is **abandoned**: dispatch resumes exactly
+    as it did pre-#6007, so a wedged sweep can never starve the host of work
+    indefinitely, and the note then says to cancel the stuck sweep rather than
+    widen the window again. Escape hatches while pending:
+    `restart --abort-drain` (give up now, resume dispatch) and
+    `restart --drain --force-after-timeout` (cancel the stragglers and roll on the
+    next supervisor tick — on a *pending* roll this escalates the active drain in
+    place and pulls its re-armed deadline in to now; on a first-attempt drain the
+    #4521 pinning still applies).
+  - **A then-exit teardown drain** (`fleet drain`'s path) keeps the historical
+    behavior byte-for-byte: it clears the flag, resumes dispatch, and stays up —
+    `fleet drain` detects that remote refusal by observing `drain.draining: false`
+    on a still-reachable daemon and reports its documented exit code `2`.
+  Why this asymmetry: on a host that is actually working, resuming dispatch at the
+  deadline handed the admission window straight back to the work finder, which
+  admitted more sweeps, which made the *next* drain strictly harder to satisfy. In
+  the 2026-08-11 fleet roll three of four hosts never activated the new binary for
+  exactly this reason (in-flight went `1 → refused → 3`), and the only workarounds
+  were an operator-guessed `--timeout 7200` or destroying work with
+  `--force-after-timeout`. Both refusal notes (rendered by `loom-daemon status` as
+  `Drain: not draining (last: …)`, or on the line under `Drain: DRAINING …` while a
+  roll is pending) name the exact local retry —
   `loom-daemon restart --drain --force-after-timeout --timeout <secs>` — so an
   operator is never left guessing at a nonexistent bare `drain` subcommand or the
   unrelated `fleet drain <ssh_host>` remote worker-decommission command (#5340;
   see "`fleet drain`" above — same word, different command, different host).
+- **The auto-update loop cooperates rather than racing (#6007).** While any roll is
+  armed — including one retained across a refused deadline — `auto_update`'s tick
+  skips instead of rebuilding again: the binary is already provisioned and the
+  restart is already coming, and a redundant `cargo build` would compete for CPU
+  with the very in-flight sweeps the pending roll is waiting on.
 - **Supervision proof is checked up front (AC5):** on an unsupervised host the
   request is refused **before** dispatch is paused (`accepted: false`), so a caller
   can detect nothing happened and no silent outage is introduced.
@@ -6260,7 +6591,7 @@ loom-daemon restart --abort-drain                 # cancel an in-progress drain,
   of scope (it would require a role registry, #4090's stop-and-split boundary).
 - **Observability:** `loom-daemon status` renders `DRAINING (n sweep(s) remaining,
   deadline …)` while active and the last transition (timeout refusal / abort)
-  afterward; the four `daemon.drain.*` events (above) narrate the transitions on
+  afterward; the five `daemon.drain.*` events (above) narrate the transitions on
   the event bus. **Cannot be used for its own first roll** — see the rollout note
   below.
 - **Supervised stop/start vs. a full wait-for-zero drain (#5340).** These are two
@@ -6473,6 +6804,17 @@ artifact is considered — pass `--allow-stale` to skip the sync entirely and go
 straight to resolution, or fix the checkout. This is unchanged pre-existing
 behavior, not something the fetch path introduces, but it does mean "no Rust
 toolchain" is not the same as "no git checkout hygiene".
+
+**Release-cadence gap visibility (#6010).** Releases are cut deliberately
+less often than `VERSION` bumps (see
+[`release-cadence.md`](release-cadence.md) for the policy), so the newest
+release can legitimately sit behind the current source tree for a while — the
+pre-#6010 "not newer than the installed version" message alone did not make
+that distinguishable from "you're already up to date". The script now also
+compares the resolved release against the **source tree's own `VERSION`
+file** and reports it on every path that resolves a release (plain run,
+`--check`, and a forced `--fetch`'s hard-fail reason), so an operator can tell
+*before* running `--fetch` whether it can currently reach source at all.
 
 **Extra environment variables** (all optional; the first three are primarily test
 seams):

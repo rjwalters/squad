@@ -25,6 +25,7 @@ dist/
 .loom/interventions/
 .loom/worktrees/
 .loom/worktrees-local/
+.claude/worktrees/
 .loom/state.json
 .loom/mcp-command.json
 .loom/activity.db
@@ -54,7 +55,9 @@ dist/
 .loom/*.sock
 .loom/*.tmp
 .loom/*.bak
+.loom/.install.lock
 .loom/logs/
+.loom/.resync-in-progress
 # <<< loom-managed <<<
 
 # Foreign lockfiles. package.json declares packageManager pnpm@11.20.0, so a
