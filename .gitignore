@@ -56,3 +56,13 @@ dist/
 .loom/*.bak
 .loom/logs/
 # <<< loom-managed <<<
+
+# Foreign lockfiles. package.json declares packageManager pnpm@11.20.0, so a
+# package-lock.json or yarn.lock here is an accident (someone ran the wrong
+# install) — one appeared and rewrote a dependency pin before anyone noticed.
+# Ignoring them makes the mistake harmless instead of committable.
+package-lock.json
+yarn.lock
+
+# Tool logs, same rule as .loom/logs/ above.
+.claude/skills/repo/logs/
