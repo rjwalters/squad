@@ -124,6 +124,53 @@ test("a persona's very first session ever starts at the room's beginning", () =>
   );
 });
 
+test("a persona whose sessions have all aged out doesn't replay the room on its next join", () => {
+  claude.clear();
+  const claudeA = new Squad(db, "claude");
+  claudeA.join();
+  codex.send("m1");
+  const m2 = codex.send("m2");
+  claudeA.check(); // consumes m1, m2
+
+  // Age every session past SESSION_RETENTION_HOURS (24h), then let another
+  // persona's join() run the sweep: claude now has no session row — and no
+  // session_cursors row — left to seed from.
+  const aged = new Date(Date.now() - 48 * 3_600_000).toISOString();
+  db.prepare("UPDATE sessions SET last_seen = ?, lease_expires_at = ?").run(aged, aged);
+  new Squad(db, "codex").join();
+
+  assert.equal(
+    db.prepare("SELECT COUNT(*) AS n FROM sessions WHERE persona = 'claude'").get().n,
+    0,
+    "claude's aged-out session rows were pruned",
+  );
+  assert.equal(
+    db
+      .prepare(
+        `SELECT COUNT(*) AS n
+           FROM session_cursors sc
+           JOIN sessions s ON s.session_id = sc.session_id
+          WHERE s.persona = 'claude'`,
+      )
+      .get().n,
+    0,
+    "and their session cursor rows went with them",
+  );
+  assert.equal(
+    db.prepare("SELECT last_seen_id FROM cursors WHERE persona = 'claude'").get().last_seen_id,
+    m2.id,
+    "but the persona's durable high-water mark survives the sweep",
+  );
+
+  codex.send("m3");
+  const returning = new Squad(db, "claude"); // reconnecting days later
+  assert.deepEqual(
+    returning.check().map((m) => m.body),
+    ["m3"],
+    "only what arrived during the gap is unread — not the whole room replayed",
+  );
+});
+
 test("own messages via another session of the same persona never return as unread", () => {
   claude.clear();
   const claudeA = new Squad(db, "claude");

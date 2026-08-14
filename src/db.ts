@@ -12,9 +12,12 @@ CREATE TABLE IF NOT EXISTS messages (
   body TEXT NOT NULL,
   ts TEXT NOT NULL
 );
--- Superseded by session_cursors below (#41): kept as dead schema rather than
--- dropped, since this repo has no migration framework and the convention is
--- additive-only. Nothing reads or writes this table anymore.
+-- The persona's durable read high-water mark. No longer the cursor check()
+-- reads (session_cursors below is, since #41), but still written on every
+-- cursor advance and never pruned: session rows and their cursors are swept
+-- after SESSION_RETENTION_HOURS, so this is what a persona returning after a
+-- long quiet period seeds its new session from instead of replaying the whole
+-- room as unread. It also carries a pre-#41 room forward unchanged.
 CREATE TABLE IF NOT EXISTS cursors (
   persona TEXT PRIMARY KEY,
   last_seen_id INTEGER NOT NULL DEFAULT 0
@@ -24,8 +27,9 @@ CREATE TABLE IF NOT EXISTS cursors (
 -- one persona — e.g. an MCP connection and a CLI invocation — each track
 -- their own unread state instead of silently stealing each other's cursor.
 -- A brand-new session's cursor is seeded (once, on first read) from the
--- persona's most-advanced other session rather than starting at 0, so the
--- common single-session-at-a-time case keeps today's steady-state UX.
+-- persona's most-advanced other session, or from the persona high-water mark
+-- in the cursors table above, rather than starting at 0 — so the common
+-- single-session-at-a-time case keeps today's steady-state UX.
 CREATE TABLE IF NOT EXISTS session_cursors (
   session_id TEXT PRIMARY KEY,
   last_seen_id INTEGER NOT NULL DEFAULT 0
