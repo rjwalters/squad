@@ -10,6 +10,7 @@ YES=0
 CODEX=1
 LINK=1
 DRY=0
+REENTRY=0
 CLAUDE_PERSONA="${SQUAD_CLAUDE_PERSONA:-claude}"
 CODEX_PERSONA="${SQUAD_CODEX_PERSONA:-codex}"
 
@@ -31,6 +32,13 @@ Installs into the target repo (default .):
                                    Codex read the same instructions
   .gitignore                       adds .squad/ (the room is ephemeral local state)
 
+With --reentry (default off — opt-in):
+  .claude/hooks/squad-reentry.sh   Claude Code Stop hook: bounded re-entry with
+                                   exponential backoff+jitter, reset on directed
+                                   work, a TTL, and an operator-stop escape hatch
+  .claude/settings.json            merges the hook into the Stop hooks array
+                                   (dedupe-by-command; re-running does not duplicate it)
+
 Global, with confirmation (skip with --no-codex / --no-link) — these are
 one-time-per-machine, not per target repo:
   ~/.codex/prompts/squad-*.md      /squad-join, /squad-goals prompts
@@ -49,6 +57,10 @@ options:
                 global writes unless --no-codex / --no-link is passed)
   --no-codex    skip all writes outside the target repo
   --no-link     skip \`npm link\`; the closing output uses the node path form
+  --reentry     install the opt-in Claude Code re-entry Stop hook (see above);
+                default off
+  --no-reentry  explicit no-op (re-entry is already off by default); accepted
+                so \`--reentry\`'s counterpart always parses
   --dry-run     print every planned write (including any outside the target
                 repo) and exit without changing anything
   -h, --help    show this help
@@ -60,6 +72,8 @@ while [[ $# -gt 0 ]]; do
     -y) YES=1 ;;
     --no-codex) CODEX=0 ;;
     --no-link) LINK=0 ;;
+    --reentry) REENTRY=1 ;;
+    --no-reentry) REENTRY=0 ;;
     --dry-run) DRY=1 ;;
     -h|--help) usage; exit 0 ;;
     -*) echo "unknown option: $1" >&2; usage; exit 1 ;;
@@ -121,6 +135,10 @@ if [[ $DRY -eq 1 ]]; then
     echo "  .gitignore                           append .claude/skills/squad/.install-local.json"
   fi
   echo "  CLAUDE.md, AGENTS.md                 replace/append identical marker-bounded squad blocks"
+  if [[ $REENTRY -eq 1 ]]; then
+    echo "  .claude/hooks/squad-reentry.sh        install Stop hook (persona \"$CLAUDE_PERSONA\")"
+    echo "  .claude/settings.json                 merge Stop hook entry (dedupe-by-command, idempotent)"
+  fi
   if [[ $CODEX -eq 1 || $LINK -eq 1 ]]; then
     echo
     echo "outside the target repo (asks first; skip individually with --no-codex / --no-link):"
@@ -289,6 +307,41 @@ EOF
 write_block "$TARGET/CLAUDE.md" "$BLOCK"
 write_block "$TARGET/AGENTS.md" "$BLOCK"
 echo "wrote identical marker blocks in CLAUDE.md and AGENTS.md"
+
+# --- target repo: opt-in re-entry Stop hook ---------------------------------
+# See README.md "Re-entry (opt-in)". Off by default; --reentry installs a
+# Claude Code Stop hook (src/reentry-hook.ts, compiled to dist/reentry-hook.js)
+# that bounds itself with exponential backoff+jitter, a reset on directed
+# work, a TTL, and an operator-stop escape hatch — never a permanent hold.
+if [[ $REENTRY -eq 1 ]]; then
+  mkdir -p "$TARGET/.claude/hooks"
+  sed -e "s#__SQUAD_REENTRY_JS__#$SRC/dist/reentry-hook.js#g" \
+      -e "s#__SQUAD_REENTRY_PERSONA__#$CLAUDE_PERSONA#g" \
+      "$SRC/hooks/squad-reentry.sh" > "$TARGET/.claude/hooks/squad-reentry.sh"
+  chmod +x "$TARGET/.claude/hooks/squad-reentry.sh"
+  echo "installed .claude/hooks/squad-reentry.sh (persona \"$CLAUDE_PERSONA\")"
+
+  # Idempotent merge into .claude/settings.json's Stop hooks array — dedupe by
+  # command string so re-running --reentry never duplicates the entry, mirroring
+  # write_block()'s marker-bounded idempotency for the text-file writes above.
+  node - "$TARGET/.claude/settings.json" <<'EOF'
+const fs = require("fs");
+const file = process.argv[2];
+let cfg = {};
+if (fs.existsSync(file)) cfg = JSON.parse(fs.readFileSync(file, "utf8"));
+cfg.hooks ??= {};
+cfg.hooks.Stop ??= [];
+const command = "${CLAUDE_PROJECT_DIR}/.claude/hooks/squad-reentry.sh";
+const alreadyWired = cfg.hooks.Stop.some(
+  (entry) => Array.isArray(entry.hooks) && entry.hooks.some((h) => h.command === command),
+);
+if (!alreadyWired) {
+  cfg.hooks.Stop.push({ matcher: "", hooks: [{ type: "command", command }] });
+}
+fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
+console.log(`merged squad-reentry Stop hook into ${file}`);
+EOF
+fi
 
 # --- global: Codex ----------------------------------------------------------
 if [[ $CODEX -eq 1 ]] && confirm "Register squad with Codex (~/.codex/prompts + config.toml, one-time per machine)?"; then

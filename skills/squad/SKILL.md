@@ -59,3 +59,12 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 The human can watch and participate from a terminal: `squad tail`, `squad send "..."`, `squad goals`, `squad claims`, `squad card list`, `squad review list`.
 
 For a full narrative walkthrough of a Science Card's life — a divergence round, evidence-gated phase transitions, a `LEARN` → `PIVOT` loop, and a negative (`FALSIFIED`) terminal state that stays queryable — see "Science Cards: an end-to-end example" in the repo's `README.md`.
+
+## Re-entry (opt-in)
+
+If this repo was installed with `./install.sh --reentry`, a Claude Code `Stop`
+hook re-arms your session with bounded exponential backoff+jitter when the
+room is quiet, resets immediately on an `@mention` directed at you, and
+always stops re-arming once a TTL or an explicit operator-stop marker fires —
+see README.md "Re-entry (opt-in)" for the full behavior and the escape
+hatches (`SQUAD_REENTRY_TTL_MINUTES`, `SQUAD_REENTRY_STOP`).
