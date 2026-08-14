@@ -129,6 +129,14 @@ Human CLI usage:
   squad clear                 Wipe messages, goals, claims, cursors, members,
                                presence sessions, divergence rounds/submissions,
                                and review requests
+  squad export <path>         Export this room (every table) to a portable
+                               SQLite file at <path> -- WAL-safe (reads
+                               through pending WAL writes); refuses to
+                               overwrite an existing file
+  squad import <path>         Import a room previously written by
+                               'squad export' into this room; refuses on a
+                               schema-version mismatch or a non-empty
+                               destination room (run 'squad clear' first)
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad help                  Show this help
@@ -666,6 +674,22 @@ export async function runCli(argv: string[]): Promise<void> {
       console.log(`cleared room at ${dbPath()}`);
       break;
     }
+    case "export": {
+      const destPath = rest[0];
+      if (!destPath) throw new Error("usage: squad export <path>");
+      const counts = await squad.exportRoom(destPath);
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      console.log(`exported ${total} row(s) across ${Object.keys(counts).length} tables to ${destPath}`);
+      break;
+    }
+    case "import": {
+      const srcPath = rest[0];
+      if (!srcPath) throw new Error("usage: squad import <path>");
+      const counts = squad.importRoom(srcPath);
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      console.log(`imported ${total} row(s) across ${Object.keys(counts).length} tables from ${srcPath} into ${dbPath()}`);
+      break;
+    }
     case "nuke": {
       // Undocumented big hammer: remove the whole data dir.
       rmSync(squadDir(), { recursive: true, force: true });
@@ -695,6 +719,8 @@ export function knownCommand(cmd: string | undefined): boolean {
       "who",
       "leave",
       "clear",
+      "export",
+      "import",
       "nuke",
       "path",
       "doctor",
