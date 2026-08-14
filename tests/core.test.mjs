@@ -1,13 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 process.env.SQUAD_DIR = mkdtempSync(join(tmpdir(), "squad-test-"));
 
 const { openDb } = await import("../dist/db.js");
-const { Squad } = await import("../dist/core.js");
+const { Squad, DEFAULT_IDLE_MINUTES, DEFAULT_STALE_MINUTES } = await import("../dist/core.js");
 
 test.after(() => rmSync(process.env.SQUAD_DIR, { recursive: true, force: true }));
 
@@ -49,6 +49,137 @@ test("join catches up and advances cursor", () => {
   assert.equal(recent.length, 1);
   assert.ok(members.some((m) => m.persona === "claude"));
   assert.equal(claude.check().length, 0, "join marked history read");
+});
+
+// --- presence leases (#38) ------------------------------------------------
+
+/**
+ * Age a persona's live sessions by `minutes`, lease included. touch() always
+ * stamps real time, so the only way to reach the idle/stale windows in a test
+ * is to backdate the stored lease directly — the same trick the claim
+ * staleness test has always used.
+ */
+function backdate(persona, minutes) {
+  const seen = new Date(Date.now() - minutes * 60_000).toISOString();
+  const expires = new Date(Date.parse(seen) + DEFAULT_STALE_MINUTES * 60_000).toISOString();
+  db.prepare(
+    "UPDATE sessions SET last_seen = ?, lease_expires_at = ? WHERE persona = ? AND left_ts IS NULL",
+  ).run(seen, expires, persona);
+}
+
+test("join returns a session id and a lease", () => {
+  claude.clear();
+  const joined = claude.join();
+  assert.ok(joined.session_id, "join returns a session identifier");
+  assert.equal(joined.session_id, claude.sessionId, "…the caller's own session");
+  assert.ok(
+    Date.parse(joined.lease_expires_at) > Date.now(),
+    "the lease runs into the future",
+  );
+  // The lease is one stale-window long, measured from the last touch — which
+  // join() performs more than once, so allow a few ms of drift from joined_at.
+  const leaseMs = Date.parse(joined.lease_expires_at) - Date.parse(joined.joined_at);
+  assert.ok(
+    leaseMs >= DEFAULT_STALE_MINUTES * 60_000 && leaseMs < (DEFAULT_STALE_MINUTES + 1) * 60_000,
+    `lease of ${leaseMs}ms should be one stale window (${DEFAULT_STALE_MINUTES} min)`,
+  );
+  const rejoined = claude.join();
+  assert.equal(rejoined.session_id, joined.session_id, "re-joining renews, never re-issues");
+  assert.ok(
+    Date.parse(rejoined.lease_expires_at) >= Date.parse(joined.lease_expires_at),
+    "…and pushes the expiry out",
+  );
+});
+
+test("join and check both report peers with active/idle/stale state", () => {
+  claude.clear();
+  codex.join();
+  const { members } = claude.join();
+  const peer = members.find((m) => m.persona === "codex");
+  assert.ok(peer, "the peer's session shows up in the member list");
+  assert.equal(peer.state, "active", "a peer that just joined is active");
+  assert.equal(peer.sessions, 1);
+
+  // peers() is what squad_check surfaces: everyone but yourself, same state.
+  const peers = claude.peers();
+  assert.deepEqual(peers.map((p) => p.persona), ["codex"]);
+  assert.equal(peers[0].state, "active");
+  assert.ok(!claude.peers().some((p) => p.persona === "claude"), "you are not your own peer");
+});
+
+test("presence crosses active -> idle -> stale as the lease ages", () => {
+  claude.clear();
+  claude.join();
+  codex.join();
+  const stateOfClaude = () => codex.peers().find((p) => p.persona === "claude")?.state;
+  assert.equal(stateOfClaude(), "active");
+
+  backdate("claude", DEFAULT_IDLE_MINUTES + 1);
+  assert.equal(stateOfClaude(), "idle", "quiet past the idle window, lease still good");
+
+  backdate("claude", DEFAULT_STALE_MINUTES + 1);
+  assert.equal(stateOfClaude(), "stale", "past the lease expiry");
+
+  // Any operation renews the lease — no separate heartbeat call.
+  claude.check();
+  assert.equal(stateOfClaude(), "active", "a tool call renews the lease");
+});
+
+test("leave ends the session, announces it, and drops you from peers", () => {
+  claude.clear();
+  claude.join();
+  codex.join();
+  assert.equal(codex.peers().length, 1);
+
+  const left = claude.leave();
+  assert.equal(left.persona, "claude");
+  assert.equal(left.sessions_ended.length, 1);
+  assert.equal(left.sessions_remaining, 0);
+  assert.ok(left.left_ts);
+  assert.equal(claude.sessionId, null, "the connection no longer holds a session");
+
+  assert.deepEqual(codex.peers(), [], "a persona that left is not in the room");
+  assert.ok(!codex.members().some((m) => m.persona === "claude"));
+  const announced = codex.check().at(-1);
+  assert.equal(announced.kind, "system");
+  assert.match(announced.body, /claude left the room/);
+});
+
+test("leave names the claims you walk away from", () => {
+  claude.clear();
+  claude.claim("src/core.ts");
+  codex.check();
+  claude.leave();
+  assert.match(codex.check().at(-1).body, /claude left the room .*still holding src\/core\.ts/);
+  const held = codex.claims();
+  assert.equal(held.length, 1, "leaving never releases a claim on your behalf");
+  assert.equal(held[0].stale, true, "…but the claim is stale the moment its holder leaves");
+  assert.equal(held[0].holder_state, "stale");
+});
+
+test("leaving with nothing to leave is a silent no-op", () => {
+  claude.clear();
+  codex.join();
+  codex.check();
+  const nobody = new Squad(db, "ghost");
+  const left = nobody.leave();
+  assert.deepEqual(left.sessions_ended, []);
+  assert.equal(left.left_ts, null);
+  assert.equal(codex.check().length, 0, "no announcement for a no-op");
+});
+
+test("an operation after leaving opens a fresh session", () => {
+  claude.clear();
+  const first = claude.join().session_id;
+  claude.leave();
+  const second = claude.join().session_id;
+  assert.notEqual(second, first, "a left session is never resurrected");
+  assert.equal(codex.peers().find((p) => p.persona === "claude").state, "active");
+  const rows = db
+    .prepare("SELECT left_ts FROM sessions WHERE persona = 'claude' ORDER BY joined_at ASC")
+    .all();
+  assert.equal(rows.length, 2, "the ended session is kept as history");
+  assert.ok(rows.some((r) => r.left_ts !== null) && rows.some((r) => r.left_ts === null));
 });
 
 test("goals announce in chat and complete", () => {
@@ -190,31 +321,57 @@ test("join includes current claims", () => {
   assert.equal(claims[0].persona, "claude");
 });
 
-test("a claim goes stale with its holder's last_seen", () => {
+test("a claim goes stale with its holder's lease", () => {
   claude.clear();
   claude.claim("stale/target.ts");
   assert.equal(codex.claims()[0].stale, false);
+  assert.equal(codex.claims()[0].holder_state, "active");
 
-  // touch() always stamps real time, so age the holder's presence directly.
-  const old = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
-  db.prepare("UPDATE members SET last_seen = ? WHERE persona = ?").run(old, "claude");
+  // A paused holder is idle, not stale — the claim is still someone's work.
+  backdate("claude", DEFAULT_IDLE_MINUTES + 1);
+  assert.equal(codex.claims()[0].holder_state, "idle");
+  assert.equal(codex.claims()[0].stale, false, "an idle holder's claim is not stale");
 
+  // Past the lease, the claim and its holder go stale together — one clock.
+  backdate("claude", DEFAULT_STALE_MINUTES + 1);
   const listed = codex.claims();
   assert.equal(listed.length, 1);
   assert.equal(listed[0].persona, "claude");
-  assert.equal(listed[0].last_seen, old);
   assert.equal(listed[0].stale, true, "an absent holder's claim lists as stale");
+  assert.equal(
+    listed[0].holder_state,
+    codex.members().find((m) => m.persona === "claude").state,
+    "claim staleness and peer presence never disagree",
+  );
 });
 
-test("clear wipes claims along with everything else", () => {
+test("clear wipes claims and sessions along with everything else", () => {
   claude.clear();
   claude.claim("wiped.ts");
   claude.goalAdd("also wiped");
   assert.equal(claude.claims().length, 1);
+  assert.ok(claude.members().length > 0);
   codex.clear();
+  assert.equal(
+    db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n,
+    0,
+    "presence sessions are wiped too",
+  );
+  assert.deepEqual(codex.members(), [], "an empty room has no members");
   assert.equal(codex.claims().length, 0);
   assert.equal(codex.goals(true).length, 0);
   assert.equal(codex.read().length, 0);
+});
+
+// MCP tool registration / response shape: no live transport here (same
+// approach as the card tools' registration tests), just a check that the
+// presence surface is wired into src/mcp.ts.
+test("mcp.ts registers squad_leave and returns peers from squad_check", () => {
+  const mcpSrc = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
+  assert.match(mcpSrc, /registerTool\(\s*"squad_leave"/, "squad_leave must be registered");
+  const check = mcpSrc.slice(mcpSrc.indexOf('"squad_check"'), mcpSrc.indexOf('"squad_leave"'));
+  assert.match(check, /peers: squad\.peers\(\)/, "squad_check must return peer presence");
+  assert.match(check, /lease_expires_at/, "squad_check must report the renewed lease");
 });
 
 test("checkWait returns promptly when a message lands", async () => {

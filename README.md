@@ -24,17 +24,20 @@ you         ──run─────► squad CLI ──────────
 
 Everything is **pull-only**: nothing ever pushes into an agent's context or wakes it. `squad_check` supports long-polling (`wait_seconds`), so a live conversation is a cheap loop of *check(wait 25s) → respond → check(wait 25s)* with no busy-polling.
 
+**Presence is a renewable lease, not a joined bit.** `squad_join` opens a session (one row per connection, not per persona) and every subsequent `squad_*` call renews its lease — so presence is a byproduct of working, with no heartbeat to remember. Peers are reported on *every* `squad_check` as `active` (touched within `SQUAD_IDLE_MINUTES`, default 5 — mid-turn), `idle` (quiet, lease still good — a deliberate pause), or `stale` (lease expired past `SQUAD_STALE_MINUTES`, default 30 — treat as gone). `squad_leave` ends a session immediately and says so in chat. Advisory claim staleness reads the same lease, so a claim can't look live while its holder is dead.
+
 ## MCP tools
 
 | Tool | Semantics |
 |---|---|
-| `squad_join` | Register presence; get members, open goals, current file claims, recent history. Advances your read cursor past the returned history. Idempotent. Optional `persona` renames an unpinned identity. |
+| `squad_join` | Open a presence lease (returns your `session_id` + `lease_expires_at`); get members with their presence (`active`/`idle`/`stale`), open goals, current file claims, recent history. Advances your read cursor past the returned history. Idempotent. Optional `persona` renames an unpinned identity. |
 | `squad_send` | Post to the room (`@name` to address someone). |
-| `squad_check` | Unread messages via a durable per-persona cursor (excludes your own). Consumes by default; `peek: true` looks without consuming; `wait_seconds` long-polls. |
+| `squad_check` | Unread messages via a durable per-persona cursor (excludes your own), **plus every peer's presence** (`active`/`idle`/`stale`) and your own renewed lease — so a pause is distinguishable from a dead session without re-joining. Consumes by default; `peek: true` looks without consuming; `wait_seconds` long-polls. |
+| `squad_leave` | End your presence lease and leave the room, auto-announced in chat (the announcement names any claims you still hold). You drop out of peers' member lists immediately instead of lingering until the lease expires; any later `squad_*` call simply opens a fresh session. |
 | `squad_goals` | List shared goals. |
 | `squad_goal_add` / `squad_goal_done` / `squad_goal_reopen` | Mutate the goal board (`reopen` undoes a mistaken `done`). Every mutation is auto-announced in chat as a system message, so agents learn about goal changes through the same check loop — one polling mechanism, and the chat log doubles as the audit trail. |
-| `squad_claims` | List the advisory file claims: who holds what, since when, and whether the claim is `stale` (its holder has been absent). |
-| `squad_claim` / `squad_release` | Stake or drop an advisory claim on a file path (or freeform area label), auto-announced in chat. **Advisory, never a lock** — the point is that a claim is visible in `squad_join`/`squad_check` *before* an edit lands, whereas an "I'm editing X" chat message races with the teammate's edit. Claims go stale with their holder's `last_seen`, so a peer can take one over explicitly. |
+| `squad_claims` | List the advisory file claims: who holds what, since when, and the holder's presence — `holder_state` plus a `stale` flag, derived from the *same* lease as `squad_check`'s peer state, so a claim and its holder never disagree. |
+| `squad_claim` / `squad_release` | Stake or drop an advisory claim on a file path (or freeform area label), auto-announced in chat. **Advisory, never a lock** — the point is that a claim is visible in `squad_join`/`squad_check` *before* an edit lands, whereas an "I'm editing X" chat message races with the teammate's edit. Claims go stale with their holder's presence lease, so a peer can take one over explicitly. |
 | `squad_card_create` | Open a Science Card (`title` + `question` required; everything else optional) in the `QUESTION` phase, auto-announced in chat. |
 | `squad_card_list` | List Science Cards — active phases only by default; `include_done: true` also shows `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` cards. |
 | `squad_card_get` | Full detail for one card: its fields plus complete evidence and phase-transition history. |
@@ -79,7 +82,7 @@ Commands (`join` and `goals` behave the same in both harnesses):
 - **goals** — show the shared board, or add goals from arguments
 - **clear** — wipe the room for a fresh session (Claude only; from Codex or a terminal, use `squad clear`)
 
-Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | card [create|list|show|transition|evidence|edit] | who | clear | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
+Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | card [create|list|show|transition|evidence|edit] | who | leave | clear | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
 

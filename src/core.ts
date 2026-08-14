@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 
 export interface Message {
@@ -18,10 +19,45 @@ export interface Goal {
   done_ts: string | null;
 }
 
+/**
+ * Derived presence, never stored: `active` = touched the room within the idle
+ * window (taking a turn right now), `idle` = quiet but its lease is still
+ * good (a deliberate pause), `stale` = the lease expired (treat as gone).
+ */
+export type PresenceState = "active" | "idle" | "stale";
+
+/**
+ * One connection's presence lease. A row per *session* (an MCP server process,
+ * a CLI invocation), not per persona: the same persona can legitimately be in
+ * the room twice. Renewed by `touch()` on every operation; ended explicitly by
+ * `leave()`, which stamps `left_ts`.
+ */
+export interface Session {
+  session_id: string;
+  persona: string;
+  joined_at: string;
+  last_seen: string;
+  lease_expires_at: string;
+  /** Set when the session left explicitly; null while the session is live. */
+  left_ts: string | null;
+}
+
+/**
+ * A persona present in the room: the live sessions of one persona rolled up,
+ * annotated with derived presence so a peer can tell a pause from a death
+ * without asking.
+ */
 export interface Member {
   persona: string;
+  /** First time this persona was ever seen (survives leaving and rejoining). */
   first_seen: string;
+  /** Freshest last_seen across this persona's live sessions. */
   last_seen: string;
+  /** When the freshest lease runs out; past this the persona reads as stale. */
+  lease_expires_at: string;
+  state: PresenceState;
+  /** How many live sessions this persona holds (usually 1). */
+  sessions: number;
 }
 
 /** An advisory claim on a file path (or freeform label). Never a lock. */
@@ -34,10 +70,35 @@ export interface Claim {
 
 /** A claim as listed: annotated with its holder's presence so peers can judge it. */
 export interface ClaimView extends Claim {
-  /** Holder's last_seen, or null when the holder has no member record. */
+  /** Holder's last_seen, or null when the holder has no live session. */
   last_seen: string | null;
-  /** True when the holder has been absent longer than the staleness threshold. */
+  /** The holder's presence, from the same lease signal `members()` reports. */
+  holder_state: PresenceState;
+  /** True when the holder's lease has expired — i.e. holder_state is stale. */
   stale: boolean;
+}
+
+/** What `leave()` did: the sessions it ended, or an empty result for a no-op. */
+export interface LeaveResult {
+  persona: string;
+  /** Session ids ended by this call (empty when the caller held none). */
+  sessions_ended: string[];
+  /** When they ended, or null for a no-op. */
+  left_ts: string | null;
+  /** Live sessions this persona still holds after the call. */
+  sessions_remaining: number;
+}
+
+/** What `join()` returns: the caller's lease plus a full room snapshot. */
+export interface JoinResult {
+  session_id: string;
+  joined_at: string;
+  lease_expires_at: string;
+  /** Everyone present, including the caller, with derived presence. */
+  members: Member[];
+  goals: Goal[];
+  claims: ClaimView[];
+  recent: Message[];
 }
 
 /**
@@ -340,20 +401,64 @@ function rowToCard(row: CardRow): Card {
 const now = () => new Date().toISOString();
 
 /**
- * A claim goes stale with its holder: once the claiming persona has not touched
- * the room for this many minutes, the claim is listed as stale so a peer can
- * take it over explicitly. Advisory only — nothing expires or is enforced.
+ * The presence lease: every operation renews it for this many minutes. Once a
+ * persona's lease has expired it reads as `stale` — and so do its advisory
+ * claims, so a peer can take them over explicitly. Advisory only — nothing
+ * expires or is enforced, the state is just visible.
  */
 export const DEFAULT_STALE_MINUTES = 30;
 
-function staleMinutes(): number {
-  const raw = process.env.SQUAD_STALE_MINUTES;
-  if (!raw) return DEFAULT_STALE_MINUTES;
+/**
+ * How long after its last touch a persona still counts as `active` (mid-turn)
+ * rather than `idle`. Shorter than the lease: idle is the honest answer for a
+ * deliberate pause, stale is the honest answer for a dead session.
+ */
+export const DEFAULT_IDLE_MINUTES = 5;
+
+function envMinutes(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
   const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : DEFAULT_STALE_MINUTES;
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
+function staleMinutes(): number {
+  return envMinutes("SQUAD_STALE_MINUTES", DEFAULT_STALE_MINUTES);
+}
+
+/** Never longer than the lease itself, so the three states stay ordered. */
+function idleMinutes(): number {
+  return Math.min(envMinutes("SQUAD_IDLE_MINUTES", DEFAULT_IDLE_MINUTES), staleMinutes());
+}
+
+/**
+ * The single presence rule, shared by peer state and claim staleness so the two
+ * can never disagree: the stored lease decides stale, the idle window decides
+ * active. No live session at all (never joined, or left explicitly) is stale.
+ */
+export function presenceState(
+  lastSeen: string | null,
+  leaseExpiresAt: string | null,
+  nowMs: number = Date.now(),
+): PresenceState {
+  if (!lastSeen) return "stale";
+  const seen = Date.parse(lastSeen);
+  const expires = leaseExpiresAt ? Date.parse(leaseExpiresAt) : seen + staleMinutes() * 60_000;
+  if (nowMs >= expires) return "stale";
+  return nowMs < seen + idleMinutes() * 60_000 ? "active" : "idle";
+}
+
+/**
+ * Session rows older than this are swept on join: a session nobody has touched
+ * for a day is long past stale, and without a sweep every process that ever
+ * connected would accumulate a row forever.
+ */
+const SESSION_RETENTION_HOURS = 24;
+
 export class Squad {
+  /** This connection's session, created lazily on first touch. */
+  private _sessionId: string | null = null;
+
   constructor(
     private db: DatabaseSync,
     private _persona: string,
@@ -363,12 +468,22 @@ export class Squad {
     return this._persona;
   }
 
+  /** This connection's session id, or null before its first operation. */
+  get sessionId(): string | null {
+    return this._sessionId;
+  }
+
   /** Rename this connection's identity (used by persona autofill on join). */
   setPersona(persona: string): void {
     this._persona = persona;
   }
 
-  /** Update presence. Called by every operation. */
+  /**
+   * Update presence and renew this connection's lease. Called by every
+   * operation, so "the lease renews on any tool call" needs no separate
+   * heartbeat. Creates the session on first call; a session ended by leave()
+   * is never resurrected — the next operation opens a fresh one.
+   */
   touch(): void {
     const ts = now();
     this.db
@@ -377,6 +492,81 @@ export class Squad {
          ON CONFLICT(persona) DO UPDATE SET last_seen = excluded.last_seen`,
       )
       .run(this.persona, ts, ts);
+    if (!this._sessionId) this._sessionId = randomUUID();
+    const expires = new Date(Date.parse(ts) + staleMinutes() * 60_000).toISOString();
+    this.db
+      .prepare(
+        `INSERT INTO sessions (session_id, persona, joined_at, last_seen, lease_expires_at, left_ts)
+         VALUES (?, ?, ?, ?, ?, NULL)
+         ON CONFLICT(session_id) DO UPDATE SET
+           persona = excluded.persona,
+           last_seen = excluded.last_seen,
+           lease_expires_at = excluded.lease_expires_at`,
+      )
+      .run(this._sessionId, this.persona, ts, ts, expires);
+  }
+
+  /** This connection's session row, or null before its first operation. */
+  session(): Session | null {
+    if (!this._sessionId) return null;
+    const row = this.db
+      .prepare("SELECT * FROM sessions WHERE session_id = ?")
+      .get(this._sessionId) as unknown as Session | undefined;
+    return row ?? null;
+  }
+
+  /** Live (not explicitly left) session ids held by this persona. */
+  private liveSessionIds(): string[] {
+    const rows = this.db
+      .prepare("SELECT session_id FROM sessions WHERE persona = ? AND left_ts IS NULL")
+      .all(this.persona) as unknown as Array<{ session_id: string }>;
+    return rows.map((r) => r.session_id);
+  }
+
+  /**
+   * End this connection's session: the explicit "I'm done, stop waiting on me"
+   * signal, announced in chat so peers see it in their normal check loop. A
+   * connection that never opened a session (e.g. a fresh CLI process) leaves
+   * every live session this persona holds instead — the way a human closes out
+   * a persona left behind by a dead process. No-op, and silent, when the
+   * persona holds no live session. Claims are deliberately left alone: they go
+   * stale on their own and releasing another's work is an explicit act.
+   */
+  leave(): LeaveResult {
+    const live = this.liveSessionIds();
+    if (live.length === 0) {
+      return { persona: this.persona, sessions_ended: [], left_ts: null, sessions_remaining: 0 };
+    }
+    const mine = this._sessionId && live.includes(this._sessionId) ? [this._sessionId] : live;
+    const leavingRoom = live.every((id) => mine.includes(id));
+
+    // Announce *before* ending the session: send() touches, which would
+    // otherwise re-open a lease for a persona that just left.
+    if (leavingRoom) {
+      const held = this.db
+        .prepare("SELECT path FROM claims WHERE persona = ? ORDER BY id ASC")
+        .all(this.persona) as unknown as Array<{ path: string }>;
+      const note = held.length
+        ? ` — still holding ${held.map((c) => c.path).join(", ")}; claims are advisory, take them over if you need them`
+        : "";
+      this.send(`${this.persona} left the room${note}`, "system");
+    }
+
+    // Re-resolve when leaving wholesale: the announcement's touch() may have
+    // opened a session that must go too.
+    const targets = leavingRoom ? this.liveSessionIds() : mine;
+    const ts = now();
+    const end = this.db.prepare(
+      "UPDATE sessions SET left_ts = ?, lease_expires_at = ? WHERE session_id = ?",
+    );
+    for (const id of targets) end.run(ts, ts, id);
+    this._sessionId = null;
+    return {
+      persona: this.persona,
+      sessions_ended: targets,
+      left_ts: ts,
+      sessions_remaining: this.liveSessionIds().length,
+    };
   }
 
   send(body: string, kind: "chat" | "system" = "chat"): Message {
@@ -508,23 +698,31 @@ export class Squad {
 
   /**
    * Current advisory claims, oldest first, each annotated with its holder's
-   * last_seen and whether that presence has gone stale.
+   * presence. Staleness comes from the holder's *lease* — the same signal
+   * members() reports — so a claim and its holder can never disagree about
+   * whether they are stale.
    */
   claims(): ClaimView[] {
     this.touch();
     const rows = this.db
       .prepare(
-        `SELECT c.id, c.path, c.persona, c.created_ts, m.last_seen AS last_seen
-           FROM claims c LEFT JOIN members m ON m.persona = c.persona
+        `SELECT c.id, c.path, c.persona, c.created_ts,
+                (SELECT MAX(s.last_seen) FROM sessions s
+                  WHERE s.persona = c.persona AND s.left_ts IS NULL) AS last_seen,
+                (SELECT MAX(s.lease_expires_at) FROM sessions s
+                  WHERE s.persona = c.persona AND s.left_ts IS NULL) AS lease_expires_at
+           FROM claims c
           ORDER BY c.id ASC`,
       )
-      .all() as unknown as Array<Claim & { last_seen: string | null }>;
-    const cutoff = Date.now() - staleMinutes() * 60_000;
-    return rows.map((r) => ({
-      ...r,
-      // No member record means the holder is gone entirely — treat as stale.
-      stale: r.last_seen === null || Date.parse(r.last_seen) < cutoff,
-    }));
+      .all() as unknown as Array<
+      Claim & { last_seen: string | null; lease_expires_at: string | null }
+    >;
+    const nowMs = Date.now();
+    return rows.map(({ lease_expires_at, ...r }) => {
+      // No live session means the holder left or never came back — stale.
+      const holder_state = presenceState(r.last_seen, lease_expires_at, nowMs);
+      return { ...r, holder_state, stale: holder_state === "stale" };
+    });
   }
 
   /**
@@ -574,28 +772,82 @@ export class Squad {
     return released;
   }
 
+  /**
+   * Everyone in the room — one entry per persona holding a live session,
+   * freshest first, each with derived presence. A persona that left explicitly
+   * is gone from this list (its departure is in the chat log); one that simply
+   * stopped answering is still listed, as `stale`.
+   */
   members(): Member[] {
-    return this.db
-      .prepare("SELECT * FROM members ORDER BY last_seen DESC")
-      .all() as unknown as Member[];
+    const rows = this.db
+      .prepare(
+        `SELECT s.persona AS persona,
+                MIN(s.joined_at) AS session_first_seen,
+                MAX(s.last_seen) AS last_seen,
+                MAX(s.lease_expires_at) AS lease_expires_at,
+                COUNT(*) AS sessions,
+                m.first_seen AS member_first_seen
+           FROM sessions s LEFT JOIN members m ON m.persona = s.persona
+          WHERE s.left_ts IS NULL
+          GROUP BY s.persona
+          ORDER BY MAX(s.last_seen) DESC`,
+      )
+      .all() as unknown as Array<{
+      persona: string;
+      session_first_seen: string;
+      last_seen: string;
+      lease_expires_at: string;
+      sessions: number;
+      member_first_seen: string | null;
+    }>;
+    const nowMs = Date.now();
+    return rows.map((r) => ({
+      persona: r.persona,
+      first_seen: r.member_first_seen ?? r.session_first_seen,
+      last_seen: r.last_seen,
+      lease_expires_at: r.lease_expires_at,
+      state: presenceState(r.last_seen, r.lease_expires_at, nowMs),
+      sessions: r.sessions,
+    }));
+  }
+
+  /** members() minus yourself: the peers whose presence you actually need. */
+  peers(): Member[] {
+    return this.members().filter((m) => m.persona !== this.persona);
+  }
+
+  /** Sweep session rows nobody has touched in SESSION_RETENTION_HOURS. */
+  private pruneSessions(): void {
+    const cutoff = new Date(Date.now() - SESSION_RETENTION_HOURS * 3_600_000).toISOString();
+    this.db
+      .prepare("DELETE FROM sessions WHERE last_seen < ? AND session_id IS NOT ?")
+      .run(cutoff, this._sessionId);
   }
 
   /**
-   * Register presence and catch up: returns who's here, the open goals, the
-   * current advisory claims, and recent history. Advances the cursor past
-   * everything returned, so a subsequent check() yields only genuinely new
-   * messages.
+   * Register presence and catch up: opens (or renews) this connection's lease
+   * and returns your session id and lease expiry, who's here with their
+   * presence state, the open goals, the current advisory claims, and recent
+   * history. Advances the cursor past everything returned, so a subsequent
+   * check() yields only genuinely new messages.
    */
-  join(recentLimit = 30): {
-    members: Member[];
-    goals: Goal[];
-    claims: ClaimView[];
-    recent: Message[];
-  } {
+  join(recentLimit = 30): JoinResult {
     this.touch();
+    this.pruneSessions();
     const recent = this.read(recentLimit);
     this.setCursor(this.maxMessageId());
-    return { members: this.members(), goals: this.goals(), claims: this.claims(), recent };
+    // touch() above always leaves this connection a live session row.
+    const session = this.session();
+    if (!session) throw new Error("squad: presence session missing after join");
+    return {
+      session_id: session.session_id,
+      joined_at: session.joined_at,
+      lease_expires_at: session.lease_expires_at,
+      members: this.members(),
+      goals: this.goals(),
+      claims: this.claims(),
+      recent,
+    };
   }
 
   /**
@@ -928,13 +1180,15 @@ export class Squad {
   }
 
   /**
-   * Wipe the room: all messages, goals, claims, cursors, members, divergence
-   * rounds/submissions, and science cards (with their evidence and
-   * transition history).
+   * Wipe the room: all messages, goals, claims, cursors, members, presence
+   * sessions, divergence rounds/submissions, and science cards (with their
+   * evidence and transition history). A live connection keeps its session id
+   * and re-registers presence on its next operation.
    */
   clear(): void {
     this.db.exec(
       "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; DELETE FROM members; " +
+        "DELETE FROM sessions; " +
         "DELETE FROM divergence_submissions; DELETE FROM divergence_rounds; " +
         "DELETE FROM science_card_evidence; DELETE FROM science_card_transitions; DELETE FROM science_cards;",
     );

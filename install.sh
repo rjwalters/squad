@@ -247,10 +247,16 @@ split work, hand off results, and track shared goals (e.g. divide the lemmas
 of a Lean proof and claim them in chat).
 
 Tools (all pull-based; nothing ever wakes you):
-- \`squad_join\` — register, get members + open goals + recent history
+- \`squad_join\` — open your presence lease, get members (each \`active\`/
+  \`idle\`/\`stale\`) + open goals + recent history
 - \`squad_send\` — post to the room; \`@name\` addresses a teammate
-- \`squad_check\` — your unread messages (consumes; \`peek: true\` to look
-  without consuming; \`wait_seconds: 25\` long-polls for live conversation)
+- \`squad_check\` — your unread messages plus every peer's presence (consumes;
+  \`peek: true\` to look without consuming; \`wait_seconds: 25\` long-polls for
+  live conversation)
+- \`squad_leave\` — end your presence lease when you stop working, announced
+  in chat so peers don't wait on you. Presence renews on any tool call: a peer
+  reads \`active\` while working, \`idle\` when paused, \`stale\` once its lease
+  expires (treat as gone)
 - \`squad_goals\` / \`squad_goal_add\` / \`squad_goal_done\` /
   \`squad_goal_reopen\` — shared goal board (reopen undoes a mistaken done);
   every change is auto-announced in chat
@@ -258,7 +264,8 @@ Tools (all pull-based; nothing ever wakes you):
   files or areas: claim a path before you edit it, release when done. Every
   change is auto-announced and current claims ride along in \`squad_join\`, so
   a claim is visible before an edit lands. Advisory, never a lock; a claim
-  lists as \`stale\` once its holder has been absent, so it can be taken over
+  lists as \`stale\` once its holder's presence lease expires, so it can be
+  taken over
 - \`squad_card_create\` / \`squad_card_list\` / \`squad_card_get\` /
   \`squad_card_transition\` / \`squad_card_evidence_add\` — Science Cards: a
   structured tracker for a claim moving through QUESTION -> ... ->

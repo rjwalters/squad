@@ -30,6 +30,21 @@ CREATE TABLE IF NOT EXISTS members (
   first_seen TEXT NOT NULL,
   last_seen TEXT NOT NULL
 );
+-- Presence leases. One row per *connection* (an MCP server process, a CLI
+-- invocation), not per persona: a persona may legitimately be in the room
+-- twice (Claude Code + a terminal), and a session-keyed table keeps room for
+-- future session-scoped state (read cursors, etc.) without another migration.
+-- The members table above stays the persona-level identity ledger (stable
+-- first_seen); presence/staleness is derived here.
+CREATE TABLE IF NOT EXISTS sessions (
+  session_id TEXT PRIMARY KEY,
+  persona TEXT NOT NULL,
+  joined_at TEXT NOT NULL,
+  last_seen TEXT NOT NULL,
+  lease_expires_at TEXT NOT NULL,
+  left_ts TEXT
+);
+CREATE INDEX IF NOT EXISTS sessions_persona_live ON sessions (persona, left_ts);
 CREATE TABLE IF NOT EXISTS claims (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   path TEXT NOT NULL,

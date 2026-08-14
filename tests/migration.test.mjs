@@ -76,6 +76,8 @@ CREATE TABLE divergence_submissions (
 `;
 
 const SCIENCE_CARD_TABLES = ["science_cards", "science_card_transitions", "science_card_evidence"];
+/** Tables added after the fixture above by later features (#38: presence leases). */
+const LATER_TABLES = [...SCIENCE_CARD_TABLES, "sessions"];
 const PRE_EXISTING_TABLES = [
   "messages",
   "cursors",
@@ -119,7 +121,7 @@ test("opening an old-schema .squad/squad.db adds the Science Card tables without
     const pre = new DatabaseSync(dbFile);
     const preTables = tableNames(pre);
     pre.close();
-    for (const t of SCIENCE_CARD_TABLES) {
+    for (const t of LATER_TABLES) {
       assert.ok(!preTables.includes(t), `fixture must predate ${t}`);
     }
     for (const t of PRE_EXISTING_TABLES) {
@@ -134,9 +136,12 @@ test("opening an old-schema .squad/squad.db adds the Science Card tables without
 
     // 3. The new Science Card tables now exist...
     const afterTables = tableNames(db);
-    for (const t of SCIENCE_CARD_TABLES) {
+    for (const t of LATER_TABLES) {
       assert.ok(afterTables.includes(t), `${t} must exist after migration`);
     }
+    // ...the presence-lease table starts empty: an upgrade does not invent
+    // sessions for personas that were merely in the old members table.
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM sessions").get().n, 0);
     // ...and the science_cards table is empty (freshly created), not
     // pre-populated with anything.
     const cardCount = db.prepare("SELECT COUNT(*) AS n FROM science_cards").get();
@@ -185,7 +190,7 @@ test("a fresh (never-existed) squad.db gets every table, old and new, on first o
     process.env.SQUAD_DIR = dir;
     const db = openDb();
     const tables = tableNames(db);
-    for (const t of [...PRE_EXISTING_TABLES, ...SCIENCE_CARD_TABLES]) {
+    for (const t of [...PRE_EXISTING_TABLES, ...LATER_TABLES]) {
       assert.ok(tables.includes(t), `${t} must exist on a fresh db`);
     }
     db.close();
