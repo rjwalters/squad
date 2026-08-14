@@ -69,3 +69,9 @@ yarn.lock
 
 # Tool logs, same rule as .loom/logs/ above.
 .claude/skills/repo/logs/
+
+# install.sh writes/merges .mcp.json with machine-local absolute paths (server
+# entry point, SQUAD_DIR) plus the operator's persona — never commit it.
+.mcp.json
+# Per-machine Claude Code settings/permissions.
+.claude/settings.local.json
