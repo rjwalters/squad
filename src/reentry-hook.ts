@@ -22,6 +22,7 @@
  */
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { envMinutes } from "./db.js";
 import {
   DEFAULT_REENTRY_TTL_MINUTES,
   decide,
@@ -47,13 +48,6 @@ function sameSequenceReblock(input: unknown): boolean {
     input !== null &&
     (input as Record<string, unknown>).stop_hook_active === true
   );
-}
-
-function envMinutes(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
 }
 
 /**

@@ -17,6 +17,21 @@ import { basename, dirname, join } from "node:path";
 export const SCHEMA_VERSION = 1;
 
 /**
+ * Parses an env var as a non-negative minute count, falling back to
+ * `fallback` when the var is unset, empty, negative, or not a finite
+ * number. Shared by presence timing (`staleMinutes()`/`idleMinutes()` in
+ * src/core.ts) and the reentry-hook TTL (`SQUAD_REENTRY_TTL_MINUTES` in
+ * src/reentry-hook.ts) so the two domains don't reimplement the same
+ * parsing rule.
+ */
+export function envMinutes(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+/**
  * Every room table -- the complete unit of state `Squad.clear()`,
  * `Squad.exportRoom()`, and `Squad.importRoom()` (src/core.ts) all operate
  * over. Single source of truth so those three never drift out of sync with
