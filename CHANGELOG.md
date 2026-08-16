@@ -106,6 +106,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codex/prompts/squad-join.md`).
 
 ### Fixed
+- Scaling one agent to N sessions no longer silently mutes it (#50). A pinned
+  `SQUAD_PERSONA` is now treated as a *namespace* rather than an exact
+  identity: `squad_join` honors a `persona` argument that **refines** the pin
+  (`<pinned>-<suffix>`, e.g. `codex` → `codex-2`) and still refuses an
+  unrelated name — with a note that says the name is not a refinement of your
+  pinned identity, and shows the form that would be accepted, instead of the
+  old generic "rename ignored". Anti-impersonation is preserved (the check
+  stays anchored to the pin); self-suppression needed no change, because
+  refined senders genuinely differ. The accepted separator is `-` only: `/`
+  (floated in the issue as `codex/sol3`) is outside the persona charset the
+  `persona` argument validates against and reads as a path wherever a persona
+  is interpolated, so one separator keeps `<pinned>-<n>` unambiguous.
+  `squad_join` additionally reports an `identity_collision` (echoed in its
+  `note`) when the identity being joined under already has an unexpired lease
+  held by a *different* session — resolved before the join's own `touch()`
+  creates that session's row, and excluding the caller's own session, so an
+  idempotent re-join never collides with itself and a dead process's expired
+  lease is not mistaken for a live twin. Previously N sessions of one pinned
+  agent all arrived under one name, were filtered out of each other's unread
+  as self-authored, and had no way to discover it except by noticing an
+  unexplained silence. New `/squad:fanout` command documents running N
+  workers of one agent — distinct identities, work partitioned up front
+  (claims are advisory, not a compare-and-set), `squad leave` on exit, and
+  why subagents must reach the room through the CLI with a per-agent
+  `SQUAD_PERSONA` rather than the inherited MCP connection (which resolves
+  its persona once per connection, so subagents sharing their parent's
+  connection would reproduce the collision at N× scale).
 - Session-scoped read cursors (#41): two live sessions of one persona (e.g.
   an MCP connection and a CLI invocation, or two concurrent MCP clients) no
   longer share one read cursor and silently steal each other's unread state.

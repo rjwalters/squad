@@ -7,7 +7,9 @@ import { join } from "node:path";
 process.env.SQUAD_DIR = mkdtempSync(join(tmpdir(), "squad-test-"));
 
 const { openDb } = await import("../dist/db.js");
-const { Squad, DEFAULT_IDLE_MINUTES, DEFAULT_STALE_MINUTES } = await import("../dist/core.js");
+const { Squad, DEFAULT_IDLE_MINUTES, DEFAULT_STALE_MINUTES, isPersonaRefinement } = await import(
+  "../dist/core.js"
+);
 
 test.after(() => rmSync(process.env.SQUAD_DIR, { recursive: true, force: true }));
 
@@ -527,4 +529,123 @@ test("checkWait times out empty", async () => {
   claude.clear();
   const msgs = await claude.checkWait(1);
   assert.equal(msgs.length, 0);
+});
+
+// --- persona refinement + identity collision (#50) -------------------------
+
+test("isPersonaRefinement treats a pinned identity as a namespace, not a name", () => {
+  assert.ok(isPersonaRefinement("codex", "codex"), "the pinned name itself refines it");
+  assert.ok(isPersonaRefinement("codex", "codex-2"), "<pinned>-<n> is the fanout convention");
+  assert.ok(isPersonaRefinement("codex", "codex-sol3"), "any suffix, not just a number");
+  assert.ok(isPersonaRefinement("codex", "CODEX-2"), "case-insensitive, like the persona regex");
+  assert.ok(!isPersonaRefinement("codex", "fable"), "an unrelated name is impersonation");
+  assert.ok(!isPersonaRefinement("codex", "codex2"), "no separator — a different name entirely");
+  assert.ok(!isPersonaRefinement("codex", "codex-"), "a bare separator names nobody");
+  assert.ok(!isPersonaRefinement("codex", "sol-codex-2"), "the pin must be the prefix");
+  assert.ok(!isPersonaRefinement("codex", "codex/sol3"), "'/' is outside the persona charset");
+});
+
+test("requestPersona honours a refinement of the pin and refuses anything else", () => {
+  const one = new Squad(db, "codex");
+  const accepted = one.requestPersona("codex-1", "codex");
+  assert.equal(accepted.applied, true, "a refinement of the pin is honoured");
+  assert.equal(accepted.persona, "codex-1");
+  assert.equal(one.persona, "codex-1", "the connection now speaks as codex-1");
+  assert.equal(accepted.note, undefined, "an accepted rename needs no explanation");
+
+  const two = new Squad(db, "codex");
+  const rejected = two.requestPersona("fable", "codex");
+  assert.equal(rejected.applied, false);
+  assert.equal(two.persona, "codex", "the pin still wins against an unrelated name");
+  assert.match(
+    rejected.note,
+    /not a refinement/,
+    "the note says why, not just 'rename ignored'",
+  );
+  assert.match(rejected.note, /codex-/, "…and shows how to refine instead");
+
+  // An unpinned connection keeps the old free-rename behaviour.
+  const anon = new Squad(db, "agent");
+  assert.equal(anon.requestPersona("fable", null).applied, true);
+  assert.equal(anon.persona, "fable", "nothing pinned, so any valid name is accepted");
+});
+
+test("sessions under refined personas of one pinned agent see each other", () => {
+  claude.clear();
+  const sol1 = new Squad(db, "codex-1");
+  const sol2 = new Squad(db, "codex-2");
+  sol1.join();
+  sol2.join();
+
+  sol1.send("front A is closed");
+  sol2.send("front B needs a hand");
+
+  // Self-suppression keys on the sender string, so it only works once the
+  // senders genuinely differ — which is exactly what refinement buys.
+  assert.deepEqual(
+    sol2.check().map((m) => m.body),
+    ["front A is closed"],
+    "codex-2 sees codex-1's message",
+  );
+  assert.deepEqual(
+    sol1.check().map((m) => m.body),
+    ["front B needs a hand"],
+    "codex-1 sees codex-2's message",
+  );
+});
+
+test("join warns when the identity already holds another live session", () => {
+  claude.clear();
+  const first = new Squad(db, "codex");
+  first.join();
+
+  const second = new Squad(db, "codex");
+  const joined = second.join();
+  assert.ok(joined.identity_collision, "a co-named session is told so at join");
+  assert.equal(joined.identity_collision.persona, "codex");
+  assert.deepEqual(
+    joined.identity_collision.session_ids,
+    [first.sessionId],
+    "…and which other session holds the identity",
+  );
+  assert.match(
+    joined.identity_collision.note,
+    /codex-/,
+    "…pointed at the refinement convention that fixes it",
+  );
+
+  assert.equal(
+    new Squad(db, "fable").join().identity_collision,
+    undefined,
+    "a unique identity joins clean",
+  );
+});
+
+test("re-joining is not a collision with yourself", () => {
+  claude.clear();
+  const only = new Squad(db, "codex-1");
+  only.join();
+  assert.equal(
+    only.join().identity_collision,
+    undefined,
+    "join() is idempotent — its own session row is never a twin",
+  );
+});
+
+test("a co-named session whose lease expired is not a live collision", () => {
+  claude.clear();
+  new Squad(db, "codex").join();
+  backdate("codex", DEFAULT_STALE_MINUTES + 1);
+  assert.equal(
+    new Squad(db, "codex").join().identity_collision,
+    undefined,
+    "an expired lease is a dead process, not a live twin",
+  );
+});
+
+test("mcp.ts wires the refinement decision and the collision warning into squad_join", () => {
+  const mcpSrc = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
+  const join = mcpSrc.slice(mcpSrc.indexOf('"squad_join"'), mcpSrc.indexOf('"squad_send"'));
+  assert.match(join, /requestPersona\(/, "squad_join must route renames through requestPersona");
+  assert.match(join, /identity_collision/, "…and surface the collision warning in its note");
 });

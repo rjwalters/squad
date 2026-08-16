@@ -64,23 +64,39 @@ export async function runMcpServer(): Promise<void> {
         "active; call squad_leave when you are done. Advances your read cursor past the " +
         "returned history, so squad_check afterwards yields only new messages. Idempotent — " +
         "call again anytime to re-sync. Your identity autofills from the host harness; the " +
-        "optional persona argument renames this connection, but is ignored (with a note in " +
-        "the result) when the identity was pinned via SQUAD_PERSONA config.",
+        "optional persona argument renames this connection. A pinned identity (SQUAD_PERSONA " +
+        "config) is a namespace, not a fixed name: a rename that refines it — '<pinned>-<suffix>', " +
+        "e.g. 'codex-2' — is honored, which is how several sessions of one agent stay visible to " +
+        "each other; any other name is refused (with a note in the result). If the identity you " +
+        "join under already has another live session, the result says so.",
       inputSchema: {
         persona: z
           .string()
           .regex(/^[a-z0-9][a-z0-9_-]{0,31}$/i)
           .optional()
-          .describe("Preferred identity for this connection (only honored when not pinned)"),
+          .describe(
+            "Preferred identity for this connection. When pinned via config, only a " +
+              "refinement of the pinned name is honored (e.g. 'codex' -> 'codex-2')",
+          ),
       },
     },
     async ({ persona: requested }) => {
-      let note: string | undefined;
+      const notes: string[] = [];
       if (requested && requested !== squad.persona) {
-        if (pinned) note = `persona is pinned to '${pinned}' by config; rename ignored`;
-        else squad.setPersona(requested);
+        const outcome = squad.requestPersona(requested, pinned ?? null);
+        if (outcome.note) notes.push(outcome.note);
       }
-      return json({ persona: squad.persona, ...(note ? { note } : {}), db: dbPath(), ...squad.join() });
+      // join() reports an identity collision — another live session already
+      // holding this name — which is only actionable if the agent sees it, so
+      // it rides in the same `note` field as the rename decision.
+      const joined = squad.join();
+      if (joined.identity_collision) notes.push(joined.identity_collision.note);
+      return json({
+        persona: squad.persona,
+        ...(notes.length ? { note: notes.join(" ") } : {}),
+        db: dbPath(),
+        ...joined,
+      });
     },
   );
 

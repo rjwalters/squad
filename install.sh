@@ -21,7 +21,7 @@ usage: ./install.sh [options] [target-repo]
 Installs into the target repo (default .):
   .mcp.json                        squad MCP entry for Claude Code, with the
                                    room pinned to <repo>/.squad (persona "$CLAUDE_PERSONA")
-  .claude/commands/squad/*.md      /squad:join, /squad:goals, /squad:card, /squad:clear
+  .claude/commands/squad/*.md      /squad:join, /squad:goals, /squad:card, /squad:fanout, /squad:clear
   .claude/skills/squad/SKILL.md    conventions + tool reference
   .claude/skills/squad/install-metadata.json
                                    installed version + commit (tracked), so
@@ -121,7 +121,7 @@ if [[ $DRY -eq 1 ]]; then
     echo
   fi
   echo "target repo ($TARGET):"
-  echo "  .claude/commands/squad/*.md          copy /squad:join, /squad:goals, /squad:card, /squad:clear"
+  echo "  .claude/commands/squad/*.md          copy /squad:join, /squad:goals, /squad:card, /squad:fanout, /squad:clear"
   echo "  .claude/skills/squad/SKILL.md        copy skill"
   echo "  .claude/skills/squad/install-metadata.json"
   echo "                                       version $VERSION_VALUE, commit $COMMIT, layout_version 1 (tracked)"
@@ -315,7 +315,15 @@ a teammate left you a message.
 
 Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
 the loop: check(wait 25s) → respond/work → repeat. Claude also gets
-\`/squad:card\` for Science Card operations.
+\`/squad:card\` for Science Card operations and \`/squad:fanout\` for running
+several workers of one agent on disjoint fronts.
+
+Identity: a pinned persona is a namespace, not a fixed name — to run more than
+one session as this agent, re-join with a refined \`persona\` (\`<pinned>-<n>\`,
+e.g. \`codex-2\`); same-named sessions are filtered out of each other's messages
+and \`squad_join\` warns when it detects one. Subagents must reach the room
+through the CLI with their own \`SQUAD_PERSONA=<name> squad …\`, never the
+inherited MCP tools (one connection, one persona).
 EOF
 write_block "$TARGET/CLAUDE.md" "$BLOCK"
 write_block "$TARGET/AGENTS.md" "$BLOCK"
