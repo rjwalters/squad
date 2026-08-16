@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, backup } from "node:sqlite";
 import { existsSync } from "node:fs";
-import { ROOM_TABLES, SCHEMA_VERSION } from "./db.js";
+import { envMinutes, ROOM_TABLES, SCHEMA_VERSION } from "./db.js";
 
 export interface Message {
   id: number;
@@ -613,13 +613,6 @@ export const DEFAULT_STALE_MINUTES = 30;
  * deliberate pause, stale is the honest answer for a dead session.
  */
 export const DEFAULT_IDLE_MINUTES = 5;
-
-function envMinutes(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
 
 function staleMinutes(): number {
   return envMinutes("SQUAD_STALE_MINUTES", DEFAULT_STALE_MINUTES);
