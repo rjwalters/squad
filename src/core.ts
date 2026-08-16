@@ -91,6 +91,34 @@ export interface LeaveResult {
   sessions_remaining: number;
 }
 
+/**
+ * The outcome of a requested rename (see `Squad.requestPersona`): whether it
+ * took effect, the identity in force afterwards, and — when it did not — why.
+ */
+export interface PersonaRequestResult {
+  /** The connection's identity after the request (unchanged when refused). */
+  persona: string;
+  /** True when the rename took effect. */
+  applied: boolean;
+  /** Present only when the rename was refused: the reason, for the caller. */
+  note?: string;
+}
+
+/**
+ * Another connection is already in the room under the identity you just
+ * joined as. Co-named sessions are filtered out of each other's messages by
+ * self-suppression (`check()` excludes your own sender), so this is reported
+ * rather than left to be discovered as unexplained silence (#50).
+ */
+export interface IdentityCollision {
+  /** The contested identity. */
+  persona: string;
+  /** Other sessions currently holding it with an unexpired lease. */
+  session_ids: string[];
+  /** Human-readable warning, including the way out. */
+  note: string;
+}
+
 /** What `join()` returns: the caller's lease plus a full room snapshot. */
 export interface JoinResult {
   session_id: string;
@@ -107,6 +135,11 @@ export interface JoinResult {
    */
   pending_reviews: ReviewRequestView[];
   recent: Message[];
+  /**
+   * Set only when the identity you joined under is already held by another
+   * live session — the silent-mute condition from #50.
+   */
+  identity_collision?: IdentityCollision;
 }
 
 /**
@@ -621,6 +654,39 @@ export function presenceState(
  */
 const SESSION_RETENTION_HOURS = 24;
 
+/**
+ * The one separator a refined persona may use. A pinned identity
+ * (`SQUAD_PERSONA`) is a *namespace*, not an exact name: `codex` may join as
+ * `codex-2`, never as `fable`.
+ *
+ * `-` only, deliberately. Issue #50 also floated `codex/sol3`, but `/` is
+ * outside the charset the MCP `persona` argument validates against
+ * (`^[a-z0-9][a-z0-9_-]{0,31}$`), so such a request is rejected by input
+ * validation before any refinement logic sees it — and a persona string is
+ * interpolated into chat announcements, claim listings, and CLI output, where
+ * a path-like separator reads as a path. `_` is left out for the same reason
+ * one separator is better than two: `<pinned>-<n>` is the single convention
+ * documented in the fanout skill, so there is nothing to guess.
+ */
+export const PERSONA_REFINEMENT_SEPARATOR = "-";
+
+/**
+ * Does `requested` refine `pinned`? True for the pinned name itself and for
+ * `<pinned>-<suffix>`; false for everything else. This is what keeps the pin's
+ * anti-impersonation property while letting N sessions of one agent hold
+ * distinct identities: `codex` -> `codex-2` is a refinement, `codex` -> `fable`
+ * is not, and neither is `codex` -> `codex2` (a different name that merely
+ * looks similar). Compared case-insensitively, matching the case-insensitive
+ * regex the `persona` argument is validated with.
+ */
+export function isPersonaRefinement(pinned: string, requested: string): boolean {
+  const base = pinned.toLowerCase();
+  const want = requested.toLowerCase();
+  if (want === base) return true;
+  const prefix = base + PERSONA_REFINEMENT_SEPARATOR;
+  return want.startsWith(prefix) && want.length > prefix.length;
+}
+
 export class Squad {
   /** This connection's session, created lazily on first touch. */
   private _sessionId: string | null = null;
@@ -642,6 +708,35 @@ export class Squad {
   /** Rename this connection's identity (used by persona autofill on join). */
   setPersona(persona: string): void {
     this._persona = persona;
+  }
+
+  /**
+   * Apply a requested identity, honouring a pinned one as a namespace rather
+   * than an exact name (#50). With nothing pinned any valid name is accepted,
+   * as before. With `pinned` set, only a *refinement* of it is accepted — the
+   * pin itself, or `<pinned>-<suffix>` — so N sessions of one pinned agent can
+   * differentiate (`codex-1`, `codex-2`, …) and stop being filtered out of
+   * each other's messages as self-authored, while an unrelated name is still
+   * refused exactly as it was.
+   *
+   * Renaming only ever affects this connection's in-memory identity; the next
+   * `touch()` writes the session row under the new name.
+   */
+  requestPersona(requested: string, pinned?: string | null): PersonaRequestResult {
+    if (requested === this._persona) return { persona: this._persona, applied: false };
+    if (pinned && !isPersonaRefinement(pinned, requested)) {
+      return {
+        persona: this._persona,
+        applied: false,
+        note:
+          `persona is pinned to '${pinned}' by config and '${requested}' is not a refinement ` +
+          `of your pinned identity; rename ignored. To run several sessions as this agent, ` +
+          `join as '${pinned}${PERSONA_REFINEMENT_SEPARATOR}<suffix>' ` +
+          `(e.g. '${pinned}${PERSONA_REFINEMENT_SEPARATOR}2').`,
+      };
+    }
+    this.setPersona(requested);
+    return { persona: this._persona, applied: true };
   }
 
   /**
@@ -687,6 +782,32 @@ export class Squad {
       .prepare("SELECT session_id FROM sessions WHERE persona = ? AND left_ts IS NULL")
       .all(this.persona) as unknown as Array<{ session_id: string }>;
     return rows.map((r) => r.session_id);
+  }
+
+  /**
+   * Sessions *other than this connection's* that currently hold this identity
+   * with an unexpired lease — the co-naming that makes two agents invisible to
+   * each other (#50).
+   *
+   * Two things this deliberately does not count: this connection's own session
+   * (so an idempotent re-join never collides with itself — `join()` calls
+   * `touch()`, which creates exactly that row), and sessions whose lease has
+   * expired (a dead process that never called `leave()` is not a live twin).
+   */
+  collidingSessions(): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, last_seen, lease_expires_at FROM sessions
+          WHERE persona = ? AND left_ts IS NULL AND session_id IS NOT ?`,
+      )
+      .all(this.persona, this._sessionId) as unknown as Array<{
+      session_id: string;
+      last_seen: string;
+      lease_expires_at: string | null;
+    }>;
+    return rows
+      .filter((r) => presenceState(r.last_seen, r.lease_expires_at) !== "stale")
+      .map((r) => r.session_id);
   }
 
   /**
@@ -1063,6 +1184,11 @@ export class Squad {
    * check() yields only genuinely new messages.
    */
   join(recentLimit = 30): JoinResult {
+    // Resolved *before* touch(), which creates or renews this connection's own
+    // session row under the same identity: after it, "is someone else already
+    // here under this name?" would always find at least this session. (It is
+    // excluded by session id as well, so a re-join is safe either way.)
+    const colliding = this.collidingSessions();
     this.touch();
     this.pruneSessions();
     const recent = this.read(recentLimit);
@@ -1079,6 +1205,20 @@ export class Squad {
       claims: this.claims(),
       pending_reviews: this.pendingReviews(),
       recent,
+      ...(colliding.length
+        ? {
+            identity_collision: {
+              persona: this.persona,
+              session_ids: colliding,
+              note:
+                `identity collision: '${this.persona}' already has ` +
+                `${colliding.length} other live session${colliding.length === 1 ? "" : "s"}. ` +
+                `Same-named sessions are filtered out of each other's messages as ` +
+                `self-authored, so you would be mutually invisible — re-join with a refined ` +
+                `persona like '${this.persona}${PERSONA_REFINEMENT_SEPARATOR}2' to be heard.`,
+            },
+          }
+        : {}),
     };
   }
 
