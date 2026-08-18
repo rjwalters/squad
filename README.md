@@ -249,6 +249,35 @@ Two things worth calling out: the `SUPPORTED` gate only checks that a qualifying
 pnpm test    # builds + runs the node:test suite
 ```
 
+### VERSION bumps for consumer-visible changes
+
+`install.sh` copies `commands/squad/*.md`, `skills/squad/SKILL.md`, and (with
+`--reentry`) `hooks/squad-reentry.sh` into every consumer repo, and
+`codex/prompts/squad-*.md` globally into `~/.codex/prompts/`; every installed
+`.mcp.json` also runs the compiled MCP server straight out of this repo's
+`src/` (via `dist/`), so a server-behavior change reaches consumers as soon as
+this repo updates. `install-metadata.json` records `VERSION` at install time,
+and `/repo:update-tools` compares it against this repo's current `VERSION` to
+detect drift — so a `VERSION` that never moves makes every consumer look
+falsely "current."
+
+**If your PR touches the installed surface** (`commands/squad/`,
+`skills/squad/SKILL.md`, `codex/prompts/`, `hooks/squad-reentry.sh`,
+`install.sh`, `uninstall.sh`, or `src/`) — bump `VERSION` (keep
+`package.json`'s `"version"` and the `McpServer` version string in
+`src/mcp.ts` in sync; `pnpm test` enforces this) via `/loom:bump`, or, if the
+change genuinely does not alter installed behavior (a comment, a typo fix, a
+test-only edit), add this exact marker to the PR body or a commit message
+instead:
+
+```
+<!-- loom:no-surface-change -->
+```
+
+CI (`.github/workflows/version-check.yml`) runs
+`scripts/check-surface-version-bump.sh` on every PR and fails when the
+watched surface changed without either a `VERSION` bump or the marker.
+
 ## License
 
 MIT

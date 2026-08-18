@@ -1,0 +1,33 @@
+name: Version check
+
+# Consumer-visible-surface changes must bump VERSION (or carry the
+# `<!-- loom:no-surface-change -->` marker) so install-metadata.json and
+# /repo:update-tools can detect drift accurately. See
+# scripts/check-surface-version-bump.sh for the full rationale and the exact
+# watched-paths list. (#56)
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  check-version-bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so --base/--head can diff without relying on a
+          # merge-base a shallow checkout might not have.
+          fetch-depth: 0
+
+      - name: Check surface-visible changes bump VERSION
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          ./scripts/check-surface-version-bump.sh \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha }}"
