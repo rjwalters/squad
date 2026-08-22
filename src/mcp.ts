@@ -602,4 +602,15 @@ export async function runMcpServer(): Promise<void> {
   );
 
   await server.connect(new StdioServerTransport());
+
+  // Startup banner on stderr (stdout is the transport). Two audiences:
+  // a human reading a launch log, and the automated smoke tests that gate
+  // agent sessions on whether this server can start at all. Loom's
+  // claude-wrapper.sh pre-flight (`_check_mcp_candidate`) runs the entry
+  // point with stdin closed and requires stderr to match "running on stdio"
+  // within 5s; a server that starts perfectly but says nothing is
+  // indistinguishable to it from one that crashed, so every role tick in a
+  // repo whose .mcp.json names only squad failed with MCP_PREFLIGHT_FAILED.
+  // Emit after connect() so the line means "ready", not "about to try".
+  console.error("squad MCP server running on stdio");
 }
