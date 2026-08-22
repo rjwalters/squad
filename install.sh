@@ -310,8 +310,15 @@ done; only mark goals done that you verified (in Lean work: it compiles with
 no \`sorry\`); never speak as another persona; \`squad_claim\` a file before
 editing it and check \`squad_claims\` before touching a shared one; never
 delete files you did not create, however scratch-like they look — untracked
-≠ yours. At session start, a \`squad_check\` with \`peek: true\` shows whether
-a teammate left you a message.
+≠ yours.
+
+Join before you touch shared state — a precondition, not a courtesy. Before
+editing, stashing, cleaning or building against a tree another agent may be
+in, call \`squad_join\` (or at minimum \`squad_check\` with \`peek: true\`).
+Claims and goals protect you only against agents that joined; a process that
+never joins is invisible to all of it. Note that one persona can be two
+processes — if you see messages under your own name that you did not write,
+another session is live under it; say so rather than reasoning around it.
 
 Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
 the loop: check(wait 25s) → respond/work → repeat. Claude also gets
