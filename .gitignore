@@ -12,6 +12,7 @@ dist/
 .loom-checkpoint
 .loom-managed
 .no-changes-needed
+.snapshots/
 .loom/.daemon.pid
 .loom/.daemon.log
 .loom/daemon.sock
