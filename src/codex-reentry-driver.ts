@@ -247,6 +247,47 @@ export async function runCodexReentry(rest: string[]): Promise<SuperviseSummary>
 
   let resumeCache: boolean | null = opts.allowResume ? null : false;
 
+  // One room connection for the whole supervised run, opened lazily on first
+  // use and reused until shutdown — the same single-connection pattern
+  // `src/mcp.ts` uses for the long-running MCP server.
+  //
+  // Opening per call would leak: `node:sqlite`'s `DatabaseSync` does not
+  // release its file descriptors on GC, and `waitForReentry()` polls
+  // `hasDirectedWork()` once per sleep slice (~45s by default) for the whole
+  // multi-hour TTL — on the order of hundreds of opens per supervised run,
+  // enough to hit a container's `ulimit -n` and crash the supervisor with
+  // EMFILE during exactly the long unattended runs it exists to protect. It
+  // also minted a fresh `sessions` row per poll, since `Squad` creates its
+  // session lazily per instance.
+  //
+  // Lazy rather than eager so a supervisor that never launches (preLaunchStop
+  // blocks it before the first `announce`) still never touches the room, and
+  // so an unopenable room degrades exactly as before: `announce` swallows the
+  // throw, and `waitForReentry` treats a throwing `hasDirectedWork` as quiet.
+  let roomDb: import("node:sqlite").DatabaseSync | null = null;
+  let room: Squad | null = null;
+  const openRoom = (): Squad => {
+    if (!room) {
+      const db = openDb();
+      roomDb = db;
+      room = new Squad(db, persona);
+    }
+    return room;
+  };
+  const closeRoom = (): void => {
+    const db = roomDb;
+    // Cleared before the close attempt so a throwing close (or a second call)
+    // can never double-close the same handle.
+    roomDb = null;
+    room = null;
+    if (!db) return;
+    try {
+      db.close();
+    } catch {
+      // Already closed, or never fully usable — nothing left to release.
+    }
+  };
+
   const deps: SuperviseDeps = {
     runCodex: (args) => runCodexProcess(opts.bin, args),
     classifyRun: async (startedAtMs) => classifyRunFromLogs(startedAtMs),
@@ -270,12 +311,13 @@ export async function runCodexReentry(rest: string[]): Promise<SuperviseSummary>
       // Peek, never consume: these messages must still be there for the
       // persona's own squad_check once it re-enters. Same v1 heuristic as
       // the Claude Code Stop hook.
-      const squad = new Squad(openDb(), persona);
-      return squad.check({ peek: true }).some((m) => mentionsPersona(m.body, persona));
+      return openRoom()
+        .check({ peek: true })
+        .some((m) => mentionsPersona(m.body, persona));
     },
     announce: (body) => {
       try {
-        new Squad(openDb(), persona).send(body, "system");
+        openRoom().send(body, "system");
       } catch {
         // Room unreachable — the terminal log below is still the operator's
         // signal; never let an announcement failure kill the supervisor.
@@ -284,5 +326,12 @@ export async function runCodexReentry(rest: string[]): Promise<SuperviseSummary>
     log: (line) => process.stderr.write(`squad codex-reentry [${persona}]: ${line}\n`),
   };
 
-  return supervise(cfg, deps);
+  try {
+    return await supervise(cfg, deps);
+  } finally {
+    // Release the connection on every exit path — normal stop, throw, or the
+    // caller's own error handling. `supervise` is the process's whole
+    // lifetime, so this is the shutdown hook.
+    closeRoom();
+  }
 }
