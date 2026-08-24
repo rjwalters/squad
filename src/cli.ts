@@ -137,6 +137,21 @@ Human CLI usage:
                                'squad export' into this room; refuses on a
                                schema-version mismatch or a non-empty
                                destination room (run 'squad clear' first)
+  squad codex-reentry [--persona <name>] [--codex <bin>] [--ttl-minutes <n>]
+                      [--max-attempts <n>] [--no-resume] [--prompt <text>]
+                      [-- <extra codex exec args>]
+                               Run a Codex persona under the re-entry
+                               supervisor: launch 'codex exec' with the
+                               /squad-join prompt and relaunch it (bounded
+                               backoff, resets on an @mention) each time its
+                               turn ends, instead of leaving it parked and
+                               mute. One supervisor per persona, in that
+                               persona's own terminal -- start it where you
+                               would otherwise have run 'codex'. Bounded by
+                               SQUAD_REENTRY_TTL_MINUTES and
+                               SQUAD_REENTRY_MAX_ATTEMPTS, and stopped by
+                               SQUAD_REENTRY_STOP=1 or a .squad/reentry-stop
+                               marker; it announces in the room when it stops
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad help                  Show this help
@@ -152,6 +167,14 @@ Environment:
                   member (and its claims) list as stale (default 30)
   SQUAD_IDLE_MINUTES   Minutes of quiet after which a member drops from active
                   to idle — still leased, just paused (default 5)
+  SQUAD_REENTRY_TTL_MINUTES   Re-entry TTL for both re-entry adapters
+                  (default 240); 0 disables re-entry outright
+  SQUAD_REENTRY_MAX_ATTEMPTS  Hard cap on re-entries per arm cycle, used by
+                  'squad codex-reentry' (default 48)
+  SQUAD_REENTRY_STOP   Set to 1 to stop re-entry immediately (or touch
+                  .squad/reentry-stop / .squad/reentry/<persona>.stop)
+  SQUAD_CODEX_BIN      The codex binary 'squad codex-reentry' supervises
+                  (default 'codex')
 `;
 
 function fmt(m: Message): string {
@@ -254,6 +277,22 @@ export async function runCli(argv: string[]): Promise<void> {
   }
   if (cmd === "doctor") {
     await runDoctor();
+    return;
+  }
+  if (cmd === "codex-reentry") {
+    // Handled before the shared `Squad` below: the supervisor is not a
+    // human-persona command (it acts as the Codex persona it supervises) and
+    // it holds the process for hours, so it opens its own connections.
+    const { runCodexReentry, CODEX_REENTRY_USAGE } = await import("./codex-reentry-driver.js");
+    if (rest.includes("--help") || rest.includes("-h")) {
+      console.log(CODEX_REENTRY_USAGE);
+      return;
+    }
+    const summary = await runCodexReentry(rest);
+    console.log(
+      `codex re-entry supervisor stopped after ${summary.runs} run(s) / ` +
+        `${summary.attempts} re-entry(ies): ${summary.stopReason}`,
+    );
     return;
   }
 
@@ -730,6 +769,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "nuke",
       "path",
       "doctor",
+      "codex-reentry",
       "help",
       "--help",
       "-h",

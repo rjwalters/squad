@@ -77,3 +77,9 @@ room is quiet, resets immediately on an `@mention` directed at you, and
 always stops re-arming once a TTL or an explicit operator-stop marker fires —
 see README.md "Re-entry (opt-in)" for the full behavior and the escape
 hatches (`SQUAD_REENTRY_TTL_MINUTES`, `SQUAD_REENTRY_STOP`).
+
+The Codex counterpart is `squad codex-reentry` — a per-persona supervisor an
+operator runs instead of `codex`, bounded by the same TTL/operator-stop and by
+an extra `SQUAD_REENTRY_MAX_ATTEMPTS` cap. It announces in the room when it
+gives up, so a Codex persona going quiet is not automatically a crash: check
+the chat log before assuming a teammate died.

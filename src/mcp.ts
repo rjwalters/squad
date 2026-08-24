@@ -50,7 +50,7 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, persona);
 
-  const server = new McpServer({ name: "squad", version: "0.2.2" });
+  const server = new McpServer({ name: "squad", version: "0.3.0" });
 
   server.registerTool(
     "squad_join",

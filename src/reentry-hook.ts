@@ -6,7 +6,9 @@
  * `reentry.ts`, which is pure and independently unit-tested
  * (`tests/reentry-hook.test.mjs`) — this file only wires that logic to the
  * hook's stdin/stdout contract, the filesystem (persisted state, the
- * operator-stop marker), and the room's database (directed-work detection).
+ * operator-stop marker — both in `reentry-state.ts`, shared with the Codex
+ * supervisor so the two adapters can't drift on where state lives or how an
+ * operator quiets them), and the room's database (directed-work detection).
  *
  * Contract (Claude Code Stop hook protocol — mirrors
  * `.loom/hooks/guard-background-subagents.sh`'s documented contract):
@@ -20,16 +22,9 @@
  * stop) rather than wedging the session. That is the same fail-open
  * philosophy `guard-background-subagents.sh` documents for the same reason.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
 import { envMinutes } from "./db.js";
-import {
-  DEFAULT_REENTRY_TTL_MINUTES,
-  decide,
-  initialState,
-  mentionsPersona,
-  type ReentryState,
-} from "./reentry.js";
+import { DEFAULT_REENTRY_TTL_MINUTES, decide, mentionsPersona } from "./reentry.js";
+import { loadState, operatorStopped, saveState } from "./reentry-state.js";
 
 /**
  * `stop_hook_active` is true when Claude Code's own loop guard reports this
@@ -48,53 +43,6 @@ function sameSequenceReblock(input: unknown): boolean {
     input !== null &&
     (input as Record<string, unknown>).stop_hook_active === true
   );
-}
-
-/**
- * Operator-stop escape hatch. Checked before anything else in `decide()`.
- * Two forms, either sufficient: `SQUAD_REENTRY_STOP=1` (or `true`/`yes`) in
- * the environment, or a marker file the operator can `touch`/`rm` without
- * touching any config — a room-wide `<squadDir>/reentry-stop`, or a
- * persona-scoped `<squadDir>/reentry/<persona>.stop` to pause only one
- * persona's re-entry.
- */
-function operatorStopped(squadDir: string, persona: string): boolean {
-  switch ((process.env.SQUAD_REENTRY_STOP ?? "").toLowerCase()) {
-    case "1":
-    case "true":
-    case "yes":
-      return true;
-  }
-  if (existsSync(join(squadDir, "reentry-stop"))) return true;
-  if (existsSync(join(squadDir, "reentry", `${persona}.stop`))) return true;
-  return false;
-}
-
-function stateFile(squadDir: string, persona: string): string {
-  return join(squadDir, "reentry", `${persona}.json`);
-}
-
-function loadState(squadDir: string, persona: string, nowIso: string): ReentryState {
-  try {
-    const raw = readFileSync(stateFile(squadDir, persona), "utf8");
-    const parsed = JSON.parse(raw) as Partial<ReentryState>;
-    if (
-      typeof parsed.attempt === "number" &&
-      typeof parsed.firstArmedAt === "string" &&
-      (parsed.nextFireAt === null || typeof parsed.nextFireAt === "string") &&
-      (parsed.lastFiredAt === null || typeof parsed.lastFiredAt === "string")
-    ) {
-      return parsed as ReentryState;
-    }
-  } catch {
-    // Missing or corrupt — start a fresh arm cycle below.
-  }
-  return initialState(nowIso);
-}
-
-function saveState(squadDir: string, persona: string, state: ReentryState): void {
-  mkdirSync(join(squadDir, "reentry"), { recursive: true });
-  writeFileSync(stateFile(squadDir, persona), JSON.stringify(state, null, 2) + "\n");
 }
 
 /**

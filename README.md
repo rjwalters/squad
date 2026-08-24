@@ -113,12 +113,65 @@ forever on unread chatter alone:
   fresh process); it resets when a new arm cycle starts (first invocation
   after install, or after the TTL/operator-stop has allowed a stop).
 
-**Codex equivalent**: none exists yet. As of this writing, this repo's only
-Codex integration points are `~/.codex/prompts/squad-*.md` and
-`~/.codex/config.toml`'s `[mcp_servers.squad]` block — there is no confirmed
-Codex hook/scheduled-task primitive to hang an equivalent re-entry adapter on.
-This is a known gap, not an oversight; a Codex-side re-entry adapter needs a
-primitive that doesn't exist in this codebase yet.
+### Re-entry for Codex: `squad codex-reentry`
+
+Codex has **no end-of-turn hook** to mirror the `Stop` hook above with — its
+only hook event is `pre_tool_use`, and there is no `codex hooks` subcommand at
+all (verified against Codex 0.146.0). A Codex persona running `/squad-join`
+therefore ends its turn on a `task_complete` event and stays alive at ~0% CPU,
+present but mute, until an operator re-invokes it. That silent park caused
+three room outages in one day — one ~5 hours, one leaving 410 theorems
+unverified for 4 hours (#60).
+
+The fix assumes no hook primitive at all. It uses the one thing Codex does
+guarantee: **a `codex exec` run is a process that exits when the turn
+completes.** `squad codex-reentry` is a supervisor around that — start it in
+the terminal where you would otherwise have run `codex` and typed
+`/squad-join`:
+
+```bash
+squad codex-reentry                      # instead of: codex → /squad-join
+squad codex-reentry --persona codex-2    # a second worker (see /squad:fanout)
+squad codex-reentry -- --model o3        # everything after -- goes to `codex exec`
+```
+
+Each time the turn ends, the supervisor reads back *how* it ended from the
+session log (`$CODEX_HOME/sessions/.../rollout-*.jsonl` — the ground truth the
+presence table can't give you, since `stale` is indistinguishable from a
+crash), then re-launches after a bounded wait. A clean `task_complete` is an
+ordinary park; anything else is announced in the room as a failure, not a
+park.
+
+- **The same bounds as the Claude side, from the same code**: the wait between
+  runs is `src/reentry.ts`'s `decide()`, so backoff+jitter, the
+  `SQUAD_REENTRY_TTL_MINUTES` TTL, the `SQUAD_REENTRY_STOP` / `.squad/reentry-stop`
+  / `.squad/reentry/<persona>.stop` operator-stop escape hatch, and the
+  immediate reset on an `@mention` all behave identically. State lives in the
+  same `.squad/reentry/<persona>.json` file.
+- **Two extra guards**, because each Codex re-entry is a *process spawn* rather
+  than a turn of an already-running session: `SQUAD_REENTRY_MAX_ATTEMPTS`
+  (default 48) hard-caps re-entries per arm cycle regardless of wall-clock, and
+  a 10s floor between runs (plus refusing to honor an `@mention`'s
+  immediate-reset after a run that did *not* park cleanly) keeps a broken
+  `codex` binary from spinning at the backoff floor.
+- **One supervisor per persona, in that persona's own foreground terminal — not
+  a shared daemon.** The failure this fixes is a *cascade* (personas parking
+  within ~90s of each other as the room goes quiet), so a single watcher whose
+  own death silently disarmed every persona would reproduce the outage it
+  prevents. There is no pid file and no cross-persona state; a supervisor dying
+  returns exactly one terminal to a shell prompt, and only that persona loses
+  re-entry.
+- **It parks loudly.** On start it tells the room it will self-re-enter; when a
+  bound fires (TTL, attempt cap, operator-stop) it posts that the persona will
+  *not* return without an operator. `codex/prompts/squad-join.md` step 6 reads
+  `SQUAD_REENTRY_SUPERVISOR` (exported into every supervised run) so the
+  persona's own idle message says the matching thing.
+
+`squad codex-reentry --help` lists the flags: `--persona`, `--codex <bin>`,
+`--prompt`, `--ttl-minutes`, `--max-attempts`,
+`--no-resume`. It uses `codex exec resume --last` when the local binary
+advertises that subcommand (probed, not assumed) and a fresh `codex exec`
+session otherwise.
 
 ## Use
 
@@ -127,6 +180,7 @@ cd ~/projects/my-lean-proof
 terminal 1:  claude  →  /squad:goals prove lemma exp_bound; prove lemma sum_split; main theorem
              then    →  /squad:join
 terminal 2:  codex   →  /squad-join
+             or      →  squad codex-reentry   # same thing, but it re-enters itself
 terminal 3:  squad tail                    # watch the room live
              squad send "@claude take exp_bound, @codex take sum_split"
 ```

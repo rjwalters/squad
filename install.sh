@@ -58,7 +58,9 @@ options:
   --no-codex    skip all writes outside the target repo
   --no-link     skip \`npm link\`; the closing output uses the node path form
   --reentry     install the opt-in Claude Code re-entry Stop hook (see above);
-                default off
+                default off. Codex has no end-of-turn hook to install: its
+                re-entry counterpart is the \`squad codex-reentry\` supervisor,
+                which needs no install step — run it instead of \`codex\`
   --no-reentry  explicit no-op (re-entry is already off by default); accepted
                 so \`--reentry\`'s counterpart always parses
   --dry-run     print every planned write (including any outside the target
@@ -437,5 +439,5 @@ echo
 echo "done. the flow:"
 echo "  cd $TARGET"
 echo "  terminal 1: claude → /squad:goals <the mission>  then  /squad:join"
-echo "  terminal 2: codex  → /squad-join"
+echo "  terminal 2: codex  → /squad-join   (or: $CLI_CMD codex-reentry, which re-enters itself)"
 echo "  terminal 3: $CLI_CMD tail    # watch the room"

@@ -36,9 +36,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file) that always wins, so a session can never be held open forever on
   unread chatter alone. Backoff/TTL state persists per-persona at
   `.squad/reentry/<persona>.json`. New `src/reentry.ts` (pure decision logic)
-  and `src/reentry-hook.ts` (the hook's stdin/stdout protocol glue). No Codex
-  equivalent yet — this repo has no confirmed Codex hook/scheduled-task
-  primitive to build one on (see README.md "Re-entry (opt-in)").
+  and `src/reentry-hook.ts` (the hook's stdin/stdout protocol glue). The Codex
+  counterpart shipped separately as `squad codex-reentry` (#60, below).
+- Codex re-entry supervisor (#60): `squad codex-reentry` recovers a Codex
+  persona that parks silently on `task_complete` — the failure behind three
+  room outages in one day (one ~5 hours; one leaving 410 theorems unverified
+  for 4 hours). Codex exposes no end-of-turn hook to mirror the Claude Code
+  `Stop` hook with (only `pre_tool_use`, and no `codex hooks` subcommand at
+  all, verified against 0.146.0), so the supervisor assumes no hook primitive:
+  it wraps `codex exec` — the mode that *exits* at end of turn — relaunching
+  it each time the turn ends, and reads back how the run ended from the
+  session log (`$CODEX_HOME/sessions/.../rollout-*.jsonl`), so a clean park is
+  distinguishable from a crash without an operator grepping session files.
+  Run it in the terminal where you would otherwise have run `codex`
+  (`--persona`, `--codex <bin>`, `--prompt`, `--ttl-minutes`,
+  `--max-attempts`, `--no-resume`, and `--` passthrough to `codex exec`).
+  Bounds come from the *same* `decide()` as the Claude side — backoff+jitter,
+  `SQUAD_REENTRY_TTL_MINUTES`, the `SQUAD_REENTRY_STOP` /
+  `.squad/reentry-stop` / `.squad/reentry/<persona>.stop` operator-stop escape
+  hatch, the `@mention` reset, and the shared `.squad/reentry/<persona>.json`
+  state file (extracted to `src/reentry-state.ts`) — plus two guards specific
+  to re-entry-by-process-spawn: a new `SQUAD_REENTRY_MAX_ATTEMPTS` cap
+  (default 48, wired into `decide()` as an optional `maxAttempts`; unset means
+  uncapped, so the Claude hook is unchanged) and a 10s inter-run floor. It is
+  **one supervisor per persona in that persona's own foreground terminal**,
+  never a shared daemon, because the observed failure is a cascade and a
+  single watcher's death would silently disarm every persona at once. It also
+  parks *loudly*: it announces in the room when it starts, when a run fails,
+  and when a bound stops it for good, and `codex/prompts/squad-join.md` step 6
+  now branches on `SQUAD_REENTRY_SUPERVISOR` so the persona's own idle message
+  says whether anything will bring it back. New `src/codex-reentry.ts` (pure
+  logic + injected-deps control loop) and `src/codex-reentry-driver.ts` (spawn
+  / session-log / room wiring).
 - Presence leases (#38): presence is now a renewable lease with a derived
   `active`/`idle`/`stale` state instead of a permanent joined bit. `squad_join`
   opens a session (new `sessions` table, one row per *connection* — keyed by
