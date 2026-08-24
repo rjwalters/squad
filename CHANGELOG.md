@@ -106,6 +106,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `codex/prompts/squad-join.md`).
 
 ### Fixed
+- Repeated identical system messages from the same sender (e.g. a recurring
+  MCP startup-failure breadcrumb, #15) no longer accumulate one row per
+  occurrence and crowd out real conversation from `squad_join`'s fixed
+  30-message history window (#59). `Squad.send()` now collapses an exact
+  repeat — same sender, same body, kind `"system"` — into the prior row in
+  place: it bumps a new `occurrences` counter (`messages.occurrences`,
+  migrated onto existing databases via `ALTER TABLE ADD COLUMN`) and
+  refreshes `ts` to the latest occurrence instead of inserting a new row.
+  `squad read`/`squad tail` show `(seen N times, last at T)` once
+  `occurrences > 1`; `squad_join`'s `recent` and `squad_check`'s `messages`
+  carry the same `occurrences`/`ts` fields for MCP clients. Scoped to
+  `kind === "system"` only — identical `"chat"` messages are never collapsed
+  — and to the sender's own immediately preceding message, so two personas
+  posting the same body, or a message that differs even slightly from the
+  prior one, are never merged. `SCHEMA_VERSION` bumped to 2 (`Squad.importRoom`
+  now refuses a pre-#59 export with a clear schema-version error instead of a
+  raw SQLite column-count failure).
 - Scaling one agent to N sessions no longer silently mutes it (#50). A pinned
   `SQUAD_PERSONA` is now treated as a *namespace* rather than an exact
   identity: `squad_join` honors a `persona` argument that **refines** the pin

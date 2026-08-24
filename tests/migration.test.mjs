@@ -164,6 +164,9 @@ test("opening an old-schema .squad/squad.db adds the Science Card tables without
     const message = db.prepare("SELECT * FROM messages WHERE sender = 'claude'").get();
     assert.equal(message.body, "pre-migration message");
     assert.equal(message.ts, "2026-01-01T00:00:00.000Z");
+    // ...and the pre-#59 row (predating the `occurrences` column) gets the
+    // column's default via the ALTER TABLE ADD COLUMN migration, not NULL.
+    assert.equal(message.occurrences, 1, "pre-existing message row backfilled with occurrences = 1");
 
     const goal = db.prepare("SELECT * FROM goals WHERE created_by = 'claude'").get();
     assert.equal(goal.body, "pre-migration goal");
@@ -203,6 +206,64 @@ test("a fresh (never-existed) squad.db gets every table, old and new, on first o
       assert.ok(tables.includes(t), `${t} must exist on a fresh db`);
     }
     db.close();
+  } finally {
+    delete process.env.SQUAD_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- messages.occurrences column migration (#59) ---------------------------
+
+function messageColumnNames(db) {
+  return db
+    .prepare("PRAGMA table_info(messages)")
+    .all()
+    .map((c) => c.name);
+}
+
+test("opening a squad.db whose messages table predates occurrences adds the column via ALTER TABLE", () => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-migration-occurrences-"));
+  const dbFile = join(dir, "squad.db");
+  try {
+    // A messages table shaped exactly like it was before #59 -- no
+    // occurrences column at all (not even one that CREATE TABLE IF NOT
+    // EXISTS could have silently skipped).
+    const seed = new DatabaseSync(dbFile);
+    seed.exec(`
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'chat',
+        body TEXT NOT NULL,
+        ts TEXT NOT NULL
+      );
+    `);
+    seed
+      .prepare("INSERT INTO messages (sender, kind, body, ts) VALUES (?, ?, ?, ?)")
+      .run("claude", "system", "pre-#59 system message", "2026-01-01T00:00:00.000Z");
+    seed.close();
+
+    const pre = new DatabaseSync(dbFile);
+    assert.ok(!messageColumnNames(pre).includes("occurrences"), "fixture must predate occurrences");
+    pre.close();
+
+    process.env.SQUAD_DIR = dir;
+    const db = openDb();
+    assert.ok(messageColumnNames(db).includes("occurrences"), "occurrences column added on open");
+    const row = db.prepare("SELECT * FROM messages WHERE sender = 'claude'").get();
+    assert.equal(row.body, "pre-#59 system message", "existing row's data is untouched");
+    assert.equal(row.occurrences, 1, "existing row backfilled with the column default");
+    db.close();
+
+    // Re-opening (the idempotent path every subsequent invocation takes) is
+    // a no-op: no error from re-running the ALTER TABLE-guarding check, and
+    // the row is unchanged.
+    const reopened = openDb();
+    assert.equal(
+      reopened.prepare("SELECT occurrences FROM messages WHERE sender = 'claude'").get().occurrences,
+      1,
+    );
+    reopened.close();
   } finally {
     delete process.env.SQUAD_DIR;
     rmSync(dir, { recursive: true, force: true });

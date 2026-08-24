@@ -8,7 +8,21 @@ export interface Message {
   sender: string;
   kind: "chat" | "system";
   body: string;
+  /**
+   * When `occurrences > 1`, `ts` is the *last* occurrence's timestamp, not the
+   * first — see `occurrences` below.
+   */
   ts: string;
+  /**
+   * How many consecutive identical `"system"` messages from `sender` this row
+   * represents (#59). Always 1 for `"chat"` messages, and for a `"system"`
+   * message whose immediately preceding message from the same sender differs
+   * in body. `Squad.send()` collapses an exact repeat into this counter
+   * in place — bumping it and refreshing `ts` — instead of inserting a new
+   * row, so a persistently failing startup (or any other repeating system
+   * notice) occupies one row/slot no matter how many times it recurs.
+   */
+  occurrences: number;
 }
 
 export interface Goal {
@@ -849,13 +863,38 @@ export class Squad {
     };
   }
 
+  /**
+   * Post a message. `"system"` messages are deduped against this sender's own
+   * immediately preceding message (#59): if that message is also `"system"`
+   * with an identical body, this call collapses into it in place — bumping
+   * `occurrences` and refreshing `ts` to now — instead of inserting a new
+   * row, so a persistently repeating system notice (e.g. an MCP startup
+   * failure retried on every session start) occupies one row no matter how
+   * many times it recurs. `"chat"` messages are never collapsed, even if
+   * byte-identical to a prior one — only `"system"` is scoped in, per #59's
+   * acceptance criteria. Scoped to *this sender's* last message, not the
+   * table's last message overall, so two different personas posting the same
+   * body never collapse into each other's row.
+   */
   send(body: string, kind: "chat" | "system" = "chat"): Message {
     this.touch();
     const ts = now();
+    if (kind === "system") {
+      const last = this.db
+        .prepare("SELECT * FROM messages WHERE sender = ? ORDER BY id DESC LIMIT 1")
+        .get(this.persona) as unknown as Message | undefined;
+      if (last && last.kind === "system" && last.body === body) {
+        const occurrences = (last.occurrences ?? 1) + 1;
+        this.db
+          .prepare("UPDATE messages SET ts = ?, occurrences = ? WHERE id = ?")
+          .run(ts, occurrences, last.id);
+        return { id: last.id, sender: this.persona, kind, body, ts, occurrences };
+      }
+    }
     const { lastInsertRowid } = this.db
-      .prepare("INSERT INTO messages (sender, kind, body, ts) VALUES (?, ?, ?, ?)")
+      .prepare("INSERT INTO messages (sender, kind, body, ts, occurrences) VALUES (?, ?, ?, ?, 1)")
       .run(this.persona, kind, body, ts);
-    return { id: Number(lastInsertRowid), sender: this.persona, kind, body, ts };
+    return { id: Number(lastInsertRowid), sender: this.persona, kind, body, ts, occurrences: 1 };
   }
 
   /** Stateless recent-history replay. Never touches any cursor. */

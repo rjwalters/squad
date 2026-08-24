@@ -27,6 +27,78 @@ test("send and read", () => {
   assert.equal(msgs[1].sender, "codex");
 });
 
+// --- repeated system-message dedup (#59) ------------------------------
+
+test("identical consecutive system messages from the same sender collapse in place", () => {
+  claude.clear();
+  const first = claude.send("mcp startup failed: missing deps", "system");
+  assert.equal(first.occurrences, 1);
+  const second = claude.send("mcp startup failed: missing deps", "system");
+  assert.equal(second.id, first.id, "collapses into the same row instead of inserting a new one");
+  assert.equal(second.occurrences, 2);
+  const third = claude.send("mcp startup failed: missing deps", "system");
+  assert.equal(third.id, first.id);
+  assert.equal(third.occurrences, 3, "occurrences keeps incrementing across repeats");
+
+  const rows = claude.read();
+  assert.equal(rows.length, 1, "the room shows a single collapsed entry, not one per repeat");
+  assert.equal(rows[0].occurrences, 3);
+  assert.ok(Date.parse(rows[0].ts) >= Date.parse(first.ts), "ts refreshed to the latest occurrence");
+});
+
+test("system dedup checks the sender's own last message, not the room's last message overall", () => {
+  claude.clear();
+  claude.send("recurring failure", "system");
+  codex.send("unrelated chatter"); // a different sender's message lands in between
+  const again = claude.send("recurring failure", "system");
+  assert.equal(again.occurrences, 2, "still collapses with claude's own prior message");
+  assert.equal(claude.read().filter((m) => m.sender === "claude").length, 1);
+});
+
+test("chat messages are never collapsed, even if byte-identical", () => {
+  claude.clear();
+  claude.send("same text", "chat");
+  claude.send("same text", "chat");
+  const rows = claude.read();
+  assert.equal(rows.length, 2, "identical chat messages each get their own row");
+  assert.equal(rows[0].occurrences, 1);
+  assert.equal(rows[1].occurrences, 1);
+});
+
+test("system dedup never crosses senders: two personas posting the same body stay separate", () => {
+  claude.clear();
+  claude.send("shared failure text", "system");
+  codex.send("shared failure text", "system");
+  const rows = claude.read();
+  assert.equal(rows.length, 2, "each sender's occurrence lives in its own row");
+  assert.deepEqual(
+    rows.map((m) => m.sender),
+    ["claude", "codex"],
+  );
+  assert.equal(rows[0].occurrences, 1);
+  assert.equal(rows[1].occurrences, 1);
+});
+
+test("a system message that differs from the prior one by even one character is not collapsed", () => {
+  claude.clear();
+  claude.send("failure: connection refused", "system");
+  claude.send("failure: connection refused.", "system"); // trailing period differs
+  const rows = claude.read();
+  assert.equal(rows.length, 2, "not identical, so each gets its own row");
+  assert.equal(rows[0].occurrences, 1);
+  assert.equal(rows[1].occurrences, 1);
+});
+
+test("occurrences increments correctly across many repeats without wrapping", () => {
+  claude.clear();
+  let last;
+  for (let i = 0; i < 25; i++) {
+    last = claude.send("recurring startup failure notice", "system");
+  }
+  assert.equal(last.occurrences, 25);
+  assert.equal(claude.read().length, 1, "still a single collapsed row after many repeats");
+});
+
 test("check excludes own messages and consumes", () => {
   claude.clear();
   claude.send("one");

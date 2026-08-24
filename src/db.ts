@@ -6,15 +6,21 @@ import { basename, dirname, join } from "node:path";
 
 /**
  * Bumped whenever a table is added to (or removed from) SCHEMA / ROOM_TABLES
- * below. Stamped into every db via `PRAGMA user_version` in openDb(), and
- * checked by `Squad.importRoom()` (src/core.ts) to refuse importing an
- * export produced by an incompatible squad build rather than silently
- * merging or corrupting state. The migration strategy for *this* build's own
- * schema stays the existing idempotent `CREATE TABLE IF NOT EXISTS` below --
- * this version number exists purely as an export/import compatibility
- * check, not a migration-ordering mechanism.
+ * below, *or* an existing ROOM_TABLES table's column shape changes (e.g. a
+ * new column via an `ensure*Column()` migration in openDb()) -- either kind
+ * of change can make `Squad.importRoom()`'s `INSERT INTO t SELECT * FROM t2`
+ * fail (a positional insert requires matching column counts) or silently
+ * misalign columns. Stamped into every db via `PRAGMA user_version` in
+ * openDb(), and checked by `Squad.importRoom()` (src/core.ts) to refuse
+ * importing an export produced by an incompatible squad build with a clear
+ * error rather than a raw SQLite error or silently corrupting state. The
+ * migration strategy for *this* build's own schema stays the existing
+ * idempotent `CREATE TABLE IF NOT EXISTS` (new tables) plus targeted
+ * `ALTER TABLE ADD COLUMN` migrations (new columns on an existing table)
+ * below -- this version number exists purely as an export/import
+ * compatibility check, not a migration-ordering mechanism.
  */
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 
 /**
  * Parses an env var as a non-negative minute count, falling back to
@@ -61,7 +67,8 @@ CREATE TABLE IF NOT EXISTS messages (
   sender TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'chat',
   body TEXT NOT NULL,
-  ts TEXT NOT NULL
+  ts TEXT NOT NULL,
+  occurrences INTEGER NOT NULL DEFAULT 1
 );
 -- The persona's durable read high-water mark. No longer the cursor check()
 -- reads (session_cursors below is, since #41), but still written on every
@@ -319,6 +326,23 @@ export function roomSplitWarning(dir: string, cwd: string): string | null {
 
 let warnedRoomSplit = false;
 
+/**
+ * `CREATE TABLE IF NOT EXISTS` (SCHEMA above) never adds a column to a table
+ * that already exists, so a db written before `occurrences` was added to
+ * `messages` (#59, system-message dedup) needs an explicit `ALTER TABLE` on
+ * open. Idempotent: checked via `PRAGMA table_info`, so re-running against an
+ * already-migrated db (or a freshly created one, which already has the
+ * column from SCHEMA) is a no-op.
+ */
+function ensureMessagesOccurrencesColumn(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(messages)").all() as unknown as Array<{
+    name: string;
+  }>;
+  if (!cols.some((c) => c.name === "occurrences")) {
+    db.exec("ALTER TABLE messages ADD COLUMN occurrences INTEGER NOT NULL DEFAULT 1");
+  }
+}
+
 export function openDb(): DatabaseSync {
   if (!warnedRoomSplit) {
     warnedRoomSplit = true;
@@ -331,12 +355,15 @@ export function openDb(): DatabaseSync {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
+  ensureMessagesOccurrencesColumn(db);
   // Every open of a db by the current build stamps it current: SCHEMA's
-  // migration strategy is additive-only (CREATE TABLE IF NOT EXISTS above),
-  // so once this build has opened a db it *is* SCHEMA_VERSION, regardless of
-  // what it was stamped as before. This pragma exists for export/import
-  // compatibility checks (Squad.importRoom(), src/core.ts), not to gate
-  // opening a db directly.
+  // migration strategy is additive-only (CREATE TABLE IF NOT EXISTS above,
+  // plus the narrow ALTER TABLE ADD COLUMN migrations like
+  // ensureMessagesOccurrencesColumn() for columns added to an existing
+  // table), so once this build has opened a db it *is* SCHEMA_VERSION,
+  // regardless of what it was stamped as before. This pragma exists for
+  // export/import compatibility checks (Squad.importRoom(), src/core.ts), not
+  // to gate opening a db directly.
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   return db;
 }
