@@ -156,7 +156,13 @@ Environment:
 
 function fmt(m: Message): string {
   const time = m.ts.slice(11, 19);
-  return m.kind === "system" ? `${time} -- ${m.body}` : `${time} <${m.sender}> ${m.body}`;
+  // Collapsed system messages (#59) carry occurrences > 1: surface the
+  // repeat count and last-seen time instead of silently showing only the
+  // latest occurrence with no indication earlier ones ever happened.
+  const suffix = m.occurrences > 1 ? ` (seen ${m.occurrences} times, last at ${time})` : "";
+  return m.kind === "system"
+    ? `${time} -- ${m.body}${suffix}`
+    : `${time} <${m.sender}> ${m.body}${suffix}`;
 }
 
 interface DoctorCheck {

@@ -50,7 +50,7 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, persona);
 
-  const server = new McpServer({ name: "squad", version: "0.2.1" });
+  const server = new McpServer({ name: "squad", version: "0.2.2" });
 
   server.registerTool(
     "squad_join",
@@ -68,7 +68,10 @@ export async function runMcpServer(): Promise<void> {
         "config) is a namespace, not a fixed name: a rename that refines it — '<pinned>-<suffix>', " +
         "e.g. 'codex-2' — is honored, which is how several sessions of one agent stay visible to " +
         "each other; any other name is refused (with a note in the result). If the identity you " +
-        "join under already has another live session, the result says so.",
+        "join under already has another live session, the result says so. A repeated identical " +
+        "'system' message from the same sender (e.g. a recurring startup-failure notice) occupies " +
+        "one slot in the returned history, not one per occurrence — check its occurrences field " +
+        "(> 1) and ts (the most recent occurrence) rather than assuming one row is one event.",
       inputSchema: {
         persona: z
           .string()
@@ -123,7 +126,10 @@ export async function runMcpServer(): Promise<void> {
         "gating you, most urgent first, so you can work by priority instead of by chat order. " +
         "Pass wait_seconds to long-poll: the call blocks until a new message " +
         "arrives or the wait expires, which is how to hold a live conversation without busy-" +
-        "polling. Keep wait_seconds at 25 or below unless the MCP tool timeout has been raised.",
+        "polling. Keep wait_seconds at 25 or below unless the MCP tool timeout has been raised. " +
+        "A repeated identical 'system' message from the same sender collapses into a single " +
+        "returned message with an occurrences count (> 1) and ts refreshed to the most recent " +
+        "occurrence, instead of one entry per repeat.",
       inputSchema: {
         wait_seconds: z
           .number()
