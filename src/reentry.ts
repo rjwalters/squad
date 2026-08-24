@@ -51,6 +51,18 @@ export const DEFAULT_SLEEP_CAP_MS = 45_000;
 export const DEFAULT_REENTRY_TTL_MINUTES = 240;
 
 /**
+ * `SQUAD_REENTRY_MAX_ATTEMPTS` default — a hard ceiling on *fired* re-entries
+ * within one arm cycle, independent of the wall-clock TTL. The Claude Code
+ * `Stop` hook leaves this unset (TTL alone bounds it, because every hook
+ * invocation is driven by a session that is already running); the Codex
+ * supervisor (`codex-reentry.ts`) sets it, because there each re-entry is a
+ * *process spawn* — a codex binary that fails instantly would otherwise spin
+ * through the whole TTL at the backoff floor. 48 at the ×2/30-minute-cap
+ * default schedule is roughly a day of quiet-room re-entry.
+ */
+export const DEFAULT_REENTRY_MAX_ATTEMPTS = 48;
+
+/**
  * The raw (pre-jitter) exponential interval for `attempt` (0-indexed: the
  * Nth time a backoff window has been *started* since the last reset),
  * capped at `params.capMs`.
@@ -111,6 +123,12 @@ export interface DecideInput {
   /** True when the operator's escape hatch (env var or marker file) is set. */
   operatorStopped: boolean;
   ttlMinutes: number;
+  /**
+   * Optional hard cap on `state.attempt` (fired re-entries in this arm
+   * cycle). Omitted, `undefined`, or `<= 0` means "no cap" — the TTL is then
+   * the only bound, which is the Claude Code `Stop` hook's shipped behavior.
+   */
+  maxAttempts?: number;
   backoff?: BackoffParams;
   rand?: () => number;
   sleepCapMs?: number;
@@ -131,9 +149,10 @@ export interface DecideResult {
  * same-turn loop guard — see `reentry-hook.ts`).
  *
  * Precedence, each checked before the next: operator-stop, then TTL, then
- * directed work, then the ordinary quiet/backoff path. Operator-stop and TTL
- * both unconditionally allow the stop — neither directed work nor an
- * in-progress backoff window can override them.
+ * the attempt cap, then directed work, then the ordinary quiet/backoff path.
+ * Operator-stop, TTL, and the attempt cap all unconditionally allow the
+ * stop — neither directed work nor an in-progress backoff window can
+ * override them.
  */
 export function decide(input: DecideInput): DecideResult {
   const { state, nowMs, hasDirectedWork, operatorStopped, ttlMinutes } = input;
@@ -150,6 +169,16 @@ export function decide(input: DecideInput): DecideResult {
       block: false,
       sleepMs: 0,
       reason: `TTL of ${ttlMinutes}m exceeded since ${state.firstArmedAt}`,
+      nextState: state,
+    };
+  }
+
+  const maxAttempts = input.maxAttempts ?? 0;
+  if (maxAttempts > 0 && state.attempt >= maxAttempts) {
+    return {
+      block: false,
+      sleepMs: 0,
+      reason: `attempt cap of ${maxAttempts} reached (${state.attempt} re-entries since ${state.firstArmedAt})`,
       nextState: state,
     };
   }
