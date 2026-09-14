@@ -395,3 +395,30 @@ test("renaming a contributing session cannot make it an independent reviewer", a
     /author|independen|own/,
   );
 });
+
+test("reviewer rename during build retains evidence without resolving as another identity", async (t) => {
+  const { root, squad, peer, node, bank } = fixture(t);
+  const attempt = await bank();
+  const request = squad.nodeClaim(node.id, node.revision).review;
+  peer.reviewClaim(request.id);
+  writeFileSync(join(root, "mode"), "wait");
+  const pending = peer.nodeReview(request.id, reviewInput(attempt));
+  pending.catch(() => {});
+  try {
+    await waitForBuild(root);
+    peer.setPersona("renamed-reviewer");
+  } finally {
+    writeFileSync(join(root, "release"), "ready");
+  }
+  const receipt = await pending;
+  assert.equal(receipt.status, "stale");
+  assert.equal(receipt.reviewer, "peer");
+  assert.equal(receipt.build.exit_code, 0);
+  assert.equal(squad.reviewGet(request.id).status, "claimed");
+  assert.ok(
+    squad
+      .nodeGet(node.id)
+      .reviews.some((r) => r.id === receipt.id && r.build.clean),
+  );
+  assert.notEqual(squad.nodeGet(node.id).review_status, "approved");
+});

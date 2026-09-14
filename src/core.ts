@@ -1161,7 +1161,8 @@ export class Squad {
             ? "failed"
             : request.status === "cancelled"
               ? "cancelled"
-              : request.status !== "claimed" ||
+              : this.persona !== reviewer ||
+                  request.status !== "claimed" ||
                   request.claimed_by !== reviewer ||
                   request.target !== reviewer ||
                   request.created_ts !== receipt.request_created_ts ||
