@@ -320,8 +320,30 @@ done; only mark goals done that you verified (in Lean work: it compiles with
 no \`sorry\`); never speak as another persona; \`squad_claim\` a file before
 editing it and check \`squad_claims\` before touching a shared one; never
 delete files you did not create, however scratch-like they look — untracked
-≠ yours. At session start, a \`squad_check\` with \`peek: true\` shows whether
-a teammate left you a message.
+≠ yours.
+
+Join the correct room before touching shared state. Before editing, stashing,
+cleaning or building against a shared tree, call \`squad_join\` and verify its
+returned \`db\` path is the team's room for that tree. A connection to another
+repo's room does not count. Shared worktrees should use the team's existing
+room; configure \`SQUAD_DIR\` before launching the connection when needed.
+CLI-only workers must first announce themselves with \`squad send\` under
+their own identity in that room. Read messages and claims and coordinate
+with their owners before working; a casual read or \`peek: true\` check is
+not a substitute for the initial join and room check.
+
+This rule follows the erdos-85 recovery incident (2026-08-12, messages
+2798–2801, Squad issue #16): an unjoined process stashed another worker's
+changes and left the room guessing at the cause. Participation and claims
+are advisory: Squad cannot intercept shell/Git commands or detect a process
+that never joins. Joining does not authorize changing a teammate's work.
+
+Default identities distinguish logical sessions; \`session_id\` distinguishes
+connections. Explicit personas can still be shared, and \`squad_join\`
+reports live collisions in \`identity_collision\`. Another connection may be
+a CLI call from the same worker, not a second independent agent. Shared
+personas have the same chat sender and self-filter each other's messages;
+independent workers must use distinct personas.
 
 Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
 the loop: check(wait 25s) → respond/work → repeat. Claude also gets
