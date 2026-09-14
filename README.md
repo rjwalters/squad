@@ -128,36 +128,93 @@ Goals are squad-scoped, not assigned: agents negotiate division of labor in chat
 
 ## Install
 
-Requires Node ≥ 22.5 (uses the built-in `node:sqlite` — no native builds).
+Requires Node ≥ 22.16.0 (uses the built-in `node:sqlite` — no native builds).
 
 ```bash
 git clone https://github.com/rjwalters/squad && cd squad
-pnpm install && pnpm build        # or npm
+CI=true pnpm install --frozen-lockfile && pnpm build
 
 ./install.sh ~/projects/my-lean-proof
 ```
 
-Per-repo writes: a `squad` entry merged into `.mcp.json` (room pinned to `<repo>/.squad`), `.claude/commands/squad/`, `.claude/skills/squad/` (including a tracked `install-metadata.json` recording the installed version + commit, so `/repo:update-tools` can spot a stale install; the source path and timestamp go to a gitignored `.install-local.json` sidecar), identical marker-bounded blocks in `CLAUDE.md` and `AGENTS.md`, and `.squad/` added to `.gitignore`. With confirmation, it also registers Codex once per machine (`~/.codex/prompts/squad-*.md` + a `[mcp_servers.squad]` block in `~/.codex/config.toml`) and links the `squad` CLI onto your `PATH` (`npm link`, also once per machine). Re-runs replace blocks in place; `--dry-run` prints every planned write — including the global ones — without changing anything; `./uninstall.sh <repo>` reverses everything. Default personas `claude` / `codex` — override with `SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` at install time.
+Per-repo installation copies the canonical skill and references to both
+`.claude/skills/squad/` and `.agents/skills/squad/`, preserves Claude command
+aliases, adds identical Squad blocks to `CLAUDE.md` and `AGENTS.md`, and configures
+the repo's MCP room. Fresh installs omit persona pins: sessions choose unique
+automatic identities. Existing pins, custom launchers, environment values, and
+unrelated settings remain intact. `SQUAD_CLAUDE_PERSONA` and
+`SQUAD_CODEX_PERSONA` explicitly supply pins for fresh configuration.
 
-If you decline the CLI link (or `npm link` can't write npm's global prefix on your machine), the installer's closing output prints the exact `node <path-to-squad>/dist/index.js <cmd>` form to use instead of `squad <cmd>` everywhere below — trust that output over this README if the two ever disagree.
+Global setup is separate: with confirmation (or `-y`), installation writes all
+five compatibility prompts and an MCP registration under `$CODEX_HOME`, defaulting
+to `~/.codex`, and optionally runs `npm link`. `--no-codex` skips all global
+setup; `--no-link` skips only linking. Repo-scoped Codex skills always install.
+Global wiring is shared by every consumer repository on the machine.
 
-**Installation and migration:** fresh installs omit `SQUAD_PERSONA` for both
-harnesses. Reinstall preserves existing environment values and custom names.
-Older installs pinned `claude` in the repo's `.mcp.json` and `codex` in the global
-`~/.codex/config.toml` squad block. These values are ambiguous (they may be
-intentional), so the installer never silently removes them. To migrate, remove
-only `SQUAD_PERSONA` from those squad environment entries and restart the MCP
-connections; keep room settings and custom metadata. Existing work references
-keep the old name: finish/reassign that work before starting with new identities.
-`SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` request explicit installer pins.
-An existing Codex server block (including command/args) is preserved verbatim;
-update those paths manually if moving the source checkout. This includes table-form TOML
-environments; edit its pin directly to change it.
-Codex's config is machine-global; its pin applies across repos. The optional
-`--reentry` Stop hook requires an explicit unique `SQUAD_CLAUDE_PERSONA`, because
-its separate process cannot discover a UUID generated inside MCP.
+### Check, update, remove, and develop locally
+
+```bash
+./install.sh --check ~/projects/my-lean-proof  # read-only; nonzero = attention needed
+./install.sh --dry-run --no-link ~/projects/my-lean-proof
+./install.sh -y --no-link ~/projects/my-lean-proof  # refresh unchanged managed files
+./uninstall.sh ~/projects/my-lean-proof             # repo artifacts only
+./uninstall.sh -y --global ~/projects/my-lean-proof  # also remove machine-wide Codex wiring
+```
+
+`--check` compares actual artifact hashes, source version/commit, and selected
+global Codex prompts/configuration. It reports stale, missing, modified, unmanaged,
+or broken installations, including same-version source edits. It never builds,
+installs dependencies, or changes files. `--no-codex --check` checks local artifacts
+only. Custom MCP launchers require operator verification and are reported as
+unmanaged rather than silently certified current.
+
+Both runtime skill directories carry deterministic `install-metadata.json`
+(version, commit, layout, and ownership hashes). The gitignored
+`.claude/skills/squad/.install-local.json` also records the source checkout and
+owned configuration fragments. Global prompts and MCP configuration have their
+own machine-wide receipt, `$CODEX_HOME/.squad-install.json`. Installing a second
+repo does not make the first repo's uninstall own those shared global files.
+Tracked hashes allow adapter updates on another machine without claiming ownership
+of that machine's existing MCP configuration.
+
+Installation validates every destination and configuration before writing. It
+refuses symlink destinations, malformed JSON/TOML, malformed markers, and conflicting
+files. Updates replace only unchanged owned files; removal preserves user-added
+files, user edits, custom configuration, and hook scripts still referenced by
+surviving hooks. Per-file writes are atomic, and write failures restore previously
+written file contents. This is not a filesystem lock: do not edit installation
+files concurrently with an update. Room data, ignore entries, and machine-wide
+CLI links remain after uninstall.
+
+Conflicts produce a nonzero exit and identify the exact file or field. Back up
+customized artifacts and move conflicting generated files aside before rerunning.
+For a configuration field intentionally taken over by the user, back up the local
+receipt and remove that field's entry from its `fragments` ownership record;
+custom launchers must relinquish both `command` and `args`. The installer then
+preserves it as external configuration. Do not delete receipts indiscriminately:
+they are the evidence used for safe removal. Legacy installations lacking hashes
+can adopt exact matching artifacts; unknown old prompts or modified blocks are
+preserved for review. Existing unmanaged Codex config is never rewritten; update
+its source path manually if moving the checkout.
+
+Development uses the same checkout-backed installation: edit the canonical
+`skills/squad/` sources, regenerate aliases with
+`node scripts/generate-workflow-adapters.mjs`, build with `pnpm build`, then rerun
+installation into a scratch consumer repo. The runtime remains at this source
+checkout's `dist/index.js`; adapters are copies refreshed by the installer, with
+no destination symlinks. Keep that checkout and its dependencies available.
+Before installing from a clean checkout run
+`CI=true pnpm install --frozen-lockfile && pnpm build`; missing dependencies or a
+broken runtime fail clearly before any target configuration is written.
+
+If CLI linking is declined or unavailable, use
+`node /absolute/path/to/squad/dist/index.js <command>` instead of `squad`.
 
 ### Re-entry (opt-in)
+
+The hook requires an explicit unique `SQUAD_CLAUDE_PERSONA`, matching its MCP
+configuration; its separate process cannot discover an automatically generated
+session identity. Existing managed hooks remain installed on ordinary refresh.
 
 A Claude Code session's own conversation loop (`/squad:join`) is turn-based: it
 goes idle and stops after ~10 empty checks, and nothing brings it back without
@@ -378,7 +435,7 @@ Two things worth calling out: the `SUPPORTED` gate only checks that a qualifying
 - **Read cursors are per-session, not per-persona (#41).** One persona can hold multiple live sessions at once — an MCP connection and a one-shot CLI invocation, or two concurrent MCP clients — and each session (identified by the `session_id` `squad_join`/`squad_check` return) tracks its own unread cursor. Two sessions of the same persona never consume or fast-forward each other's unread state: session A's `squad_check` result is unaffected by session B calling `squad_join`/`squad_check` in between. A brand-new session's first cursor read is seeded once from the persona's most-advanced other session (live or recently-ended), falling back to the persona's durable high-water mark — see the next bullet — and only to the room's start (everything unread) if this is the persona's very first session ever. So the common case of one persona with one session at a time keeps today's steady-state UX, while a second concurrent session gets its own independent unread stream from that point forward. Messages sent by your own persona are still never returned as unread, regardless of which of your sessions sent them.
 - **Session cursors are swept, the persona's high-water mark is not (#41).** `session_cursors` rows are per-connection state and are pruned with their session row after `SESSION_RETENTION_HOURS` (24h), so a machine that has opened thousands of sessions doesn't keep a row for each forever. Cursor *durability* doesn't ride on that retention, though: every cursor advance also bumps a monotonic per-persona high-water mark in the long-lived `cursors` table, which is never pruned. A persona that goes quiet for days and comes back — every one of its sessions long swept — seeds its new session from that mark and sees only what actually arrived while it was away, rather than replaying the entire room history as unread.
 - **Review-request expiry is lazy, like presence staleness.** A request past its `expires_ts` stops counting toward the target's `pending_reviews` the moment anyone reads them — nothing is mutated, no status transition is recorded, and no scheduler exists (or is needed) to drive one. The stored state stays exactly what a persona put there: expiry is a *derived* view of a timestamp, so it can never drift from it. It also means an expired request can still be resolved or cancelled to close the record out honestly; only *claiming* one is refused, since a late ack would re-gate a requester who has already been released. Requester-or-target for cancel, target-only for claim, claimant-only for resolve: the two personas with a stake can always end the ask, and nobody else can end it for them.
-- **`dist/` is a gitignored build artifact, not bundled, and `node_modules` is required at runtime.** Only `mcp.ts` (two dependencies: `@modelcontextprotocol/sdk`, `zod`) needs `node_modules` — `db.ts`/`core.ts`/`cli.ts` use nothing but Node built-ins (`node:sqlite` needs no native build). `index.ts` exploits that split by importing `mcp.js` lazily, only when actually starting the MCP server, so a missing/broken `node_modules` (e.g. wiped by a host reboot, as happened once — every agent reaches the room through this one `node dist/index.js` entry point, so that single missing directory silently took squad down for all of them at once) degrades the CLI instead of crashing it outright: `squad doctor`, `squad --help`, and every other CLI command still run and report the problem plainly, and a failed MCP startup leaves a system message in the room itself so any teammate already there sees *why* this persona never showed up with tools. Bundling `mcp.js`'s two dependencies into a single self-contained `dist/index.js` (esbuild/rollup) would remove the `node_modules` runtime dependency entirely and was considered, but wasn't worth the added build-tooling surface given the mitigations above (plus `install.sh` verifying the dependencies actually resolve before writing any config, not just that `dist/` exists) close the same gap more simply. Revisit if this class of failure recurs.
+- **`dist/` is a gitignored build artifact, not bundled, and `node_modules` is required at runtime.** For the running server, only `mcp.ts` (two dependencies: `@modelcontextprotocol/sdk`, `zod`) needs `node_modules` (the installer separately uses `smol-toml` for configuration validation) — `db.ts`/`core.ts`/`cli.ts` use nothing but Node built-ins (`node:sqlite` needs no native build). `index.ts` exploits that split by importing `mcp.js` lazily, only when actually starting the MCP server, so a missing/broken `node_modules` (e.g. wiped by a host reboot, as happened once — every agent reaches the room through this one `node dist/index.js` entry point, so that single missing directory silently took squad down for all of them at once) degrades the CLI instead of crashing it outright: `squad doctor`, `squad --help`, and every other CLI command still run and report the problem plainly, and a failed MCP startup leaves a system message in the room itself so any teammate already there sees *why* this persona never showed up with tools. Bundling `mcp.js`'s two dependencies into a single self-contained `dist/index.js` (esbuild/rollup) would remove the `node_modules` runtime dependency entirely and was considered, but wasn't worth the added build-tooling surface given the mitigations above (plus `install.sh` verifying the dependencies actually resolve before writing any config, not just that `dist/` exists) close the same gap more simply. Revisit if this class of failure recurs.
 
 ## Development
 
@@ -388,9 +445,11 @@ pnpm test    # builds + runs the node:test suite
 
 ### VERSION bumps for consumer-visible changes
 
-`install.sh` copies `commands/squad/*.md`, `skills/squad/SKILL.md`, and (with
+`install.sh` copies `commands/squad/*.md`, `skills/squad/SKILL.md`, its workflow
+references, and (with
 `--reentry`) `hooks/squad-reentry.sh` into every consumer repo, and
-`codex/prompts/squad-*.md` globally into `~/.codex/prompts/`; every installed
+`codex/prompts/squad-*.md` globally into `$CODEX_HOME/prompts/` (default
+`~/.codex/prompts/`); every installed
 `.mcp.json` also runs the compiled MCP server straight out of this repo's
 `src/` (via `dist/`), so a server-behavior change reaches consumers as soon as
 this repo updates. `install-metadata.json` records `VERSION` at install time,
@@ -399,8 +458,9 @@ detect drift — so a `VERSION` that never moves makes every consumer look
 falsely "current."
 
 **If your PR touches the installed surface** (`commands/squad/`,
-`skills/squad/SKILL.md`, `codex/prompts/`, `hooks/squad-reentry.sh`,
-`install.sh`, `uninstall.sh`, or `src/`) — bump `VERSION` (keep
+`skills/squad/`, `codex/prompts/`, `hooks/squad-reentry.sh`,
+`install.sh`, `uninstall.sh`, `scripts/install-lifecycle.mjs`,
+`scripts/generate-workflow-adapters.mjs`, or `src/`) — bump `VERSION` (keep
 `package.json`'s `"version"` and the `McpServer` version string in
 `src/mcp.ts` in sync; `pnpm test` enforces this) via `/loom:bump`, or, if the
 change genuinely does not alter installed behavior (a comment, a typo fix, a
