@@ -329,6 +329,19 @@ test(
         JSON.parse(cli(["node", "show", String(node.id)])),
         await call(clients[1], "squad_node_get", { id: node.id }),
       );
+      const outline = await call(clients[0], "squad_outline_render", {});
+      assert.deepEqual(JSON.parse(cli(["outline", "render"])), outline);
+      assert.deepEqual(await call(clients[1], "squad_outline_render", {}), outline);
+      assert.deepEqual(
+        JSON.parse(cli(["outline", "status"])),
+        await call(clients[1], "squad_outline_status", {}),
+      );
+      assert.ok(outline.content.includes(banking.id));
+      const invalidOutline = await clients[0].callTool({
+        name: "squad_outline_publish",
+        arguments: { request_key: "invalid", expected_target_blobs: {} },
+      });
+      assert.equal(invalidOutline.isError, true);
       await call(clients[0], "squad_release", {path:`node:${node.id}`});
       cli(["release",`node:${node.id}`]);
       const summary = await call(clients[1], "squad_check");

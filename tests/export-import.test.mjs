@@ -95,6 +95,28 @@ test("round-trip export -> import preserves row counts and content across every 
       failedReview.id,
       JSON.stringify({ exit_code: 1, clean: false, output: "storage fixture" }),
     );
+  // Storage fixture for an unverified archived outline. Real Git publication,
+  // restart recovery and export/import are covered in outline.test.mjs.
+  const outline = src.squad.outlineRender();
+  const outlineAttempt = ledger.submit({
+    request_key: "outline:export-storage",
+    config_revision: 1,
+    commits: ["b".repeat(40)],
+    selection: { paths: ["SQUAD_OUTLINE.md"] },
+  });
+  src.db
+    .prepare("INSERT INTO outline_publications VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(
+      "export-storage",
+      "SQUAD_OUTLINE.md",
+      outline.version,
+      outline.content,
+      1,
+      "a".repeat(40),
+      null,
+      "b".repeat(40),
+      outlineAttempt.id,
+    );
   src.squad.integrationUnset(1);
   const beforeAttempts = src.squad.integrationAttempts();
   const beforeIntegration = src.squad.integrationGet();

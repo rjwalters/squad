@@ -106,6 +106,8 @@ Human CLI usage:
                                Close out a request you claimed
   squad review cancel <id> [reason...]
                                Withdraw (requester) or decline (target)
+  squad outline render | status [path]  Deterministic shared outline / freshness
+  squad outline publish <request-key> [path] [--build-timeout-ms N]
   squad node create <question...> | --json '<card fields, dependencies, artifacts>'
   squad node list | show <id>  Discover the shared research graph and provenance
   squad node update <id> <expected-revision> '<metadata JSON>'
@@ -315,6 +317,54 @@ export async function runCli(argv: string[]): Promise<void> {
   const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
+    case "outline": {
+      const [action, ...args] = rest;
+      if (action === "render" && !args.length)
+        console.log(JSON.stringify(squad.outlineRender(), null, 2));
+      else if (
+        action === "status" &&
+        args.length <= 1 &&
+        !args[0]?.startsWith("--")
+      )
+        console.log(JSON.stringify(squad.outlineStatus(args[0]), null, 2));
+      else if (action === "publish" && args.length) {
+        const request_key = args.shift()!;
+        const path =
+          args[0] && !args[0].startsWith("--") ? args.shift() : undefined;
+        if (
+          request_key.startsWith("--") ||
+          (args.length &&
+            (args.length !== 2 ||
+              args[0] !== "--build-timeout-ms" ||
+              !/^[0-9]+$/.test(args[1]!)))
+        )
+          throw new Error(
+            "usage: squad outline publish <request-key> [path] [--build-timeout-ms N]",
+          );
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        process.once("SIGINT", abort);
+        process.once("SIGTERM", abort);
+        try {
+          const result = await squad.outlinePublish({
+            request_key,
+            path,
+            build_timeout_ms:
+              args[1] === undefined ? undefined : Number(args[1]),
+            signal: controller.signal,
+          });
+          console.log(JSON.stringify(result, null, 2));
+          if (result.attempt.status !== "verified") process.exitCode = 1;
+        } finally {
+          process.removeListener("SIGINT", abort);
+          process.removeListener("SIGTERM", abort);
+        }
+      } else
+        throw new Error(
+          "usage: squad outline render|status [path]|publish <request-key> [path] [--build-timeout-ms N]",
+        );
+      break;
+    }
     case "node": {
       const [action = "list", ...args] = rest;
       const integer = (raw: string | undefined) => {
@@ -909,6 +959,7 @@ export function knownCommand(cmd: string | undefined): boolean {
   return (
     cmd !== undefined &&
     [
+      "outline",
       "node",
       "bank",
       "integration",

@@ -504,3 +504,33 @@ Science Cards now share their IDs with [research nodes](docs/nodes.md): discover
 them in `squad_join` or `squad node list`, connect dependencies and declared
 committed artifacts, and inspect revision-bound bank provenance. Old cards and
 evidence remain usable; exploratory work stays visible alongside banked results.
+
+
+### Authoritative generated outline
+
+Use `squad_outline_render` / `squad outline render` for a deterministic JSON snapshot
+with Markdown `content` and a SHA-256 `version`. `squad_outline_status` / `squad
+outline status [path]` compares current research state with the latest verified
+publication. These are pure room reads; freshness does not observe remote Git.
+The snapshot includes exploratory, falsified and abandoned outcomes, current and
+historical node revisions, exact verified bank commit/tree citations and separate
+independent review receipts. Declared source artifacts and pending attempts are
+visibly unbanked. Presence, chat, reader identity and outline publication bookkeeping
+do not change the snapshot version.
+
+Use `squad_outline_publish` with `request_key` and optional `path`, or `squad outline
+publish <request-key> [path] [--build-timeout-ms N]`. The default path is
+`SQUAD_OUTLINE.md`. An existing integration branch is required. Generation occurs
+in an isolated repository, then the ordinary bank pipeline integrates, builds the
+entire candidate and publishes it without force. The research checkout is untouched.
+An existing file must exactly match a prior verified generated publication for
+this target/path; separately edited prose is rejected, even with a generated header.
+Use a different explicit path to retain such prose. Concurrent target edits are
+checked again during reconciliation.
+
+Reuse a request key to retry its archived snapshot and exact generated source
+commit after failure or interruption; use a new key for updated research state.
+A node edit during the build leaves an honest historical publication with
+`fresh: false`. Query its `attempt` for build/publication evidence and diagnostics.
+Publication records survive room export/import and are removed by room reset;
+reset does not delete remote files or preserve their ownership records.

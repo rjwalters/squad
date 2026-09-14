@@ -33,7 +33,7 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.11.0" });
+  const server = new McpServer({ name: "squad", version: "0.12.0" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
@@ -103,6 +103,39 @@ export async function runMcpServer(): Promise<void> {
       )
       .optional(),
   };
+  server.registerTool(
+    "squad_outline_render",
+    {
+      description:
+        "Render a deterministic versioned research outline from one shared read snapshot, including pending work, negative outcomes, exact bank citations and separate independent reviews. No room mutation.",
+      inputSchema: z.object({}).strict(),
+    },
+    async () => json(squad.outlineRender()),
+  );
+  server.registerTool(
+    "squad_outline_status",
+    {
+      description:
+        "Read durable generated outline publications and whether the latest verified snapshot matches current research state. Does not observe remote Git freshness or mutate the room.",
+      inputSchema: z.object({ path: z.string().optional() }).strict(),
+    },
+    async ({ path }) => json(squad.outlineStatus(path)),
+  );
+  server.registerTool(
+    "squad_outline_publish",
+    {
+      description:
+        "Generate an owned outline file in an isolated repository, integrate and build the complete candidate, and publish through the verified bank pipeline. Exact request-key retry resumes the archived snapshot; use a new key for a new snapshot. Refuses replacement of unrelated or independently edited prose.",
+      inputSchema: z
+        .object({
+          request_key: z.string(),
+          path: z.string().optional(),
+          build_timeout_ms: z.number().int().min(1000).max(86400000).optional(),
+        })
+        .strict(),
+    },
+    async (options) => json(await squad.outlinePublish(options)),
+  );
   server.registerTool(
     "squad_node_create",
     {
