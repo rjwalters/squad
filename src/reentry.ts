@@ -1,33 +1,7 @@
-/**
- * Pure decision logic for the opt-in runtime re-entry adapter (installed by
- * `install.sh --reentry`, driven by `reentry-hook.ts` from a Claude Code
- * `Stop` hook). Everything here is a pure function of its inputs (no fs, no
- * clock reads, no randomness unless injected) so it is unit-testable without
- * simulating the actual hook invocation protocol — see
- * `tests/reentry-hook.test.mjs`.
- *
- * Design (documented here since there is no prior precedent for
- * backoff/jitter in this codebase):
- *
- * - **Backoff**: exponential (`baseMs * multiplier^attempt`, capped at
- *   `capMs`) with a symmetric jitter fraction applied on top
- *   (`interval * (1 ± jitterFraction)`), a standard "full exponential +
- *   proportional jitter" shape. Defaults: 30s base, x2 multiplier, 30min cap,
- *   ±20% jitter.
- * - **Chained, capped sleeps**: a single backoff "window" can be much longer
- *   than any one hook invocation should synchronously block for, so a window
- *   is walked across possibly-many `Stop` hook invocations, each sleeping at
- *   most `sleepCapMs` (default 45s) before re-checking the operator-stop and
- *   TTL escape hatches. This bounds how long a runaway condition can go
- *   unnoticed to `sleepCapMs`, not the full backoff interval.
- * - **Directed work resets the window immediately** (`attempt` back to 0,
- *   the window cleared, zero additional sleep) — a peer's mention should not
- *   wait out a possibly-30-minute backoff.
- * - **TTL and operator-stop are checked first, every invocation, and both
- *   override directed work** — a session must never be held open by chatter
- *   alone once its budget is spent or the operator asked it to stop.
+/** Shared pure wake policy. Runtime adapters supply observations, time and randomness.
+ * Normal windows target five minutes with claims and 30–45 minutes idle.
+ * Failure backoff, operator stop, TTL and lifetime re-entry limits take precedence.
  */
-
 /** Exponential-backoff-with-jitter parameters. See module doc for the shape. */
 export interface BackoffParams {
   baseMs: number;
@@ -50,15 +24,8 @@ export const DEFAULT_SLEEP_CAP_MS = 45_000;
 /** `SQUAD_REENTRY_TTL_MINUTES` default — see README.md "Re-entry (opt-in)". */
 export const DEFAULT_REENTRY_TTL_MINUTES = 240;
 
-/**
- * `SQUAD_REENTRY_MAX_ATTEMPTS` default — a hard ceiling on *fired* re-entries
- * within one arm cycle, independent of the wall-clock TTL. The Claude Code
- * `Stop` hook leaves this unset (TTL alone bounds it, because every hook
- * invocation is driven by a session that is already running); the Codex
- * supervisor (`codex-reentry.ts`) sets it, because there each re-entry is a
- * *process spawn* — a codex binary that fails instantly would otherwise spin
- * through the whole TTL at the backoff floor. 48 at the ×2/30-minute-cap
- * default schedule is roughly a day of quiet-room re-entry.
+/** Default lifetime policy-fire cap per arm cycle, shared by both adapters.
+ * Claude's intermediate waiting blocks are not policy fires; TTL also bounds them.
  */
 export const DEFAULT_REENTRY_MAX_ATTEMPTS = 48;
 
@@ -99,10 +66,27 @@ export function ttlExceeded(firstArmedAt: string, ttlMinutes: number, nowMs: num
   return nowMs - armed >= ttlMinutes * 60_000;
 }
 
+export interface WakeParams {
+  claimMs: number;
+  idleMinMs: number;
+  idleMaxMs: number;
+}
+export const DEFAULT_WAKE: WakeParams = {
+  claimMs: 5 * 60_000, idleMinMs: 30 * 60_000, idleMaxMs: 45 * 60_000,
+};
+export function wakeIntervalMs(held: boolean, params = DEFAULT_WAKE, rand = Math.random): number {
+  return held ? params.claimMs : Math.round(params.idleMinMs + rand() * (params.idleMaxMs - params.idleMinMs));
+}
+
 /** Persisted per-persona-per-room state. Survives across hook invocations (a fresh process each time). */
 export interface ReentryState {
-  /** Number of backoff windows *fired* (real re-entries) since the last directed-work reset. */
+  /** Consecutive failure retry windows fired; reset by a successful wake. */
   attempt: number;
+  /** Monotonic fired re-entries; legacy state migrates from attempt (a lower bound). */
+  totalFired?: number;
+  stopAnnounced?: boolean;
+  stoppedReason?: string;
+  windowKind?: "claim" | "idle" | "failure";
   /** ISO timestamp: when this arm cycle's TTL clock started. Never changes once set. */
   firstArmedAt: string;
   /** ISO timestamp the current backoff window ends, or null if no window is in progress. */
@@ -112,7 +96,7 @@ export interface ReentryState {
 }
 
 export function initialState(nowIso: string): ReentryState {
-  return { attempt: 0, firstArmedAt: nowIso, nextFireAt: null, lastFiredAt: null };
+  return { totalFired: 0, attempt: 0, firstArmedAt: nowIso, nextFireAt: null, lastFiredAt: null };
 }
 
 export interface DecideInput {
@@ -120,14 +104,14 @@ export interface DecideInput {
   nowMs: number;
   /** True when an unread message directed at this persona (e.g. an @mention) is pending. */
   hasDirectedWork: boolean;
+  hasHeldClaims?: boolean;
+  /** A failed prior run must finish its delay even if directed work is pending. */
+  failureBackoff?: boolean;
+  wake?: WakeParams;
   /** True when the operator's escape hatch (env var or marker file) is set. */
   operatorStopped: boolean;
   ttlMinutes: number;
-  /**
-   * Optional hard cap on `state.attempt` (fired re-entries in this arm
-   * cycle). Omitted, `undefined`, or `<= 0` means "no cap" — the TTL is then
-   * the only bound, which is the Claude Code `Stop` hook's shipped behavior.
-   */
+  /** Hard cap on totalFired in this arm cycle; <= 0 disables it. */
   maxAttempts?: number;
   backoff?: BackoffParams;
   rand?: () => number;
@@ -149,19 +133,25 @@ export interface DecideResult {
  * same-turn loop guard — see `reentry-hook.ts`).
  *
  * Precedence, each checked before the next: operator-stop, then TTL, then
- * the attempt cap, then directed work, then the ordinary quiet/backoff path.
+ * the attempt cap, then failure delay, then directed work, then claims/idle.
  * Operator-stop, TTL, and the attempt cap all unconditionally allow the
  * stop — neither directed work nor an in-progress backoff window can
  * override them.
  */
 export function decide(input: DecideInput): DecideResult {
   const { state, nowMs, hasDirectedWork, operatorStopped, ttlMinutes } = input;
+  const totalFired = state.totalFired ?? state.attempt;
   const backoff = input.backoff ?? DEFAULT_BACKOFF;
   const rand = input.rand ?? Math.random;
-  const sleepCapMs = input.sleepCapMs ?? DEFAULT_SLEEP_CAP_MS;
+  const sleepCapMs = Math.max(0, Math.min(input.sleepCapMs ?? DEFAULT_SLEEP_CAP_MS,
+    Date.parse(state.firstArmedAt) + ttlMinutes * 60_000 - nowMs));
 
   if (operatorStopped) {
     return { block: false, sleepMs: 0, reason: "operator stop requested", nextState: state };
+  }
+
+  if (state.stoppedReason) {
+    return { block: false, sleepMs: 0, reason: state.stoppedReason, nextState: state };
   }
 
   if (ttlExceeded(state.firstArmedAt, ttlMinutes, nowMs)) {
@@ -174,39 +164,53 @@ export function decide(input: DecideInput): DecideResult {
   }
 
   const maxAttempts = input.maxAttempts ?? 0;
-  if (maxAttempts > 0 && state.attempt >= maxAttempts) {
+  if (maxAttempts > 0 && totalFired >= maxAttempts) {
     return {
       block: false,
       sleepMs: 0,
-      reason: `attempt cap of ${maxAttempts} reached (${state.attempt} re-entries since ${state.firstArmedAt})`,
+      reason: `attempt cap of ${maxAttempts} reached (${totalFired} re-entries since ${state.firstArmedAt})`,
       nextState: state,
     };
   }
 
-  if (hasDirectedWork) {
+  if (hasDirectedWork && !input.failureBackoff) {
     const nextState: ReentryState = {
       ...state,
       attempt: 0,
+      totalFired: totalFired + 1,
       nextFireAt: null,
       lastFiredAt: new Date(nowMs).toISOString(),
     };
     return {
       block: true,
       sleepMs: 0,
-      reason: "directed work pending — re-entering immediately, backoff reset",
+      reason: "directed work pending — re-entering immediately, idle window reset",
       nextState,
     };
   }
 
-  // Quiet: no window in progress yet — start one.
-  if (!state.nextFireAt) {
-    const interval = backoffIntervalMs(state.attempt, backoff, rand);
-    const nextFireAt = new Date(nowMs + interval).toISOString();
+  const kind = input.failureBackoff ? "failure" : input.hasHeldClaims ? "claim" : "idle";
+  // Reclassify on claim acquisition/release. Never resample jitter on a polling slice.
+  if (!state.nextFireAt || (state.windowKind && state.windowKind !== kind)) {
+    const interval = input.failureBackoff
+      ? backoffIntervalMs(state.attempt, backoff, rand)
+      : wakeIntervalMs(Boolean(input.hasHeldClaims), input.wake, rand);
+    // Claim acquisition may shorten idle waiting, but must not postpone a
+    // heartbeat already due sooner. Failure transitions always get their delay.
+    const deadline = kind === "claim" && state.windowKind === "idle" && state.nextFireAt
+      ? Math.min(Date.parse(state.nextFireAt), nowMs + interval) : nowMs + interval;
+    if (deadline <= nowMs) {
+      return { block: true, sleepMs: 0, reason: `${kind} wake due — re-entering`,
+        nextState: { ...state, totalFired: totalFired + 1,
+          attempt: input.failureBackoff ? state.attempt + 1 : 0,
+          nextFireAt: null, windowKind: kind, lastFiredAt: new Date(nowMs).toISOString() } };
+    }
+    const nextFireAt = new Date(deadline).toISOString();
     return {
       block: true,
-      sleepMs: Math.min(interval, sleepCapMs),
-      reason: `quiet — starting backoff window of ${interval}ms (attempt ${state.attempt + 1})`,
-      nextState: { ...state, nextFireAt },
+      sleepMs: Math.max(0, Math.min(deadline - nowMs, sleepCapMs)),
+      reason: `${kind} — starting wake window of ${interval}ms (attempt ${state.attempt + 1})`,
+      nextState: { ...state, nextFireAt, windowKind: kind },
     };
   }
 
@@ -216,21 +220,22 @@ export function decide(input: DecideInput): DecideResult {
   if (remaining <= 0) {
     const nextState: ReentryState = {
       ...state,
-      attempt: state.attempt + 1,
+      attempt: input.failureBackoff ? state.attempt + 1 : 0,
+      totalFired: totalFired + 1,
       nextFireAt: null,
       lastFiredAt: new Date(nowMs).toISOString(),
     };
     return {
       block: true,
       sleepMs: 0,
-      reason: `backoff window elapsed — re-entering (attempt ${nextState.attempt})`,
+      reason: `wake window elapsed — re-entering (attempt ${nextState.attempt})`,
       nextState,
     };
   }
   return {
     block: true,
     sleepMs: Math.min(remaining, sleepCapMs),
-    reason: `quiet — waiting out backoff window, ${remaining}ms remaining (attempt ${state.attempt + 1})`,
+    reason: `${kind} — waiting out wake window, ${remaining}ms remaining (attempt ${state.attempt + 1})`,
     nextState: state,
   };
 }

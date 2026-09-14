@@ -58,7 +58,7 @@
  * rather than a turn of an already-running session, two extra guards keep a
  * broken `codex` binary from spinning:
  *
- * - `maxAttempts` (`SQUAD_REENTRY_MAX_ATTEMPTS`, default 48) — a hard
+ * - `maxAttempts` (`SQUAD_REENTRY_MAX_ATTEMPTS`, default 48) — a shared hard
  *   ceiling on fired re-entries in one arm cycle, independent of wall-clock.
  * - `minRunIntervalMs` — a floor on the gap between two runs, and
  *   directed-work's immediate-reset is honored only when the *previous* run
@@ -66,12 +66,7 @@
  *   therefore never be relaunched faster than the backoff schedule, even
  *   with an unread `@mention` sitting in the room.
  *
- * Note that a *persistently* unread `@mention` (one no re-entered session
- * ever consumes) keeps resetting the backoff, so `maxAttempts` never
- * advances and the TTL becomes the only remaining bound — bounded, but by
- * hours rather than by the cap. That is the same trade the Claude Code side
- * makes: directed work is supposed to win, and the floor above keeps the
- * worst case at one relaunch per `minRunIntervalMs` rather than a hot loop.
+ * Directed re-entries increment totalFired, so unread work cannot evade the cap.
  */
 import {
   DEFAULT_SLEEP_CAP_MS,
@@ -79,7 +74,9 @@ import {
   ttlExceeded,
   type BackoffParams,
   type ReentryState,
+  type WakeParams,
 } from "./reentry.js";
+import { announceStopOnce } from "./reentry-state.js";
 
 /**
  * How a single `codex` run ended, as read back from its rollout log — the
@@ -192,11 +189,12 @@ export function preLaunchStop(opts: {
   operatorStopped: boolean;
 }): string | null {
   if (opts.operatorStopped) return "operator stop requested";
+  if (opts.state.stoppedReason) return opts.state.stoppedReason;
   if (ttlExceeded(opts.state.firstArmedAt, opts.ttlMinutes, opts.nowMs)) {
     return `TTL of ${opts.ttlMinutes}m exceeded since ${opts.state.firstArmedAt}`;
   }
-  if (opts.maxAttempts > 0 && opts.state.attempt >= opts.maxAttempts) {
-    return `attempt cap of ${opts.maxAttempts} reached (${opts.state.attempt} re-entries since ${opts.state.firstArmedAt})`;
+  if (opts.maxAttempts > 0 && (opts.state.totalFired ?? opts.state.attempt) >= opts.maxAttempts) {
+    return `attempt cap of ${opts.maxAttempts} reached (${opts.state.totalFired ?? opts.state.attempt} re-entries since ${opts.state.firstArmedAt})`;
   }
   return null;
 }
@@ -228,6 +226,7 @@ export interface SuperviseConfig {
   /** Extra args passed through to `codex exec` (everything after `--` on the CLI). */
   extraArgs: readonly string[];
   backoff?: BackoffParams;
+  wake?: WakeParams;
   /** Per-slice sleep cap: how often the escape hatches are re-checked while waiting. */
   sleepCapMs?: number;
   minRunIntervalMs?: number;
@@ -247,6 +246,8 @@ export interface SuperviseDeps {
   /** Re-read on every check — an operator must be able to quiet a live supervisor. */
   operatorStopped(): boolean;
   hasDirectedWork(): Promise<boolean>;
+  hasHeldClaims?(): Promise<boolean>;
+  rand?(): number;
   /** Post to the room (system message). Best-effort; must not throw. */
   announce(body: string): void;
   /** Operator-facing progress line on the supervisor's own terminal. */
@@ -265,8 +266,8 @@ export interface SuperviseSummary {
 export function startAnnouncement(cfg: SuperviseConfig): string {
   return (
     `${cfg.persona} is running under the squad codex re-entry supervisor: if its turn ends while ` +
-    `the room is quiet it will re-enter itself (backoff, resets on an @mention). Bounded by a ` +
-    `${cfg.ttlMinutes}m TTL and ${cfg.maxAttempts} re-entries — it will post here when it stops ` +
+    `the room is quiet it will re-enter itself (5m with claims, 30–45m idle; mentions/reviews take priority). Bounded by a ` +
+    `${cfg.ttlMinutes}m TTL and ${cfg.maxAttempts} re-entries — it will attempt to post here when it stops ` +
     `for good, so a silent gap means a crash, not a park.`
   );
 }
@@ -280,7 +281,8 @@ export function parkAnnouncement(opts: {
   return (
     `${opts.persona}'s codex re-entry supervisor is stopping after ${opts.runs} run(s) / ` +
     `${opts.attempts} re-entry(ies): ${opts.reason}. ${opts.persona} will NOT return without an ` +
-    `operator restarting it (\`squad codex-reentry\`). Do not wait on it.`
+    `operator re-arming it: stop the controller, remove its .squad/reentry/<persona>.json ` +
+    `and stop markers, then restart (\`squad codex-reentry\`). Do not wait on it.`
   );
 }
 
@@ -330,6 +332,9 @@ async function waitForReentry(
   const startedWaitingAt = deps.now();
 
   for (;;) {
+    const stop = preLaunchStop({ state, nowMs: deps.now(), ttlMinutes: cfg.ttlMinutes,
+      maxAttempts: cfg.maxAttempts, operatorStopped: deps.operatorStopped() });
+    if (stop) return { reenter: false, reason: stop, state };
     // Inter-run floor, enforced *before* consulting `decide()` so it acts as
     // a lead-in delay rather than a post-decision re-loop (which would spend
     // an extra backoff window and double-count the attempt). Without it a
@@ -349,10 +354,16 @@ async function waitForReentry(
       }
     }
 
+    let held = false;
+    try { held = await deps.hasHeldClaims?.() ?? false; } catch { /* unreachable room */ }
     const result = decide({
       state,
       nowMs: deps.now(),
       hasDirectedWork: directed,
+      hasHeldClaims: held,
+      failureBackoff: !honorDirectedWork,
+      wake: cfg.wake,
+      rand: deps.rand,
       operatorStopped: deps.operatorStopped(),
       ttlMinutes: cfg.ttlMinutes,
       maxAttempts: cfg.maxAttempts,
@@ -396,7 +407,10 @@ export async function supervise(
   });
   if (blocked) {
     deps.log(`not launching: ${blocked}`);
-    return { runs: 0, attempts: state.attempt, stopReason: blocked, outcomes };
+    state = announceStopOnce(state, deps.saveState, deps.announce,
+      parkAnnouncement({ persona: cfg.persona, reason: blocked, runs: 0,
+        attempts: state.totalFired ?? state.attempt }), blocked);
+    return { runs: 0, attempts: state.totalFired ?? state.attempt, stopReason: blocked, outcomes };
   }
 
   deps.announce(startAnnouncement(cfg));
@@ -424,15 +438,15 @@ export async function supervise(
     state = waited.state;
     if (!waited.reenter) {
       deps.log(`stopping: ${waited.reason}`);
-      deps.announce(
+      state = announceStopOnce(state, deps.saveState, deps.announce,
         parkAnnouncement({
           persona: cfg.persona,
           reason: waited.reason,
           runs,
-          attempts: state.attempt,
-        }),
+          attempts: state.totalFired ?? state.attempt,
+        }), waited.reason,
       );
-      return { runs, attempts: state.attempt, stopReason: waited.reason, outcomes };
+      return { runs, attempts: state.totalFired ?? state.attempt, stopReason: waited.reason, outcomes };
     }
   }
 }

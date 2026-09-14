@@ -117,7 +117,7 @@ test("preLaunchStop: operator-stop, then TTL, then the attempt cap, then null", 
   assert.match(
     preLaunchStop({
       ...base,
-      state: { ...base.state, attempt: 5 },
+      state: { ...base.state, totalFired: 5 },
       operatorStopped: false,
     }),
     /attempt cap of 5/,
@@ -142,7 +142,7 @@ test("preLaunchStop: maxAttempts <= 0 means no cap", () => {
 // --- shared decision core: the attempt cap ----------------------------------
 
 test("decide: the attempt cap allows the stop and overrides directed work", () => {
-  const state = { ...initialState("2026-01-01T00:00:00.000Z"), attempt: 3 };
+  const state = { ...initialState("2026-01-01T00:00:00.000Z"), totalFired: 3 };
   const result = decide({
     state,
     nowMs: Date.parse("2026-01-01T00:01:00.000Z"),
@@ -156,7 +156,7 @@ test("decide: the attempt cap allows the stop and overrides directed work", () =
   assert.equal(result.nextState, state);
 });
 
-test("decide: an unset/zero maxAttempts leaves the Claude Stop hook uncapped", () => {
+test("decide: an unset/zero policy maxAttempts disables the count cap", () => {
   const state = { ...initialState("2026-01-01T00:00:00.000Z"), attempt: 500 };
   for (const maxAttempts of [undefined, 0]) {
     const result = decide({
@@ -250,6 +250,7 @@ const baseCfg = {
   reentryPrompt: "keep going",
   extraArgs: [],
   backoff: FAST_BACKOFF,
+  wake: { claimMs: 100, idleMinMs: 100, idleMaxMs: 100 },
   sleepCapMs: 500,
   minRunIntervalMs: 0,
 };
@@ -294,7 +295,8 @@ test("supervise: operator-stop before the first launch never spawns codex at all
   const summary = await supervise(baseCfg, deps);
   assert.equal(summary.runs, 0);
   assert.equal(calls.runs.length, 0);
-  assert.deepEqual(calls.announcements, []); // no "supervisor is up" claim it can't keep
+  assert.equal(calls.announcements.length, 1);
+  assert.match(calls.announcements[0], /stopping/);
 });
 
 test("supervise: the TTL bounds re-entry even with the attempt cap far away", async () => {
@@ -322,17 +324,16 @@ test("supervise: a crashing codex is announced and never re-entered on directed 
   assert.ok(calls.sleeps.reduce((a, b) => a + b, 0) > 0);
 });
 
-test("supervise: directed work re-enters immediately without burning an attempt", async () => {
+test("supervise: directed work re-enters immediately and counts against the lifetime cap", async () => {
   let directedRemaining = 1;
   const { deps, calls } = fakeDeps({
     hasDirectedWork: async () => directedRemaining-- > 0,
   });
   const summary = await supervise({ ...baseCfg, maxAttempts: 1 }, deps);
-  // run 1 → @mention → immediate re-entry (attempt stays 0) → run 2 →
-  // quiet → one backoff window fires (attempt 1) → run 3 → cap.
-  assert.equal(summary.runs, 3);
+  // A directed wake consumes the single allowed policy fire.
+  assert.equal(summary.runs, 2);
   assert.equal(summary.attempts, 1);
-  assert.equal(calls.runs.length, 3);
+  assert.equal(calls.runs.length, 2);
   assert.match(summary.stopReason, /attempt cap of 1/);
 });
 
@@ -387,6 +388,7 @@ test("supervise re-invokes a real stub process that ends in a task_complete reco
         joinPrompt: "/squad-join",
         reentryPrompt: "keep going",
         extraArgs: [],
+        wake: { claimMs: 1, idleMinMs: 1, idleMaxMs: 1 },
         backoff: { baseMs: 1, multiplier: 1, capMs: 1, jitterFraction: 0 },
         sleepCapMs: 5,
         minRunIntervalMs: 0,
@@ -442,4 +444,21 @@ test("classifyRunFromLogs reports `missing` when there is no readable session lo
     if (previousHome === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousHome;
   }
+});
+
+
+test("supervisor honors claims, notices directed work during idle and deduplicates permanent stop", async () => {
+  let held = true;
+  const { deps, calls } = fakeDeps({ hasHeldClaims: async () => held });
+  const launchTimes = [];
+  deps.runCodex = async () => { launchTimes.push(deps.now()); held = launchTimes.length === 1; return 0; };
+  // Directed work arrives during the second (idle) window, bypassing its later due time.
+  deps.hasDirectedWork = async () => launchTimes.length > 1 && deps.now() - launchTimes[1] >= 1000;
+  const cfg = { ...baseCfg, maxAttempts: 2, wake: { claimMs: 500, idleMinMs: 10_000, idleMaxMs: 10_000 } };
+  await supervise(cfg, deps);
+  assert.deepEqual(launchTimes.map(t => t - launchTimes[0]), [0, 500, 1500]);
+  assert.equal(calls.announcements.filter(a => a.includes("is stopping")).length, 1);
+  const again = await supervise(cfg, deps);
+  assert.equal(again.runs, 0);
+  assert.equal(calls.announcements.filter(a => a.includes("is stopping")).length, 1);
 });

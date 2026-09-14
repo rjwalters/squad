@@ -23,8 +23,9 @@
  * philosophy `guard-background-subagents.sh` documents for the same reason.
  */
 import { envMinutes } from "./db.js";
-import { DEFAULT_REENTRY_TTL_MINUTES, decide, mentionsPersona } from "./reentry.js";
-import { loadState, operatorStopped, saveState } from "./reentry-state.js";
+import { DEFAULT_REENTRY_TTL_MINUTES, DEFAULT_REENTRY_MAX_ATTEMPTS, ttlExceeded, decide } from "./reentry.js";
+import { observeWakeWork } from "./reentry-room.js";
+import { announceStopOnce, loadState, operatorStopped, saveState } from "./reentry-state.js";
 
 /**
  * `stop_hook_active` is true when Claude Code's own loop guard reports this
@@ -43,23 +44,6 @@ function sameSequenceReblock(input: unknown): boolean {
     input !== null &&
     (input as Record<string, unknown>).stop_hook_active === true
   );
-}
-
-/**
- * v1 "directed work" heuristic (see issue #40's Curator enhancement): an
- * unread message that `@mentions` this persona. Reuses the room's existing
- * durable read cursor via a peeking `check()` — peeking, not consuming, so
- * the messages are still there for the persona's own `squad_check` once it
- * re-enters the `/squad:join` loop. v2 (once #39 ships a dedicated
- * pending-directed surface) can swap this detection out without touching
- * `decide()`.
- */
-async function hasDirectedWork(persona: string): Promise<boolean> {
-  const { openDb } = await import("./db.js");
-  const { Squad } = await import("./core.js");
-  const squad = new Squad(openDb(), persona);
-  const messages = squad.check({ peek: true });
-  return messages.some((m) => mentionsPersona(m.body, persona));
 }
 
 async function readStdin(): Promise<string> {
@@ -105,19 +89,29 @@ async function main(): Promise<void> {
   const state = loadState(dir, persona, nowIso);
   const nowMs = Date.now();
 
-  let directed: boolean;
+  let directed = false;
+  let held = false;
   try {
-    directed = await hasDirectedWork(persona);
+    const { openDb } = await import("./db.js");
+    const { Squad } = await import("./core.js");
+    const db = openDb();
+    try {
+      const work = observeWakeWork(new Squad(db, persona), persona);
+      directed = work.directed;
+      held = work.held;
+    } finally { db.close(); }
   } catch {
     directed = false; // room unreachable — treat as quiet rather than throwing
   }
 
   const ttlMinutes = envMinutes("SQUAD_REENTRY_TTL_MINUTES", DEFAULT_REENTRY_TTL_MINUTES);
 
-  const result = decide({
+  let result = decide({
     state,
     nowMs,
     hasDirectedWork: directed,
+    hasHeldClaims: held,
+    maxAttempts: envMinutes("SQUAD_REENTRY_MAX_ATTEMPTS", DEFAULT_REENTRY_MAX_ATTEMPTS),
     operatorStopped: operatorStopped(dir, persona),
     ttlMinutes,
   });
@@ -131,6 +125,29 @@ async function main(): Promise<void> {
 
   if (result.sleepMs > 0) {
     await new Promise((resolve) => setTimeout(resolve, result.sleepMs));
+    // A bound may have arrived while the hook slept. Never emit a stale block.
+    if (operatorStopped(dir, persona) || ttlExceeded(state.firstArmedAt, ttlMinutes, Date.now())) {
+      result = decide({ state: result.nextState, nowMs: Date.now(), hasDirectedWork: false,
+        operatorStopped: operatorStopped(dir, persona), ttlMinutes });
+    }
+  }
+
+  if (!result.block) {
+    const body = `${persona}'s Claude re-entry hook is stopping permanently for this arm cycle: ${result.reason}. ` +
+      `No automatic wake is scheduled. Stop the controller, remove .squad/reentry/${persona}.json ` +
+      `and stop markers, then restart to re-arm. Do not wait on it.`;
+    process.stderr.write(body + "\n");
+    try {
+      const { openDb } = await import("./db.js");
+      const { Squad } = await import("./core.js");
+      announceStopOnce(result.nextState, (s) => saveState(dir, persona, s),
+        (message) => {
+          // The permanent-stop latch must survive even when opening the room fails.
+          const db = openDb();
+          try { new Squad(db, persona).send(message, "system"); }
+          finally { db.close(); }
+        }, body, result.reason);
+    } catch { /* terminal stop reason above remains available */ }
   }
 
   if (result.block) {

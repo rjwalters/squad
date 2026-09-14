@@ -225,34 +225,44 @@ must be passed explicitly) installs a Claude Code `Stop` hook
 re-arms the session itself, bounded so it can never hold a session open
 forever on unread chatter alone:
 
-- **Exponential backoff + jitter while the room is quiet**: 30s base, ×2
-  multiplier, 30 minute cap, ±20% jitter (`src/reentry.ts`'s `DEFAULT_BACKOFF`
-  — the formula and constants are documented in that file's module doc since
-  there's no other precedent for this shape in the codebase). A single
-  backoff window is walked across possibly-many hook invocations, each
-  sleeping at most 45s (`DEFAULT_SLEEP_CAP_MS`) before re-checking the escape
-  hatches below — so a runaway condition is never unnoticed for longer than
-  that cap, even mid-window.
-- **Reset on directed work**: an unread message that `@mentions` this
-  persona (v1 heuristic; a future `#39`-based upgrade can add a richer
-  pending-directed signal without changing this behavior) clears the backoff
-  window and re-enters immediately, rather than waiting out a possibly long
-  interval.
-- **TTL escape hatch**: `SQUAD_REENTRY_TTL_MINUTES` (default `240` — 4 hours,
-  following the same env-var-with-sensible-default convention as
-  `SQUAD_STALE_MINUTES`/`SQUAD_IDLE_MINUTES`) bounds total re-entry time since
-  the hook first armed for that persona; once exceeded, the session is
-  allowed to stop even if directed work is still pending. Set to `0` to
-  disable re-entry outright without uninstalling the hook.
-- **Operator-stop escape hatch**: `SQUAD_REENTRY_STOP=1` in the environment,
-  or a marker file — `<repo>/.squad/reentry-stop` (all personas) or
-  `<repo>/.squad/reentry/<persona>.stop` (one persona) — always wins over
-  backoff and directed work. This is checked on every hook invocation, so it
-  takes effect within one capped sleep, not after the full backoff interval.
-- Backoff/TTL state persists per-persona at
-  `<repo>/.squad/reentry/<persona>.json` across hook invocations (each is a
-  fresh process); it resets when a new arm cycle starts (first invocation
-  after install, or after the TTL/operator-stop has allowed a stop).
+- **Shared wake policy** (`src/reentry.ts`): checks target five minutes while
+  holding claims, or an idle heartbeat uniformly jittered between 30 and 45
+  minutes. Each window samples jitter once. Acquiring or releasing a claim
+  reschedules the window for the new workload. Unread `@mentions` and unexpired
+  pending/claimed directed review requests take priority as soon as observed;
+  peeking does not consume the persona's messages or reviews.
+- **Actual latency and runtime limits**: Codex's live supervisor polls at most
+  every 45 seconds while waiting (plus room I/O), and has a 10-second inter-run
+  floor. Claude observes only when its Stop hook is invoked. Each invocation
+  sleeps at most 45 seconds and emits a blocking continuation, including while
+  a policy window is still pending. Those intermediate model turns mean a
+  30–45-minute idle policy is **not** 30–45 minutes of passive Claude sleep.
+  Model execution time adds to detection latency. The `stop_hook_active` loop
+  guard still allows a repeated stop in the same sequence. Neither adapter
+  provides push delivery or wakes a stopped process without a running controller.
+- **Failure backoff**: Codex retries failed runs with exponential delays
+  (30 seconds base, ×2, 30-minute pre-jitter cap, ±20% jitter). Claims and
+  directed work cannot shorten that delay. A successful wake resets the
+  failure counter, not the lifetime count.
+- **Hard bounds**: `SQUAD_REENTRY_TTL_MINUTES` defaults to `240` (four hours)
+  since arming; `0` disables re-entry. `SQUAD_REENTRY_MAX_ATTEMPTS` defaults
+  to `48` policy fires per arm cycle, including directed wakes; `0` disables
+  the count cap. Claude's intermediate waiting blocks are not policy fires,
+  so TTL also bounds those continuations. Stop/TTL checks happen when the
+  adapter regains control; they do not interrupt an active model run.
+- **Operator stop**: `SQUAD_REENTRY_STOP=1`, `<repo>/.squad/reentry-stop`
+  (all personas), or `<repo>/.squad/reentry/<persona>.stop` (one persona)
+  overrides work and waiting windows at the next adapter check.
+- **Persisted arm cycle and permanent stop**: state is stored in
+  `<repo>/.squad/reentry/<persona>.json`, including `totalFired` and the final
+  `stoppedReason`. Both adapters attempt one permanent-stop room announcement
+  per arm cycle, recording it before posting to prevent retry duplicates;
+  room-write failure leaves the terminal stop reason as the fallback.
+  Restarting alone does not reset a spent TTL or cap. To re-arm, stop the
+  controller, remove the persona's JSON state and any stop marker, then restart.
+  Legacy state migrates its existing `attempt` into `totalFired` without
+  restarting TTL. Earlier directed resets cannot be reconstructed, so this
+  migrated count is only a lower bound on pre-upgrade fires.
 
 ### Re-entry for Codex: `squad codex-reentry`
 
@@ -287,14 +297,11 @@ park.
   runs is `src/reentry.ts`'s `decide()`, so backoff+jitter, the
   `SQUAD_REENTRY_TTL_MINUTES` TTL, the `SQUAD_REENTRY_STOP` / `.squad/reentry-stop`
   / `.squad/reentry/<persona>.stop` operator-stop escape hatch, and the
-  immediate reset on an `@mention` all behave identically. State lives in the
+  priority of observed mentions/reviews all behave identically. State lives in the
   same `.squad/reentry/<persona>.json` file.
-- **Two extra guards**, because each Codex re-entry is a *process spawn* rather
-  than a turn of an already-running session: `SQUAD_REENTRY_MAX_ATTEMPTS`
-  (default 48) hard-caps re-entries per arm cycle regardless of wall-clock, and
-  a 10s floor between runs (plus refusing to honor an `@mention`'s
-  immediate-reset after a run that did *not* park cleanly) keeps a broken
-  `codex` binary from spinning at the backoff floor.
+- **Launch failure guard**: a 10-second floor between runs and failure backoff
+  prevent a broken binary from spinning, even with persistent unread work.
+  The shared lifetime cap counts directed re-entries as well as timer fires.
 - **One supervisor per persona, in that persona's own foreground terminal — not
   a shared daemon.** The failure this fixes is a *cascade* (personas parking
   within ~90s of each other as the room goes quiet), so a single watcher whose

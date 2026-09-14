@@ -170,7 +170,7 @@ test("decide: quiet with an in-progress window not yet elapsed keeps waiting (ca
   assert.deepEqual(result.nextState, state); // untouched — window still in progress
 });
 
-test("decide: quiet with an elapsed window fires — attempt increments, window clears", () => {
+test("decide: quiet with an elapsed window fires — lifetime count increments, window clears", () => {
   const state = {
     attempt: 2,
     firstArmedAt: "2026-01-01T00:00:00.000Z",
@@ -187,7 +187,8 @@ test("decide: quiet with an elapsed window fires — attempt increments, window 
   });
   assert.equal(result.block, true);
   assert.equal(result.sleepMs, 0);
-  assert.equal(result.nextState.attempt, 3);
+  assert.equal(result.nextState.attempt, 0);
+  assert.equal(result.nextState.totalFired, 3);
   assert.equal(result.nextState.nextFireAt, null);
 });
 
