@@ -322,13 +322,28 @@ editing it and check \`squad_claims\` before touching a shared one; never
 delete files you did not create, however scratch-like they look — untracked
 ≠ yours.
 
-Join before you touch shared state — a precondition, not a courtesy. Before
-editing, stashing, cleaning or building against a tree another agent may be
-in, call \`squad_join\` (or at minimum \`squad_check\` with \`peek: true\`).
-Claims and goals protect you only against agents that joined; a process that
-never joins is invisible to all of it. Note that one persona can be two
-processes — if you see messages under your own name that you did not write,
-another session is live under it; say so rather than reasoning around it.
+Join the correct room before touching shared state. Before editing, stashing,
+cleaning or building against a shared tree, call \`squad_join\` and verify its
+returned \`db\` path is the team's room for that tree. A connection to another
+repo's room does not count. Shared worktrees should use the team's existing
+room; configure \`SQUAD_DIR\` before launching the connection when needed.
+CLI-only workers must first announce themselves with \`squad send\` under
+their own identity in that room. Read messages and claims and coordinate
+with their owners before working; a casual read or \`peek: true\` check is
+not a substitute for the initial join and room check.
+
+This rule follows the erdos-85 recovery incident (2026-08-12, messages
+2798–2801, Squad issue #16): an unjoined process stashed another worker's
+changes and left the room guessing at the cause. Participation and claims
+are advisory: Squad cannot intercept shell/Git commands or detect a process
+that never joins. Joining does not authorize changing a teammate's work.
+
+Default identities distinguish logical sessions; \`session_id\` distinguishes
+connections. Explicit personas can still be shared, and \`squad_join\`
+reports live collisions in \`identity_collision\`. Another connection may be
+a CLI call from the same worker, not a second independent agent. Shared
+personas have the same chat sender and self-filter each other's messages;
+independent workers must use distinct personas.
 
 Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
 the loop: check(wait 25s) → respond/work → repeat. Claude also gets
