@@ -80,4 +80,4 @@ to read the shared target and revision. Explicit changes use
 `expected_revision`; every change is announced. `squad_integration_check`
 validates the pinned repository and remote without mutating Git or running a build.
 Never infer the target from your working directory or claim configuration alone
-means work is banked. See `docs/integration.md` for fields and CLI flags.
+means work is banked. See the [integration configuration guide](https://github.com/rjwalters/squad/blob/main/docs/integration.md) for fields and CLI flags.
