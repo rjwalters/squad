@@ -36,9 +36,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   file) that always wins, so a session can never be held open forever on
   unread chatter alone. Backoff/TTL state persists per-persona at
   `.squad/reentry/<persona>.json`. New `src/reentry.ts` (pure decision logic)
-  and `src/reentry-hook.ts` (the hook's stdin/stdout protocol glue). No Codex
-  equivalent yet — this repo has no confirmed Codex hook/scheduled-task
-  primitive to build one on (see README.md "Re-entry (opt-in)").
+  and `src/reentry-hook.ts` (the hook's stdin/stdout protocol glue). The Codex
+  counterpart shipped separately as `squad codex-reentry` (#60, below).
+- Codex re-entry supervisor (#60): `squad codex-reentry` recovers a Codex
+  persona that parks silently on `task_complete` — the failure behind three
+  room outages in one day (one ~5 hours; one leaving 410 theorems unverified
+  for 4 hours). Codex exposes no end-of-turn hook to mirror the Claude Code
+  `Stop` hook with (only `pre_tool_use`, and no `codex hooks` subcommand at
+  all, verified against 0.146.0), so the supervisor assumes no hook primitive:
+  it wraps `codex exec` — the mode that *exits* at end of turn — relaunching
+  it each time the turn ends, and reads back how the run ended from the
+  session log (`$CODEX_HOME/sessions/.../rollout-*.jsonl`), so a clean park is
+  distinguishable from a crash without an operator grepping session files.
+  Run it in the terminal where you would otherwise have run `codex`
+  (`--persona`, `--codex <bin>`, `--prompt`, `--ttl-minutes`,
+  `--max-attempts`, `--no-resume`, and `--` passthrough to `codex exec`).
+  Bounds come from the *same* `decide()` as the Claude side — backoff+jitter,
+  `SQUAD_REENTRY_TTL_MINUTES`, the `SQUAD_REENTRY_STOP` /
+  `.squad/reentry-stop` / `.squad/reentry/<persona>.stop` operator-stop escape
+  hatch, the `@mention` reset, and the shared `.squad/reentry/<persona>.json`
+  state file (extracted to `src/reentry-state.ts`) — plus two guards specific
+  to re-entry-by-process-spawn: a new `SQUAD_REENTRY_MAX_ATTEMPTS` cap
+  (default 48, wired into `decide()` as an optional `maxAttempts`; unset means
+  uncapped, so the Claude hook is unchanged) and a 10s inter-run floor. It is
+  **one supervisor per persona in that persona's own foreground terminal**,
+  never a shared daemon, because the observed failure is a cascade and a
+  single watcher's death would silently disarm every persona at once. It also
+  parks *loudly*: it announces in the room when it starts, when a run fails,
+  and when a bound stops it for good, and `codex/prompts/squad-join.md` step 6
+  now branches on `SQUAD_REENTRY_SUPERVISOR` so the persona's own idle message
+  says whether anything will bring it back. New `src/codex-reentry.ts` (pure
+  logic + injected-deps control loop) and `src/codex-reentry-driver.ts` (spawn
+  / session-log / room wiring).
 - Presence leases (#38): presence is now a renewable lease with a derived
   `active`/`idle`/`stale` state instead of a permanent joined bit. `squad_join`
   opens a session (new `sessions` table, one row per *connection* — keyed by
@@ -55,6 +84,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets the active→idle window inside the existing `SQUAD_STALE_MINUTES`
   (default 30) lease; `squad who` shows presence state, and `squad clear` /
   `squad_clear` wipe sessions along with everything else.
+- Science Card update surface (#37): `squad_card_update` MCP tool and
+  `squad card edit <id> --field value ...` CLI subcommand for editing fields
+  set at creation (title, confidence, novelty, prior-art status, etc.) without
+  touching `phase` or history, plus a DB-migration test.
+- End-to-end Science Card walkthrough (#35): a full-lifecycle README example —
+  divergence round, phase transitions with evidence, the evidence gate on
+  `SUPPORTED`, a `LEARN` → `PIVOT` loop, and a `FALSIFIED` terminal state —
+  kept honest by `tests/science-card-lifecycle.test.mjs`.
+- Science Card CLI + MCP surface (#33): `squad card
+  [create|list|show|transition|evidence]` subcommands and the
+  `squad_card_create` / `squad_card_list` / `squad_card_get` /
+  `squad_card_transition` / `squad_card_evidence_add` MCP tools; `CARD_PHASES`,
+  `CARD_TERMINAL_PHASES`, and `EVIDENCE_TYPES` exported as the single runtime
+  source of truth.
+- Science Card schema, storage, and phase-transition core (#29): cards move
+  `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` along a
+  validated transition graph; an empirical claim needs `experiment` or
+  `observation` evidence before `SUPPORTED`. Canonical JSON Schema in
+  `schema/science-card.schema.json`.
+- Divergence rounds (#27): `squad_diverge_open` / `squad_diverge_submit` /
+  `squad_diverge_status` / `squad_diverge_close` MCP tools and `squad diverge
+  open|submit|status|close` CLI subcommands — a bounded window where each
+  participant submits independently and nothing is revealed until the round
+  closes (explicitly, or automatically once every expected participant has
+  submitted); resubmission upserts.
 - `squad doctor` (#15): a preflight/diagnostic CLI subcommand that checks
   whether the MCP server's runtime dependencies (`@modelcontextprotocol/sdk`,
   `zod`) actually resolve, whether the database is reachable, and how the
@@ -74,12 +128,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `squad clear` / `squad_clear` wipe claims along with the other tables.
 
 ### Changed
+- Bump `@types/node` 26.1.2 → 26.2.0 (#14).
 - Squad conventions now say: claim a file before editing it, and never delete
   files you did not create, however scratch-like they look — untracked ≠ yours
   (#12, mirrored across `skills/squad/SKILL.md`, `commands/squad/join.md`, and
   `codex/prompts/squad-join.md`).
 
 ### Fixed
+- Repeated identical system messages from the same sender (e.g. a recurring
+  MCP startup-failure breadcrumb, #15) no longer accumulate one row per
+  occurrence and crowd out real conversation from `squad_join`'s fixed
+  30-message history window (#59). `Squad.send()` now collapses an exact
+  repeat — same sender, same body, kind `"system"` — into the prior row in
+  place: it bumps a new `occurrences` counter (`messages.occurrences`,
+  migrated onto existing databases via `ALTER TABLE ADD COLUMN`) and
+  refreshes `ts` to the latest occurrence instead of inserting a new row.
+  `squad read`/`squad tail` show `(seen N times, last at T)` once
+  `occurrences > 1`; `squad_join`'s `recent` and `squad_check`'s `messages`
+  carry the same `occurrences`/`ts` fields for MCP clients. Scoped to
+  `kind === "system"` only — identical `"chat"` messages are never collapsed
+  — and to the sender's own immediately preceding message, so two personas
+  posting the same body, or a message that differs even slightly from the
+  prior one, are never merged. `SCHEMA_VERSION` bumped to 2 (`Squad.importRoom`
+  now refuses a pre-#59 export with a clear schema-version error instead of a
+  raw SQLite column-count failure).
+- Scaling one agent to N sessions no longer silently mutes it (#50). A pinned
+  `SQUAD_PERSONA` is now treated as a *namespace* rather than an exact
+  identity: `squad_join` honors a `persona` argument that **refines** the pin
+  (`<pinned>-<suffix>`, e.g. `codex` → `codex-2`) and still refuses an
+  unrelated name — with a note that says the name is not a refinement of your
+  pinned identity, and shows the form that would be accepted, instead of the
+  old generic "rename ignored". Anti-impersonation is preserved (the check
+  stays anchored to the pin); self-suppression needed no change, because
+  refined senders genuinely differ. The accepted separator is `-` only: `/`
+  (floated in the issue as `codex/sol3`) is outside the persona charset the
+  `persona` argument validates against and reads as a path wherever a persona
+  is interpolated, so one separator keeps `<pinned>-<n>` unambiguous.
+  `squad_join` additionally reports an `identity_collision` (echoed in its
+  `note`) when the identity being joined under already has an unexpired lease
+  held by a *different* session — resolved before the join's own `touch()`
+  creates that session's row, and excluding the caller's own session, so an
+  idempotent re-join never collides with itself and a dead process's expired
+  lease is not mistaken for a live twin. Previously N sessions of one pinned
+  agent all arrived under one name, were filtered out of each other's unread
+  as self-authored, and had no way to discover it except by noticing an
+  unexplained silence. New `/squad:fanout` command documents running N
+  workers of one agent — distinct identities, work partitioned up front
+  (claims are advisory, not a compare-and-set), `squad leave` on exit, and
+  why subagents must reach the room through the CLI with a per-agent
+  `SQUAD_PERSONA` rather than the inherited MCP connection (which resolves
+  its persona once per connection, so subagents sharing their parent's
+  connection would reproduce the collision at N× scale).
 - Session-scoped read cursors (#41): two live sessions of one persona (e.g.
   an MCP connection and a CLI invocation, or two concurrent MCP clients) no
   longer share one read cursor and silently steal each other's unread state.

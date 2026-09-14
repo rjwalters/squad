@@ -458,6 +458,250 @@ else
     log_info "spawn-claude: CPU quota mechanism disabled (LOOM_SWEEP_CPU_QUOTA=0, issue #5111)"
 fi
 
+# --- Host-sleep prevention (issue #6311) ---
+#
+# #3350's check-host-sleep.sh is advisory-only by design — it warns but never
+# mutates anything, so an operator re-applies the mitigation by hand on every
+# host, every run. Repo-level opt-in (`host.preventSleep` in
+# `.loom/config.json`, env override `LOOM_HOST_PREVENT_SLEEP`, standard
+# env > config > default-OFF precedence — see lib/host-sleep-config.sh)
+# self-wraps THIS spawn in `systemd-inhibit --what=idle:sleep`, exactly the
+# manual remediation check-host-sleep.sh has always recommended by hand.
+#
+# This is the single dispatch chokepoint for BOTH named Linux entry points in
+# #6311 ("sweep" and "role runner") — `loom-daemon` invokes this script
+# directly for sweep dispatch (SweepRegistryConfig::resolve_spawn_bin) AND
+# scheduled role-runner dispatch (role_runner.rs); MOM's interactive
+# terminals run `claude` directly and never go through this script, so an
+# interactive session still needs its own manual wrap (see
+# check-host-sleep.sh's "Note:" addition for that case).
+#
+# Linux-only — systemd-inhibit talks to systemd-logind, which needs no
+# privilege. macOS's reliable defense (`sudo pmset -c sleep 0`) is privileged
+# and global; a repo-level config flag must NEVER invoke `sudo` silently
+# (#6311's own explicit macOS guardrail), so this mechanism is a deliberate
+# no-op there — check-host-sleep.sh still surfaces the manual macOS
+# remediation (or, once `host.sleepMitigationAcknowledged` is set, a
+# downgraded one-liner naming it).
+#
+# `idle:sleep` locks are HOST-WIDE, not scoped to this process's own
+# children — visible via `systemd-inhibit --list` for the lifetime of this
+# spawn (the #6311 acceptance criterion), and as a side effect keep every
+# sibling process on the host (including a currently-idle `loom-daemon`)
+# awake too, for as long as at least one sweep/role-runner spawn is in
+# flight.
+#
+# Prefix-array composition mirrors CPU_QUOTA_WRAP immediately above: a
+# `--why=probe -- true` dry run first, so a host that rejects it (no
+# reachable logind, e.g. a container with no dbus) degrades to "spawn
+# without the wrap" rather than replacing this process with a failing
+# `systemd-inhibit` at the real exec below. Never blocks the spawn.
+SLEEP_INHIBIT_WRAP=()
+_sleep_inhibit_config_lib="${_script_dir}/lib/host-sleep-config.sh"
+if [[ -f "$_sleep_inhibit_config_lib" ]]; then
+    # shellcheck source=./lib/host-sleep-config.sh
+    source "$_sleep_inhibit_config_lib"
+    if declare -F loom_host_prevent_sleep_enabled >/dev/null 2>&1 \
+        && [[ "$(loom_host_prevent_sleep_enabled "$WORKSPACE")" == "1" ]]; then
+        if command -v systemd-inhibit >/dev/null 2>&1; then
+            _sleep_inhibit_why="${LOOM_ROLE:-loom}"
+            if systemd-inhibit --what=idle:sleep --who=loom --why=probe -- true >/dev/null 2>&1; then
+                SLEEP_INHIBIT_WRAP=(systemd-inhibit --what=idle:sleep --who=loom --why="$_sleep_inhibit_why" --)
+                log_info "spawn-claude: host.preventSleep is enabled — wrapping this spawn in systemd-inhibit --what=idle:sleep --why=${_sleep_inhibit_why} (issue #6311)"
+            else
+                log_warn "spawn-claude: host.preventSleep is enabled but a systemd-inhibit probe failed (no reachable systemd-logind?); spawning WITHOUT the sleep-inhibit wrap (issue #6311)"
+            fi
+        else
+            log_warn "spawn-claude: host.preventSleep is enabled but systemd-inhibit is not on PATH (macOS, or non-systemd Linux); spawning WITHOUT the sleep-inhibit wrap — see check-host-sleep.sh for the manual remediation (issue #6311)"
+        fi
+    fi
+fi
+
+# --- Containerized dispatch mode (issue #7429, epic #6896 Phase 3) ---
+#
+# Config-selectable, initially OFF: `.loom/config.json` ->
+# `runtimes.containment.enabled` (env override `LOOM_SWEEP_CONTAINERIZED`,
+# standard env > config > default-off precedence). When enabled, this script
+# re-execs ITSELF inside a `docker run` of the configured image (default
+# ghcr.io/rjwalters/loom-worker:latest — override with
+# `LOOM_SWEEP_CONTAINER_IMAGE` or `runtimes.containment.image`), under the
+# path-parity mount contract (`docker/worker/MOUNT-CONTRACT.md`): the
+# resolved `$WORKSPACE` (repo root — covers the main checkout AND every
+# `.loom/worktrees/*` beneath it) is bind-mounted read-write at the
+# IDENTICAL absolute host path, never remapped, so a sweep running in a git
+# worktree builds and commits with no repo copy — git's absolute-path
+# worktree pointers (`.git` gitdir files, `commondir`, object-store refs)
+# resolve identically inside and outside the container (MOUNT-CONTRACT.md
+# §1's "load-bearing" rule).
+#
+# `LOOM_SPAWN_CONTAINERIZED=1` is the recursion guard: once re-exec'd inside
+# the container, this same block sees it already set and falls straight
+# through to the rest of this script unchanged. Every later section — CPU
+# quota (degrades to advisory-only, same as any host with no reachable
+# `systemd --user` manager), sleep-inhibit, and token selection — runs
+# AGAIN, this time *inside* the container, against the mount contract's
+# parity-mounted paths (the token pool read-only, the build cache
+# read-write) instead of being duplicated here. This is deliberate: it is
+# the existing token-rotation logic in THIS script that the mount contract's
+# secrets section (§2) says a worker container must use, not a
+# reimplementation of it. Niceness is the one exception: `LOOM_SWEEP_NICED`
+# (already exported on the host side, before this block runs) is forwarded
+# through the generic `LOOM_*` env passthrough below, so the recursed
+# invocation's own niceness re-exec sees its sentinel already set and
+# correctly skips re-niceing a process that is, from the HOST kernel's
+# perspective, still the same niced process tree.
+#
+# Restart-safety (issue #5119, ADR-0017 Decision 4, "The #5119 drain
+# interaction, specified"): a per-sweep container is its own cgroup, owned
+# by the container runtime (dockerd), not by loom-daemon's systemd unit or
+# by this script's own process tree. A hard-killed daemon (a plain
+# stop/restart on systemd, or any other non-drained teardown of the chain
+# that dispatched this script) SIGKILLs the local `docker run` CLIENT below
+# exactly like every other exec in this script — but killing that client
+# does NOT stop the container it started: `docker run` needs no host-side
+# supervising process to keep a container alive after dockerd has it. The
+# in-flight sweep survives as an orphan relative to the daemon's in-memory
+# registry — the SAME "sweeps survive by design" property launchd already
+# gives bare-metal sweeps today (see daemon-reference.md), now extended to
+# systemd too, via the container boundary instead of process reparenting.
+# `loom-daemon restart --drain` remains the recommended path on both
+# supervisors — it waits for in-flight sweeps (containerized or not) to
+# finish before the daemon exits, so the orphan case above is a hard-stop
+# fallback, not the common path. Reconciling a still-running orphaned
+# container after a daemon restart (`SweepRegistry::reconstruct`'s
+# container-recognition extension) and teaching `cancel_sweep` to `docker
+# stop`/`docker rm` a containerized sweep it explicitly cancels are real,
+# named Phase 3 obligations ADR-0017 defers past this issue's own scope note
+# ("only add the dispatch mode itself") — tracked as a follow-up rather than
+# silently assumed done.
+#
+# Build-cache placement (MOUNT-CONTRACT.md §4, issue #6013/#6014): a
+# container that mounts no build-cache path gets a fresh, empty `target/`
+# trapped in its own ephemeral writable layer on every `docker run` — worse
+# than a redirected-but-persistent host cache, because then EVERY sweep pays
+# a full rebuild. `CARGO_TARGET_DIR` is therefore resolved the SAME way the
+# rest of the repo already does (`lib/cargo-target-dir.sh`: env ->
+# `cargo metadata` -> `<workspace>/target`), then — only when it resolves
+# OUTSIDE the already-mounted workspace — mounted at its own identical
+# absolute path (parity applies to caches too) and exported into the
+# container, so a containerized sweep shares the exact per-repo-per-host
+# cache `post-worktree.sh`'s binary-reuse fast path already assumes, never a
+# path that lives only inside the container's own filesystem.
+#
+# Per-sweep resource LIMITS (CPU/mem ceilings on the container itself) are
+# explicitly OUT of scope here — a separate, later Phase 3 issue per #7429's
+# own scope note ("Per-sweep resource limits ... are separate, LATER issues
+# in this phase"). This mode ships with no `--cpus`/`--memory` docker flags.
+# The host CPU-quota mechanism above (issue #5111, `CPU_QUOTA_WRAP`) is
+# deliberately NOT applied to the `docker run` client below even when
+# computed: wrapping the trivial client process in a systemd scope would not
+# constrain the container's own (separate) cgroup, so it would be
+# decorative, not real containment.
+CONTAINMENT_ENABLED="0"
+_containment_config_lib="${_script_dir}/lib/config-resolver.sh"
+if [[ -z "${LOOM_SPAWN_CONTAINERIZED:-}" ]]; then
+    _containment_enabled="${LOOM_SWEEP_CONTAINERIZED:-}"
+    if [[ -z "$_containment_enabled" && -f "$_containment_config_lib" ]]; then
+        # shellcheck source=./lib/config-resolver.sh
+        source "$_containment_config_lib"
+        _containment_enabled="$(loom_config_get "$WORKSPACE" "runtimes.containment.enabled" "")"
+    fi
+    case "$_containment_enabled" in
+        1 | true | yes) CONTAINMENT_ENABLED="1" ;;
+        *) CONTAINMENT_ENABLED="0" ;;
+    esac
+fi
+
+if [[ "$CONTAINMENT_ENABLED" == "1" ]]; then
+    if ! command -v docker >/dev/null 2>&1; then
+        log_error "spawn-claude: containerized dispatch is enabled (runtimes.containment.enabled / LOOM_SWEEP_CONTAINERIZED) but 'docker' is not on PATH."
+        log_error "Install docker, or disable containment (LOOM_SWEEP_CONTAINERIZED=0, or runtimes.containment.enabled=false in .loom/config.json)."
+        exit 78 # EX_CONFIG
+    fi
+
+    _containment_image="${LOOM_SWEEP_CONTAINER_IMAGE:-}"
+    if [[ -z "$_containment_image" && -f "$_containment_config_lib" ]]; then
+        # shellcheck source=./lib/config-resolver.sh
+        source "$_containment_config_lib"
+        _containment_image="$(loom_config_get "$WORKSPACE" "runtimes.containment.image" "")"
+    fi
+    : "${_containment_image:=ghcr.io/rjwalters/loom-worker:latest}"
+
+    _containment_cwd="$(pwd -P)"
+    _containment_mounts=(-v "${WORKSPACE}:${WORKSPACE}")
+
+    # --- Secrets mounts (MOUNT-CONTRACT.md §2) ---
+    # The per-repo token pool ($WORKSPACE/.loom/tokens) is already covered by
+    # the workspace mount above. The shared machine-level pool (the
+    # spawn-claude.sh fallback documented at the top of this file) lives
+    # outside $WORKSPACE and needs its own read-only parity mount.
+    _containment_shared_tokens="${LOOM_SHARED_TOKENS_DIR:-${HOME:-}/.loom/tokens}"
+    if [[ -n "$_containment_shared_tokens" && -d "$_containment_shared_tokens" \
+        && "$_containment_shared_tokens" != "${WORKSPACE}"/* ]]; then
+        _containment_mounts+=(-v "${_containment_shared_tokens}:${_containment_shared_tokens}:ro")
+    fi
+    # gh/git forge auth (docker/worker/README.md "Bootstrap seams"): prefer
+    # the env-var form already in this process's environment (passed through
+    # by the LOOM_*/CLAUDE_*/GH_*/GITHUB_* sweep below); best-effort read-only
+    # bind of ~/.config/gh only when neither token env var is present.
+    if [[ -z "${GH_TOKEN:-}${GITHUB_TOKEN:-}" && -n "${HOME:-}" && -d "${HOME}/.config/gh" ]]; then
+        _containment_mounts+=(-v "${HOME}/.config/gh:${HOME}/.config/gh:ro")
+    fi
+    # Git commit identity (check-git-identity.sh's global user.name/user.email).
+    if [[ -n "${HOME:-}" && -f "${HOME}/.gitconfig" ]]; then
+        _containment_mounts+=(-v "${HOME}/.gitconfig:${HOME}/.gitconfig:ro")
+    fi
+
+    # --- Build-cache placement (MOUNT-CONTRACT.md §4, issue #6013/#6014) ---
+    _containment_env=()
+    _containment_cargo_lib="${_script_dir}/lib/cargo-target-dir.sh"
+    if [[ -f "${WORKSPACE}/Cargo.toml" && -f "$_containment_cargo_lib" ]]; then
+        # shellcheck source=./lib/cargo-target-dir.sh
+        source "$_containment_cargo_lib"
+        _containment_target_dir="$(loom_resolve_cargo_target_dir "$WORKSPACE")"
+        if [[ -n "$_containment_target_dir" ]]; then
+            if [[ "$_containment_target_dir" != "${WORKSPACE}"/* ]]; then
+                mkdir -p "$_containment_target_dir" 2>/dev/null || true
+                _containment_mounts+=(-v "${_containment_target_dir}:${_containment_target_dir}")
+            fi
+            _containment_env+=(-e "CARGO_TARGET_DIR=${_containment_target_dir}")
+        fi
+    fi
+
+    # --- Env passthrough ---
+    # Every LOOM_*/CLAUDE_*/SAFEHOUSE*/CODEX_*/GH_TOKEN/GITHUB_TOKEN var
+    # already present in THIS process's environment (exported by the daemon
+    # before it spawned this script — LOOM_SWEEP_CLAIM_OWNED, LOOM_ROLE,
+    # LOOM_RUNTIME, LOOM_MODEL/LOOM_EFFORT when set, etc. — or already
+    # resolved above, e.g. CLAUDE_CODE_OAUTH_TOKEN when
+    # LOOM_SPAWN_NO_EXPORT bypassed selection) is forwarded by NAME (`-e
+    # VAR`, no `=value`) so docker reads the CURRENT value straight from this
+    # shell — generic and exhaustive rather than a hardcoded list that drifts
+    # from what the daemon actually sets.
+    while IFS='=' read -r _containment_var _; do
+        case "$_containment_var" in
+            LOOM_* | CLAUDE_* | SAFEHOUSE* | CODEX_* | GH_TOKEN | GITHUB_TOKEN)
+                _containment_env+=(-e "$_containment_var")
+                ;;
+        esac
+    done < <(env)
+    _containment_env+=(-e "LOOM_SPAWN_CONTAINERIZED=1" -e "LOOM_WORKSPACE=${WORKSPACE}" -e "HOME=${HOME:-/home/loom}")
+
+    _containment_labels=(--label "loom.sweep=1" --label "loom.dispatch=container")
+    [[ -n "${LOOM_SWEEP_CLAIM_OWNED:-}" ]] && _containment_labels+=(--label "loom.sweep.issue=${LOOM_SWEEP_CLAIM_OWNED}")
+
+    log_info "spawn-claude: containerized dispatch ENABLED (issue #7429) — image=${_containment_image}, workspace=${WORKSPACE} (parity-mounted), cwd=${_containment_cwd}"
+    echo "# LOOM_CONTAINMENT_ENABLED image=${_containment_image}" >&2
+
+    exec ${SLEEP_INHIBIT_WRAP[@]+"${SLEEP_INHIBIT_WRAP[@]}"} docker run --rm \
+        "${_containment_mounts[@]}" \
+        -w "$_containment_cwd" \
+        "${_containment_env[@]}" \
+        "${_containment_labels[@]}" \
+        "$_containment_image" \
+        "${WORKSPACE}/.loom/scripts/spawn-claude.sh" "$@"
+fi
+
 # --- Locate the loom-daemon binary (token selection, issue #4228) ---
 # Resolution precedence (see lib/locate-daemon-bin.sh): $LOOM_DAEMON_BIN ->
 # `loom-daemon` on PATH -> build-output-relative candidates under $WORKSPACE.
@@ -596,6 +840,36 @@ elif [[ -n "${LOOM_EFFORT:-}" ]]; then
     log_info "spawn-claude: effort=$LOOM_EFFORT (from LOOM_EFFORT)"
 fi
 
+# --- Account provider resolution (issue #5609, design D8) ---
+# Reads THIS runtime's own manifest (defaults/runtimes/claude.json)'s
+# "accountProvider" field so the pool `tokens select --provider` dispatches
+# into is a property of the runtime manifest, not a value hardcoded in this
+# script -- an operator can locally repoint it by editing
+# .loom/runtimes/claude.json without touching this script. Resolution mirrors
+# check-runtime-capabilities.sh's precedence: an on-disk
+# <repo>/.loom/runtimes/<name>.json wins over the defaults/runtimes/ fallback
+# next to this script. A missing file, missing field, or missing `jq` all
+# fall open to "claude" (never fail closed) -- design D8's "a missing
+# accountProvider on an un-resynced install must default to claude".
+_loom_account_provider_for_runtime() {
+    local runtime_name="$1" manifest=""
+    if [[ -f "${WORKSPACE}/.loom/runtimes/${runtime_name}.json" ]]; then
+        manifest="${WORKSPACE}/.loom/runtimes/${runtime_name}.json"
+    elif [[ -f "${_script_dir}/../runtimes/${runtime_name}.json" ]]; then
+        manifest="${_script_dir}/../runtimes/${runtime_name}.json"
+    fi
+    if [[ -z "$manifest" ]] || ! command -v jq >/dev/null 2>&1; then
+        printf '%s\n' "claude"
+        return
+    fi
+    local provider
+    provider="$(jq -r '.accountProvider // "claude"' "$manifest" 2>/dev/null)"
+    case "$provider" in
+        "" | null) provider="claude" ;;
+    esac
+    printf '%s\n' "$provider"
+}
+
 # --- Token selection ---
 if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; then
     _daemon_bin="$(loom_locate_daemon_bin "$WORKSPACE")"
@@ -623,7 +897,8 @@ if [[ -z "${LOOM_SPAWN_NO_EXPORT:-}" && -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]]; th
     _daemon_version="$("$_daemon_bin" --version 2>/dev/null | head -1)"
     log_info "spawn-claude: token-selection binary: $_daemon_bin (${_daemon_version:-version unknown})"
 
-    _select_args=(tokens select --workspace "$WORKSPACE" --export)
+    _account_provider="$(_loom_account_provider_for_runtime claude)"
+    _select_args=(tokens select --workspace "$WORKSPACE" --provider "$_account_provider" --export)
     # Pre-flight: auto-unpin if every allowlisted account has hit the
     # consecutive-failure threshold (default 5). Without this, an
     # operator-set pin can trap the spawner once all pinned accounts
@@ -691,6 +966,32 @@ fi
 : "${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:=0}"
 export CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS
 
+# --- Headless-session marker for the Stop guard (issue #6645) ---
+# `guard-background-subagents.sh` blocks a stop that would orphan a background
+# child. That block is correct in headless `-p` mode (ending the turn kills the
+# process) and a pure false positive in an interactive session (children
+# survive the turn boundary), so the guard must be able to tell the two apart.
+# Its primary signal is the owning `claude` process's own argv, but this export
+# is the defense-in-depth belt: this script is the SOLE sanctioned headless
+# dispatch path in Loom, so a marker set here classifies every Loom-dispatched
+# sweep correctly even if the harness's argv shape changes.
+#
+# Set ONLY when print mode is actually requested — an interactive `claude`
+# launched through this script (no `-p`/`--print` in the passthrough args) must
+# NOT be marked headless, or it inherits exactly the friction #6645 removes.
+# Env vars set before `exec` are inherited by the replacing process image, and
+# the harness passes its own environment down to hook subprocesses.
+_loom_print_mode=false
+for _arg in ${PASSTHROUGH_ARGS[@]+"${PASSTHROUGH_ARGS[@]}"}; do
+    case "$_arg" in
+        -p | --print | --print=*) _loom_print_mode=true; break ;;
+    esac
+done
+if [[ "$_loom_print_mode" == "true" ]]; then
+    export LOOM_HEADLESS_SESSION=1
+fi
+unset _loom_print_mode
+
 # --- Optional safehouse MCP server injection (issue #3999) ---
 # When the `safehouse` config block is enabled and a socket + launch command
 # resolve, inject a session-scoped MCP config that adds the `safehouse` stdio
@@ -755,11 +1056,11 @@ if [[ -f "$_mcp_config_lib" ]]; then
             # in a per-role sweep log nobody was tailing — every sweep on an
             # affected host silently stopped narrating to safehouse for 11
             # hours, unnoticed, because the ONLY consequence anyone could see
-            # from outside was the public 2amlogic.com fleet pulse going
+            # from outside was the public fleet pulse going
             # stale. Name that consequence here, and point at the standalone,
             # on-demand check (independent of a daemon restart) that answers
             # "is this drifted?" without reading any sweep log.
-            log_warn "spawn-claude: SAFEHOUSE DRIFT — safehouse.enabled is true but no socket resolves (safehouse.socket / \$LOOM_SAFEHOUSE_SOCKET / \$SAFEHOUSED_SOCKET); no safehouse narration will be recorded for this sweep — the 2amlogic.com public fleet pulse is fed exclusively from safehouse narration, so this host's activity will not appear there until the socket resolves. Run '.loom/scripts/check-safehouse-socket.sh' to check every managed repo on this host without reading sweep logs. Skipping safehouse MCP injection (loom MCP unaffected)."
+            log_warn "spawn-claude: SAFEHOUSE DRIFT — safehouse.enabled is true but no socket resolves (safehouse.socket / \$LOOM_SAFEHOUSE_SOCKET / \$SAFEHOUSED_SOCKET); no safehouse narration will be recorded for this sweep — the public fleet pulse is fed exclusively from safehouse narration, so this host's activity will not appear there until the socket resolves. Run '.loom/scripts/check-safehouse-socket.sh' to check every managed repo on this host without reading sweep logs. Skipping safehouse MCP injection (loom MCP unaffected)."
         elif ! command -v "$_sh_command" >/dev/null 2>&1; then
             log_warn "spawn-claude: safehouse launch command '$_sh_command' not found in PATH; skipping safehouse MCP injection (loom MCP unaffected)."
         else
@@ -779,18 +1080,36 @@ if [[ -f "$_mcp_config_lib" ]]; then
 fi
 
 # --- Dispatch ---
-# CPU_QUOTA_WRAP (issue #5111) is prepended to whichever final command is
-# exec'd below — empty (no-op) unless the CPU-quota block above found a
-# usable systemd --user scope. The `+"${arr[@]}"` guard is required under
-# `set -u`: bash 3.2 (macOS's shipped default) treats `"${arr[@]}"` on a
-# truly empty array as an unbound-variable error without it.
+# SLEEP_INHIBIT_WRAP (issue #6311) then CPU_QUOTA_WRAP (issue #5111) are
+# prepended, in that order, to whichever final command is exec'd below —
+# each empty (no-op) unless its own block above found a usable mechanism.
+# Order composes correctly because both wraps end their own array with a
+# trailing `--`: `systemd-inhibit ... -- systemd-run ... -- claude ...`. The
+# `+"${arr[@]}"` guard on each is required under `set -u`: bash 3.2 (macOS's
+# shipped default) treats `"${arr[@]}"` on a truly empty array as an
+# unbound-variable error without it.
+#
+# Process-group self-reap scope note (Issue #6192): both branches below end
+# in a plain `exec`, which REPLACES this process's image — nothing is left
+# alive afterward to trap the leaf command's exit and reap any children it
+# leaves behind, so `lib/reap-process-group.sh`'s self-reap cannot be wired in
+# here without restructuring `exec` into a fork+wait, a materially riskier
+# change to this script's signal/tty semantics than this issue's scope
+# justifies. This is not a gap in practice for the primary daemon-dispatch
+# path: `sweep_registry::dispatch` appends `--use-wrapper` by default (see
+# `dispatch_appends_use_wrapper_flag`), so daemon-dispatched sweeps take the
+# `USE_WRAPPER` branch into `claude-wrapper.sh`, which already runs `claude`
+# as a managed child (never exec-replaces itself) and carries the self-reap
+# trap directly (see its own header comment). Only a manual/interactive
+# invocation that explicitly omits `--use-wrapper` reaches the raw `exec`
+# below without that backstop.
 if [[ "$USE_WRAPPER" == "true" ]]; then
     _wrapper="${WORKSPACE}/.loom/scripts/claude-wrapper.sh"
     if [[ ! -x "$_wrapper" ]]; then
         log_error "Cannot find executable claude-wrapper.sh at $_wrapper"
         exit 1
     fi
-    exec ${CPU_QUOTA_WRAP[@]+"${CPU_QUOTA_WRAP[@]}"} "$_wrapper" "${PASSTHROUGH_ARGS[@]}"
+    exec ${SLEEP_INHIBIT_WRAP[@]+"${SLEEP_INHIBIT_WRAP[@]}"} ${CPU_QUOTA_WRAP[@]+"${CPU_QUOTA_WRAP[@]}"} "$_wrapper" "${PASSTHROUGH_ARGS[@]}"
 fi
 
 # Default: exec the `claude` CLI directly.
@@ -800,4 +1119,4 @@ if ! command -v claude >/dev/null 2>&1; then
     exit 127
 fi
 echo "# LOOM_CLI_START runtime=claude" >&2
-exec ${CPU_QUOTA_WRAP[@]+"${CPU_QUOTA_WRAP[@]}"} claude "${PASSTHROUGH_ARGS[@]}"
+exec ${SLEEP_INHIBIT_WRAP[@]+"${SLEEP_INHIBIT_WRAP[@]}"} ${CPU_QUOTA_WRAP[@]+"${CPU_QUOTA_WRAP[@]}"} claude "${PASSTHROUGH_ARGS[@]}"

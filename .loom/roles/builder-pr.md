@@ -256,7 +256,46 @@ Local verification:
 - [ ] Commits are signed off if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` requirement — `git commit --signoff`; see "DCO sign-off" above)
 - [ ] Relevant tests pass
 - [ ] Each criterion has explicit verification (not "I think it works")
+- [ ] Ran the "defaults/ VERSION-Bump Gate" command block below (not just read it) — exited 0. It covers both: a `defaults/` change without a `VERSION` bump/marker, and any hand-edited version-bearing file `scripts/version.sh check` alone would catch.
 ```
+
+**Run the defaults/ VERSION-Bump Gate locally — an actual command, not a checklist bullet to read (#6675, recurring Judge rejection: #6598, #6599, #6610, #6611, #6630, #6668 all hit this in CI because it was never run pre-PR). Since #6730, check 2 below (`scripts/version.sh check`) is ALSO run automatically by `./.loom/scripts/create-pr.sh` itself (it aborts with the same BLOCKER:/Fix: message if a version-bearing file — e.g. `.loom/install-metadata.json` — is out of sync), so running it here by hand is defense-in-depth, not the only line of defense; still run it locally to catch the mismatch before pushing rather than at `create-pr.sh` time:**
+
+```bash
+# Run from your worktree, AFTER your last commit, BEFORE
+# ./.loom/scripts/create-pr.sh. Mirrors the CI job "defaults/ Changes
+# Require a VERSION Bump" (.github/workflows/ci.yml) — no PR exists yet at
+# Builder time, so use the merge-base with origin/main as --base instead of
+# a PR base sha.
+MERGE_BASE="$(git merge-base origin/main HEAD)"
+
+# 1. defaults/ surface-vs-VERSION gate. Exit 0 = no defaults/ change, or
+#    VERSION was bumped, or the no-surface-change marker is present; exit 1
+#    = a defaults/ path changed with neither. Since no PR body exists yet,
+#    the marker is only detectable via a commit message here — put
+#    `<!-- loom:no-surface-change -->` in a commit message, not just the
+#    future PR body, if you're relying on it at this step.
+if ! bash defaults/scripts/check-defaults-version-bump.sh --base "$MERGE_BASE" --head HEAD; then
+  echo "BLOCKER: defaults/ changed without a VERSION bump or <!-- loom:no-surface-change --> marker." >&2
+  echo "Fix: ./scripts/version.sh bump patch   (or add the marker to a commit message), then re-run this check." >&2
+  exit 1
+fi
+
+# 2. Catch a version-bearing file that was hand-edited outside
+#    `scripts/version.sh bump`/`set` (the gate above only looks at
+#    defaults/ + VERSION, not the other 5 synced files individually).
+#    `create-pr.sh` also runs this exact check itself (#6730) -- this is a
+#    faster local pre-check, not the only enforcement.
+if ! ./scripts/version.sh check; then
+  echo "BLOCKER: 'scripts/version.sh check' found a version mismatch — see MISMATCH line(s) above." >&2
+  echo "Fix: ./scripts/version.sh bump patch   (re-syncs all version-bearing files), then re-run this check." >&2
+  exit 1
+fi
+
+echo "OK: defaults/ VERSION-bump gate + version.sh check both pass."
+```
+
+**Treat any non-zero exit above as a hard local blocker** — fix it (bump the version or add the marker to a commit message) and re-run the block until it prints the final `OK:` line before calling `create-pr.sh`. Do not proceed on the strength of having merely read the checklist bullet.
 
 ### Step 4: Document Verification in PR Description
 
@@ -767,15 +806,88 @@ When creating a PR, verify:
 9. Commits carry a `Signed-off-by:` trailer if required (`commit.signoff: true` in `.loom/config.json`, or a DCO/`sign-off` check — see "DCO sign-off")
 10. `## Test Plan` includes a `TDD:` line for any diff touching executing code (see "Test-First Discipline" above) — omit only for docs/config/ADR-only changes
 
+### Lease Fencing: Confirm You Still Own the Claim (Epic #6165 Phase 3, #6309)
+
+**Immediately before `git push` + opening the PR** — the one irreversible,
+externally-visible action of this whole Builder run — run the sweep-side
+fencing check:
+
+```bash
+./.loom/scripts/sweep-lease-fence.sh check "$N"
+FENCE_RC=$?
+if [[ "$FENCE_RC" -eq 3 ]]; then
+  echo "Lease fence: EXPIRED — MY OWN claim's lease record is stale on the forge's own clock (my renewal loop died). Aborting before push/PR-open; NOT pushing, NOT opening a PR." >&2
+  # Stop here for issue $N. Do not push, do not create a PR, do not touch
+  # the loom:building label or contest any peer's claim — report this issue
+  # as not-contributed-this-run, same as any other Builder failure marker.
+  # (Issue #6783: exit 3 now means the EXPIRED lease is THIS sweep's own —
+  # an expired lease owned by a DIFFERENT, abandoned host is no longer a
+  # fencing abort; that case is folded into FENCE_RC == 0 below.)
+elif [[ "$FENCE_RC" -eq 4 ]]; then
+  echo "Lease fence: SUPERSEDED — a different host's lease is now the freshest for issue $N. Aborting before push/PR-open; NOT pushing, NOT opening a PR." >&2
+  # Same stop-here handling as the EXPIRED branch above.
+else
+  # FENCE_RC == 0 (fresh & own host, OR no lease evidence to fence against —
+  # fail-open, see the script's own header doc — OR an EXPIRED lease owned
+  # by a DIFFERENT, abandoned host, Issue #6783) -> proceed exactly as
+  # before.
+  git push -u origin "$(git rev-parse --abbrev-ref HEAD)"
+  # ... then open the PR (see "Creating the PR" below) ...
+fi
+```
+
+This is **fencing, not a lock** — it bounds the cost of a race to one wasted
+build, it does not prevent the race (Phase 1, `defaults/docs/lease-renewal.md`,
+keeps the lease alive for the whole run; Phase 2,
+`loom-daemon/src/claim_reconciliation.rs`, is the *daemon's* symmetric check
+before reclaiming a peer's claim). Reads the freshest
+`<!-- loom:lease host=… sweep=… -->` comment on issue `$N` and confirms BOTH:
+the comment is still fresh (`now - updated_at <= LEASE_TTL_MINUTES`, default
+15, override with `--ttl-minutes` or `LOOM_LEASE_TTL_MINUTES`) and its
+`host=` still names **this** host (`--host`, defaulting to this host's own
+identity — same `LOOM_HOST_ID` > `$HOSTNAME` > `hostname` precedence
+`sweep_registry::host_identity()` uses). It aborts (exit `3` = expired-and-
+own-host, `4` = superseded — the two are logged distinctly so a
+post-incident read can tell them apart) **before doing anything
+externally-visible**: no push, no PR. It never contests or cleans up a peer's
+claim — the `loom:building` label is left exactly as-is; that is out of
+scope for this check (see the script's own header doc,
+`defaults/scripts/sweep-lease-fence.sh`). Since #6320 an in-session run
+(manual `/loom:sweep`, GH Actions cron, `--no-daemon`) publishes its own
+lease at pre-flight (`sweep-lease-publish.sh`, sweep.md Step 1b), so this
+check is now meaningful on both dispatch paths rather than only the
+daemon-dispatched one. When there genuinely is no lease comment — a run
+predating those writers, or one whose lease write failed — the check fails
+open (exit `0`), same as every other lease-record reader in this repo treats
+"no lease" as "no evidence", never as "not fresh".
+
+**Issue #6783: an EXPIRED lease owned by a DIFFERENT host now PASSes, not
+aborts.** Exit `3` (EXPIRED) fires only when the freshest lease is stale AND
+belongs to *this sweep's own* host — a sweep whose own renewal loop died
+should not trust its claim. An expired lease belonging to a *different* host
+is an abandoned record, not a live peer, and is now treated as no fencing
+evidence (fail-open, exit `0`) rather than a permanent abort — a dead sweep's
+never-renewed, never-yielded lease would otherwise fence out every successor
+dispatch forever (observed on issue #6694 / PR #6773). Exit `4` (SUPERSEDED
+— a *fresh* lease from a live peer) is unaffected: that case still means a
+live peer genuinely holds the claim.
+
 ### Creating the PR
 
 **Open the PR with `./.loom/scripts/create-pr.sh`, never a bare `gh pr create` (#6074).**
-The flags are a subset of `gh pr create`'s, so the call below reads the same — but two
+The flags are a subset of `gh pr create`'s, so the call below reads the same — but three
 things a bare `gh pr create` cannot do are load-bearing here:
 
 - **It adopts an already-open PR for your branch** (prints that PR's URL, exits 0, creates
   nothing). So if a previous attempt on this issue already pushed and opened a PR, you
   converge on it instead of failing or duplicating.
+- **It re-verifies the target issue's freshness immediately before opening the PR
+  (#6277).** When the body carries a closing keyword (`Closes`/`Fixes`/`Resolves #N`), the
+  script re-checks whether `#N` was already closed by a *different*, already-merged PR — the
+  two-workers-race scenario that otherwise isn't caught until Judge review. On a detected
+  supersede it refuses to open a duplicate PR (names the superseding PR, exits non-zero,
+  does not push further, does not delete the branch). `Part of #N` / `Contributes to #N`
+  partial-increment references are exempt by construction — see "Partial increments" below.
 - **It survives the GitHub App permission window.** A cached App installation token can
   hold `Contents:write` while `Pull-requests:write` has not propagated into it yet, so
   your `git push` succeeds and the very next `gh pr create` returns `403 Resource not

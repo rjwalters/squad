@@ -157,12 +157,37 @@ tail -50 "$LOG"; cat "$LOG.rc" 2>/dev/null
 1. **Batch mode (you have more work to pick up, or the PR is already handed off): do not wait at all — hand off and continue.** Once the PR exists with `loom:review-requested`, verifying CI is **Judge's** gate, not yours. Push, create the PR, state in your final message that CI was still running at hand-off, and move to the next issue. This is the correct default, not a fallback: a later Judge pass re-evaluates once CI settles.
 2. **Single-invocation and a green-CI confirmation is expected before your turn ends: block-poll in the foreground.** Loop **inside this same turn** — `gh pr checks`, `sleep`, repeat — until the checks resolve or you hit an explicit, bounded cap. This is an ordinary shell loop that returns control to you before you write your final message; nothing about it depends on a future turn.
 
+**Empty `gh pr checks` output is NOT proof CI has settled.** `gh pr checks` is
+GraphQL-backed and can return completely empty output (zero rows) during a
+transient forge failure (e.g. an intermittent TLS handshake error) — a state
+indistinguishable from "nothing pending" if your loop condition only greps the
+output for the word "pending" (#6169: a Judge poller on kicad-tools PR #4792
+declared CI "settled" 6 minutes into a ~40-minute run this way). Guard against
+it by asserting a minimum row count before trusting an absence of "pending":
+
 ```bash
 # Foreground block-poll on your own PR's CI — bounded, in-turn.
+# ci_still_pending: true (pending) if any row shows pending/queued/in_progress.
+# A ZERO-ROW read is retried once before being trusted — on a real forge blip
+# the retry almost always returns real rows; only a read that is STILL empty
+# after the retry is treated as "genuinely no checks reported" (not pending).
+ci_still_pending() {
+  local pr="$1" out rows
+  out="$(gh pr checks "$pr" 2>/dev/null)"
+  rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+  if [[ "$rows" -eq 0 ]]; then
+    sleep 3
+    out="$(gh pr checks "$pr" 2>/dev/null)"
+    rows="$(printf '%s\n' "$out" | grep -c $'\t' || true)"
+    [[ "$rows" -eq 0 ]] && return 1   # confirmed empty on retry -- not pending
+  fi
+  printf '%s\n' "$out" | grep -qE "(pending|queued|in_progress)"
+}
+
 MAX_WAIT=1800   # 30 min cap
 INTERVAL=60
 ELAPSED=0
-while gh pr checks <PR_NUMBER> | grep -qE "(pending|queued|in_progress)"; do
+while ci_still_pending <PR_NUMBER>; do
   if [ "$ELAPSED" -ge "$MAX_WAIT" ]; then
     echo "CI still pending after ${MAX_WAIT}s — reporting as unsettled and handing off to Judge."
     break
@@ -292,11 +317,30 @@ PR LIFECYCLE (Builder only creates, Judge/Champion manage):
 
 ## Label Workflow
 
-**IMPORTANT: Ignore External Issues**
+**IMPORTANT: Ignore Hard-Excluded Issues**
 
-- **NEVER work on issues with the `external` label** - these are external suggestions for maintainers only
-- External issues are submitted by non-collaborators and require maintainer approval before being worked on
-- Focus only on issues labeled `loom:issue` without the `external` label
+A **hard exclusion** is a label that takes an issue out of the automated
+pipeline entirely — no role may curate it, build it, or promote it, and the
+daemon's work finder will not dispatch a sweep for it. `external` is the only
+one today: issues submitted by non-collaborators (or auto-labeled by an intake
+workflow) that require maintainer approval before being worked on.
+
+- **NEVER work on a hard-excluded issue** — not even when it also carries
+  `loom:issue`.
+- **The list is not hardcoded here.** Read it from the one shared source,
+  `./.loom/scripts/hard-exclusion-labels.sh` (Issue #7528) — the same list
+  `loom-daemon`'s work finder filters candidates on, so the daemon and this
+  prompt can never disagree about what is excluded:
+
+  ```bash
+  ./.loom/scripts/hard-exclusion-labels.sh            # one label per line
+  ./.loom/scripts/hard-exclusion-labels.sh --jq-not   # a jq select() fragment
+  ```
+
+- **If you find yourself dispatched onto one anyway** (a label added after
+  dispatch, an explicit operator dispatch), decline and exit — do not build it.
+  The daemon records the decline and holds the issue out of dispatch instead of
+  re-offering it next tick (#7528); you do not need to do anything else.
 
 **Workflow**:
 
@@ -411,11 +455,17 @@ back, so a deny there would strand work instead of protecting it.
 
 Neither of these applies to the `check-main-clean.sh --quarantine` recovery
 flow below (§"If it exits 3…") — that flow's use of `git stash` operates on
-the **main checkout** (where the create-side deny deliberately does not fire,
-since there is no per-issue equivalent to redirect to), is single-writer by
-construction (only one agent's mistaken edits land in main at a time), and is
-a distinct, legitimate use case (rescuing contamination, not shelving your own
-WIP).
+the **main checkout** (where the create-side deny deliberately does not fire),
+is single-writer by construction (only one agent's mistaken edits land in main
+at a time), and is a distinct, legitimate use case (rescuing contamination,
+not shelving your own WIP). **Recover a quarantined entry by replaying it into
+the owning issue worktree** — `git stash show -p <ref> | git -C
+.loom/worktrees/issue-<N> apply -` — never by `git stash pop`-ing it back into
+the primary clone: that pop is an unanswerable `stash-scope:main-checkout` ask
+in a headless run, and a successful one just re-contaminates main. If you
+need a *clean baseline* in the primary clone itself, the pair now has a main
+target too: `./.loom/scripts/worktree.sh stash-push main` …
+`stash-pop main` (#6076).
 
 ## CRITICAL: Never Work on Main Branch
 
@@ -555,7 +605,7 @@ rewriting the main checkout's installed copies, not for a Builder mid-issue.
 (A separate `--output <dir>` staging mode, #6106, exists for an operator who
 needs a complete resync generated safely while the fleet is live — it is also
 not for a Builder mid-issue: see
-[`.loom/docs/troubleshooting.md`](.loom/docs/troubleshooting.md) if you land
+`.loom/docs/troubleshooting.md` if you land
 here as the human operator rather than a Builder subagent.)
 
 ### Working with gh CLI from a Worktree
@@ -610,6 +660,8 @@ The marker file should contain a brief explanation of why no changes are needed.
 **IMPORTANT: Do NOT commit the marker file.** Leave it as an untracked file in the worktree. Sweep orchestration checks for the marker file on disk — if you `git add` and commit it, the commit shows as work done and defeats the detection mechanism.
 
 **Why this matters:** Without this marker file, sweep orchestration cannot distinguish between "builder deliberately decided no changes are needed" and "builder crashed/was killed before doing anything." An empty worktree without the marker is treated as a builder failure, not a deliberate decision.
+
+**What sweep orchestration does with it:** on your exit, `/loom:sweep`'s Builder phase checks for this marker before treating a PR-less exit as a failure (see `sweep.md` → "Genuine no-op conclusion vs. builder failure", #6670/#6740) — it records a self-reported no-op release (`loom-daemon noop-cooldown record`, via `./.loom/scripts/record-noop-release.sh`) so the work finder does not immediately re-offer the same issue, then releases your `loom:building` claim back to `loom:issue` without closing it. You do not need to do any of that yourself — writing the marker and exiting is your entire responsibility here.
 
 **Do NOT create this file if:**
 - You made code changes (even if you later reverted them)
@@ -683,7 +735,7 @@ Before claiming, check for these warning signs:
 
 Curator guidance requires volatile facts (counts, version numbers, file/line references, "no X is needed" claims) to carry an "as of `<sha/date>`" stamp — e.g. `"24 verbs as of \`289be45\`, 2026-08-04"` rather than a bare `"24 verbs"` (see `curator.md` → "Date-stamp volatile facts"). Treat that stamp as a **prompt to re-verify**, not a substitute for verification — a fact that was true "as of" curation time can already be stale by the time you implement, especially in a repo with several concurrently active worktrees.
 
-**Before acting on a stamped fact whose value is embedded directly in an acceptance criterion's output** — e.g. "CHANGELOG lists 13 new verbs", "no schema_version bump needed" — re-derive it against the current tree first: re-run the same grep/count/check the curator used, don't just eyeball the date and move on. This matters most when the action you're about to take **can't be undone** (a version bump, a tag push, a publish, an external API write): a stale count baked into a permanent artifact cannot be un-shipped afterward. This guards against exactly the failure in 2AMLogic/klayout-tools#342 — a correctly-curated verb count and a "no bump needed" claim both went stale within two days, ahead of an irrevocable PyPI publish.
+**Before acting on a stamped fact whose value is embedded directly in an acceptance criterion's output** — e.g. "CHANGELOG lists 13 new verbs", "no schema_version bump needed" — re-derive it against the current tree first: re-run the same grep/count/check the curator used, don't just eyeball the date and move on. This matters most when the action you're about to take **can't be undone** (a version bump, a tag push, a publish, an external API write): a stale count baked into a permanent artifact cannot be un-shipped afterward. This guards against exactly the failure in example-org/tool-repo#203 — a correctly-curated verb count and a "no bump needed" claim both went stale within two days, ahead of an irrevocable PyPI publish.
 
 If re-verification finds the stamped fact has drifted, update the acceptance criterion / your PR description to match the current tree (and note the discrepancy) rather than silently completing the original wording.
 
@@ -1018,9 +1070,12 @@ gh issue list --label="loom:issue" --label="loom:curated" --state=open --limit=1
 **Step 3: If no curated, fall back to approved-only issues**
 
 ```bash
+# #7528: the hard-exclusion fragment comes from the shared source, never a
+# hardcoded `external` literal. Note the DOUBLE-quoted --jq so $EXCL expands.
+EXCL="$(./.loom/scripts/hard-exclusion-labels.sh --jq-not)"
 gh issue list --label="loom:issue" --state=open --json number,title,labels \
-  --jq '.[] | select(([.labels[].name] | contains(["loom:curated"]) | not) and ([.labels[].name] | contains(["external"]) | not)) |
-  "#\(.number): \(.title)"'
+  --jq ".[] | select(([.labels[].name] | contains([\"loom:curated\"]) | not) and $EXCL) |
+  \"#\(.number): \(.title)\""
 ```
 
 **Why allow this**: Work can proceed even if Curator hasn't run yet. Builder can implement based on human approval alone if needed.
@@ -1044,6 +1099,66 @@ For additional PR quality guidelines, see **builder-pr.md**.
 - Run the project's check command (see `buildGate.command` in `.loom/config.json`, or the repo's documented CI command, e.g. `pnpm check:ci`) before creating PR
 - **Run the project's formatter + linter on your changed files before committing** — discover the commands from repo convention (`buildGate.command`, `CONTRIBUTING.md`, CI workflow, or the language's standard tool, e.g. `ruff format`/`ruff check` for Python, `cargo fmt`/`cargo clippy` for Rust). A format-only CI failure is a **guaranteed Judge rejection** that costs a full Doctor cycle for a one-command fix — see **builder-pr.md § "Format and Lint Changed Files"**
 - **Test-first discipline, for behavior changes**: write the failing test (or bug-reproducing test) before the fix, confirm it fails for the right reason, then implement to green. Record a `TDD:` line in the PR's Test Plan section — Judge re-verifies it against the diff, not just your say-so. Full requirement, format, and advisory/blocking rules: **builder-pr.md § "Test-First Discipline (TDD line)"** (ADR-0015).
+
+### Live Verification You Cannot Perform: Say So, Don't Claim It
+
+Some acceptance criteria can only be satisfied by **live** behavior — driving a
+real browser, scraping a remote page, parsing DOM the project does not itself
+produce, hitting a rate-limited or credentialed endpoint, exercising hardware.
+Your worktree often cannot do that: the debug browser is behind a shared mutex,
+the credential is the operator's, the endpoint is unreachable from the sweep host.
+
+**When a live check is impossible in your own worktree/environment, the PR body
+MUST say so explicitly and link the tracking / live-verification issue.** Never
+tick an acceptance criterion that requires live behavior — never write
+"verified", "works", or "manually tested" for it — on the strength of an offline
+fixture alone.
+
+State it in the PR's `## Test Plan` (or `## Acceptance Criteria Verification`)
+section, in this shape:
+
+```markdown
+**Live verification NOT performed.** Criterion "<the live criterion>" requires
+<the live resource: shared debug Chrome behind the browser mutex / production
+credential / rate-limited endpoint>, which is unavailable in this worktree.
+Offline evidence attached below covers <what it actually covers>; it does NOT
+establish live behavior. Live verification tracked in #<N>.
+```
+
+If no tracking issue exists yet, **file one** (`./.loom/scripts/create-issue.sh`)
+describing the live run someone with the resource must perform, and link it —
+this is the pattern walters-family-tree #375 followed informally.
+
+**Do not build a circular fixture and present it as live evidence.** If your test
+constructs *both* sides of a merge/join/comparison from the **same** saved
+payload, it only proves the two halves agree — the real page parser never meets
+the page's own output, so the test cannot fail on the defects that actually
+occur live. Where you can, capture a real response once and run the **real**
+page-parsing function over it to produce the page side of the merge; where you
+cannot, say the fixture is offline-only rather than implying it is live-equivalent.
+Judge treats an undisclosed circular fixture as **blocking** (`judge.md` → "Live
+Verification and the Circular-Fixture Smell") — on browser-driving / scraper /
+DOM-parsing code, **and, since #6883, on any PR whose linked issue reports an "X
+was silently dropped / missed / not observed" failure**, where the same smell
+also covers a fixture whose external-source payload you hand-synthesized instead
+of capturing. So an honest disclosure costs you nothing and a silent claim costs
+a full review cycle.
+
+**If your issue's acceptance criteria name a live-source, real-run, or
+over-time step, that line is close-blocking (#6883).** Champion will hold the
+issue open after your PR merges unless someone posts a comment saying what was
+run and what was observed, ending with `<!-- loom:ac-verified sha=<head> -->`.
+If you performed the step, post that comment and stamp it; if you could not,
+disclose that (above) and leave the marker off — never stamp a step you did not
+perform. Full convention: `champion-pr-merge.md` → "Out-of-Band
+Acceptance-Criteria Gate".
+
+**Precedent**: walters-family-tree PR #371 was a browser-driving catalogue
+scraper verified offline only, with every fixture circular. Its first live run
+surfaced three separate defects (a settle that fired before the table hydrated;
+a hard-coded `catalogs[0]` plus a double-counted mirrored table; a zero-padded
+page ID that never matched the unpadded data ID), each needing its own fix
+round — none of which any offline fixture could have caught.
 
 ### MANDATORY: Derive Titles From Your Diff, Not the Issue
 
@@ -1110,6 +1225,12 @@ here; follow it there.
 
 ### Creating the PR
 
+**Immediately before `git push` + opening the PR, run the lease fencing
+check** — `./.loom/scripts/sweep-lease-fence.sh check "$N"` — and abort (no
+push, no PR) on exit `3`/`4` (expired / superseded lease). Canonical guidance
+in **builder-pr.md § "Lease Fencing: Confirm You Still Own the Claim" (Epic
+#6165 Phase 3, #6309)**.
+
 **Open the PR with `./.loom/scripts/create-pr.sh`, never a bare `gh pr create`
 (#6074)** — it adopts an already-open PR for your branch and rides through the
 GitHub App permission window that otherwise 403s the create *after* your push
@@ -1139,7 +1260,7 @@ merged by Champion using `./.loom/scripts/merge-pr.sh` — never use `gh pr merg
 
 Before claiming:
 - [ ] Issue has `loom:issue` label? (or explicit user override)
-- [ ] Issue does NOT have `external` label?
+- [ ] Issue does NOT carry a hard-exclusion label? (`./.loom/scripts/hard-exclusion-labels.sh` — #7528)
 
 When claiming:
 - [ ] Remove `loom:issue`

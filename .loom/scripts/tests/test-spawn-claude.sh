@@ -155,6 +155,40 @@ assert_eq "TOKEN_EXPIRED" "$result" "'401 Invalid bearer token' -> TOKEN_EXPIRED
 result=$(classify_error "invalid bearer token" 1)
 assert_eq "TOKEN_EXPIRED" "$result" "'invalid bearer token' (no leading 401) -> TOKEN_EXPIRED (#6030)"
 
+# Vector #9d (issue #6424): "organization has disabled Claude subscription
+# access" — an account-level billing/authorization death fell through to
+# RECOVERABLE (37/43 permanent deaths on one incident host carried this exact
+# line) because none of the pre-#6424 patterns matched it. Folded into
+# TOKEN_EXPIRED (same remedy: mark bad, rotate, needs human re-authorization).
+result=$(classify_error "Your organization has disabled Claude subscription access for Claude Code · Use an Anthropic API key instead, or ask your admin to enable access" 1)
+assert_eq "TOKEN_EXPIRED" "$result" "'organization has disabled ...' -> TOKEN_EXPIRED (#6424)"
+
+# Vector #9e (issue #6424): the sibling death-tail from the same incident (the
+# other 6/43 permanent deaths) — "Failed to authenticate. API Error: 403 The
+# socket connection was closed unexpectedly".
+result=$(classify_error "Failed to authenticate. API Error: 403 The socket connection was closed unexpectedly" 1)
+assert_eq "TOKEN_EXPIRED" "$result" "'Failed to authenticate ... socket connection was closed unexpectedly' -> TOKEN_EXPIRED (#6424)"
+
+# Vector #9f (issue #6424, negative case): a bare, unrelated socket-closed
+# network blip — with no "failed to authenticate" wording — must NOT be swept
+# into this terminal, account-marked-bad branch. It stays RECOVERABLE via the
+# generic network-error checks (or the catch-all).
+result=$(classify_error "socket connection was closed unexpectedly" 1)
+assert_eq "RECOVERABLE" "$result" "bare 'socket connection was closed unexpectedly' (no auth wording) stays RECOVERABLE (#6424 negative case)"
+
+# Vector #9g (issue #6614): a token REVOKED mid-flight. The verbatim death-tail
+# wraps the auth error in a JSON envelope, which the `401[^a-z]*
+# authentication_error` pattern cannot bridge (`[^a-z]*` excludes the letters in
+# `{"type":"`), and nothing matched "revoked" — so this fell through to
+# RECOVERABLE and the wrapper retried the SAME revoked credential 5 times.
+result=$(classify_error 'Failed to authenticate. API Error: 401 {"type":"authentication_error","message":"OAuth access token has been revoked."}' 1)
+assert_eq "TOKEN_EXPIRED" "$result" "revoked-token JSON 401 -> TOKEN_EXPIRED (#6614)"
+
+# Vector #9h (issue #6614, negative case): "revoked" alone, with no "token"
+# before the verb, must NOT mark an account permanently bad.
+result=$(classify_error "The reviewer revoked their approval" 1)
+assert_eq "RECOVERABLE" "$result" "a non-token 'revoked' stays RECOVERABLE (#6614 negative case)"
+
 # Vector #10: hit your limit → TOKEN_EXHAUSTED
 result=$(classify_error "You've hit your limit" 1)
 assert_eq "TOKEN_EXHAUSTED" "$result" "hit your limit -> TOKEN_EXHAUSTED"
@@ -471,6 +505,7 @@ cat > "$STUB_DIR/claude" <<'STUB'
 echo "stub-claude got token=${CLAUDE_CODE_OAUTH_TOKEN}"
 echo "stub-claude args=$*"
 echo "stub-claude ceiling=${CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS:-unset}"
+echo "stub-claude headless=${LOOM_HEADLESS_SESSION:-unset}"
 exit 0
 STUB
 chmod +x "$STUB_DIR/claude"
@@ -548,6 +583,36 @@ assert_contains "stub-claude args=-p /loom:sweep 4111 --claim-owned 4111 --dange
     "spawn-claude forwards the -p prompt (with embedded --claim-owned) verbatim to claude (#4111/#4120)"
 assert_contains "spawn-claude: LOOM_SWEEP_CLAIM_OWNED=4111" "$output" \
     "spawn-claude still logs the env var when the --claim-owned flag is also present (#4111 backward compat)"
+
+# ------------------------------------------------------------------
+# Headless-session marker for the Stop guard (issue #6645)
+#
+# `guard-background-subagents.sh` must block a stop that would orphan a
+# background child in headless `-p` mode, and must NOT block it in an
+# interactive session (where children survive the turn boundary). This marker
+# is the Loom-owned signal it reads. It is set ONLY for print mode: marking an
+# interactive session headless would reintroduce exactly the friction #6645
+# removes, and is therefore asserted as its own negative case.
+#
+# Every case below strips an ambient LOOM_HEADLESS_SESSION with `env -u`: this
+# suite may itself be running inside a headless sweep whose own wrapper already
+# exported the marker, which would otherwise leak in and make the negative case
+# pass for the wrong reason (same hazard as LOOM_SWEEP_CLAIM_OWNED above).
+# ------------------------------------------------------------------
+output=$(env -u LOOM_HEADLESS_SESSION LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" \
+    PATH="$STUB_DIR:$PATH" "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "stub-claude headless=1" "$output" \
+    "spawn-claude exports LOOM_HEADLESS_SESSION=1 for a -p spawn (#6645)"
+
+output=$(env -u LOOM_HEADLESS_SESSION LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" \
+    PATH="$STUB_DIR:$PATH" "$SCRIPTS_DIR/spawn-claude.sh" --print "ping" 2>&1 || true)
+assert_contains "stub-claude headless=1" "$output" \
+    "spawn-claude exports LOOM_HEADLESS_SESSION=1 for a --print spawn (#6645)"
+
+output=$(env -u LOOM_HEADLESS_SESSION LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" \
+    PATH="$STUB_DIR:$PATH" "$SCRIPTS_DIR/spawn-claude.sh" --dangerously-skip-permissions 2>&1 || true)
+assert_contains "stub-claude headless=unset" "$output" \
+    "spawn-claude leaves an interactive (no -p/--print) spawn UNMARKED (#6645)"
 
 # Test: explicit CLAUDE_CODE_OAUTH_TOKEN bypasses selection
 output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$STUB_DIR:$PATH" \
@@ -1703,6 +1768,232 @@ rm -rf "$PROBE_DIR"
 rm -rf "$CPU_DIR"
 
 # ============================================================
+# Section 7d: host-sleep prevention wrap (issue #6311)
+#
+# `host.preventSleep` (env override `LOOM_HOST_PREVENT_SLEEP`) self-wraps the
+# final exec in `systemd-inhibit --what=idle:sleep --who=loom --why=<role>`,
+# mirroring the CPU-quota mechanism's fake-`systemd-run`-on-PATH test style
+# (Section 7b above) with a fake `systemd-inhibit` instead.
+# ============================================================
+
+echo ""
+echo "Testing spawn-claude.sh host-sleep prevention (#6311)..."
+
+SLEEP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TEST_WS" "$STUB_DIR" "$SLEEP_DIR"' EXIT
+
+cat > "$SLEEP_DIR/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "stub-claude ran, args=$*"
+STUB
+chmod +x "$SLEEP_DIR/claude"
+
+SLEEP_INHIBIT_LOG="$SLEEP_DIR/systemd-inhibit.log"
+cat > "$SLEEP_DIR/systemd-inhibit" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$SLEEP_INHIBIT_LOG"
+args=("\$@")
+skip=0
+for ((i = 0; i < \${#args[@]}; i++)); do
+    if [[ "\${args[i]}" == "--" ]]; then
+        skip=\$((i + 1))
+        break
+    fi
+done
+exec "\${args[@]:skip}"
+STUB
+chmod +x "$SLEEP_DIR/systemd-inhibit"
+
+# Test: absent config -> no wrap at all, systemd-inhibit never invoked even
+# though it is on PATH (byte-for-byte pre-#6311 default behavior).
+rm -f "$TEST_WS/.loom/config.json"
+: > "$SLEEP_INHIBIT_LOG"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$SLEEP_DIR:$PATH" \
+    env -u LOOM_HOST_PREVENT_SLEEP LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "stub-claude ran" "$output" \
+    "absent host.preventSleep: the spawn still runs (#6311)"
+assert_eq "" "$(cat "$SLEEP_INHIBIT_LOG" 2>/dev/null)" \
+    "absent host.preventSleep: systemd-inhibit is never invoked (#6311)"
+
+# Test: host.preventSleep=true wraps the final exec in systemd-inhibit,
+# `--why=` set from $LOOM_ROLE.
+echo '{"host": {"preventSleep": true}}' > "$TEST_WS/.loom/config.json"
+: > "$SLEEP_INHIBIT_LOG"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$SLEEP_DIR:$PATH" \
+    LOOM_ROLE=sweep-lifecycle LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "wrapping this spawn in systemd-inhibit" "$output" \
+    "host.preventSleep=true: spawn-claude logs the wrap (#6311)"
+assert_contains "stub-claude ran" "$output" \
+    "host.preventSleep=true: the wrapped stub claude still runs (#6311)"
+sleep_inhibit_log="$(cat "$SLEEP_INHIBIT_LOG" 2>/dev/null)"
+assert_contains "--what=idle:sleep --who=loom --why=sweep-lifecycle" "$sleep_inhibit_log" \
+    "systemd-inhibit is invoked with --why=\$LOOM_ROLE (#6311)"
+
+# Test: LOOM_HOST_PREVENT_SLEEP=0 env override wins over config true.
+: > "$SLEEP_INHIBIT_LOG"
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$SLEEP_DIR:$PATH" \
+    LOOM_HOST_PREVENT_SLEEP=0 LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_eq "" "$(cat "$SLEEP_INHIBIT_LOG" 2>/dev/null)" \
+    "LOOM_HOST_PREVENT_SLEEP=0 env override wins over host.preventSleep=true config (#6311)"
+
+# Test: a failing systemd-inhibit probe (e.g. no reachable systemd-logind)
+# degrades to advisory-only rather than a hard failure -- mirrors the CPU-
+# quota mechanism's own failing-probe test above. A dedicated dir with ONLY
+# an always-failing `systemd-inhibit` (plus `claude`) makes "the probe was
+# attempted and failed" the sole path to this outcome, unlike PATH-absence
+# (which this sandbox's real systemd-inhibit could silently satisfy instead).
+FAIL_SLEEP_DIR="$(mktemp -d)"
+cat > "$FAIL_SLEEP_DIR/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "stub-claude ran, args=$*"
+STUB
+chmod +x "$FAIL_SLEEP_DIR/claude"
+cat > "$FAIL_SLEEP_DIR/systemd-inhibit" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+chmod +x "$FAIL_SLEEP_DIR/systemd-inhibit"
+
+output=$(LOOM_WORKSPACE="$TEST_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$FAIL_SLEEP_DIR:$PATH" \
+    LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "systemd-inhibit probe failed" "$output" \
+    "host.preventSleep=true with a failing systemd-inhibit probe: logs advisory-only (#6311)"
+assert_contains "stub-claude ran" "$output" \
+    "host.preventSleep=true with a failing systemd-inhibit probe: the spawn still completes unwrapped (#6311)"
+rm -rf "$FAIL_SLEEP_DIR"
+
+rm -f "$TEST_WS/.loom/config.json"
+rm -rf "$SLEEP_DIR"
+
+# ============================================================
+# Section 7e: containerized dispatch mode (issue #7429, epic #6896 Phase 3)
+#
+# `runtimes.containment.enabled` (env override `LOOM_SWEEP_CONTAINERIZED`)
+# re-execs spawn-claude.sh itself inside `docker run <image>
+# <workspace>/.loom/scripts/spawn-claude.sh <args>`. The docker stub below
+# mimics real `docker run`'s behavior for `-e VAR` (no `=value`): it just
+# `exec`s the trailing command in THIS shell's own environment, which is
+# enough to prove BOTH the constructed command shape (path-parity mount,
+# image, recursion target) and that the recursed invocation still reaches a
+# real `claude` stub with token selection and args intact — mirroring the
+# host's own `.loom/scripts -> ../defaults/scripts` symlink convention so
+# `$CONTAIN_WS/.loom/scripts/spawn-claude.sh` resolves to the SAME script
+# under test.
+# ============================================================
+
+echo ""
+echo "Testing spawn-claude.sh containerized dispatch mode (#7429)..."
+
+CONTAIN_WS="$(mktemp -d)"
+mkdir -p "$CONTAIN_WS/.loom/tokens"
+chmod 700 "$CONTAIN_WS/.loom/tokens"
+echo -n "fake-token-contain" > "$CONTAIN_WS/.loom/tokens/contain.token"
+chmod 600 "$CONTAIN_WS/.loom/tokens/contain.token"
+ln -s "$SCRIPTS_DIR" "$CONTAIN_WS/.loom/scripts"
+
+CONTAIN_STUB_DIR="$(mktemp -d)"
+trap 'rm -rf "$TEST_WS" "$STUB_DIR" "$CONTAIN_WS" "$CONTAIN_STUB_DIR"' EXIT
+cat > "$CONTAIN_STUB_DIR/claude" <<'STUB'
+#!/usr/bin/env bash
+echo "stub-claude ran, args=$*"
+STUB
+chmod +x "$CONTAIN_STUB_DIR/claude"
+
+DOCKER_LOG="$CONTAIN_STUB_DIR/docker.log"
+cat > "$CONTAIN_STUB_DIR/docker" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$DOCKER_LOG"
+args=("\$@")
+i=0
+[[ "\${args[i]:-}" == "run" ]] && i=\$((i + 1))
+[[ "\${args[i]:-}" == "--rm" ]] && i=\$((i + 1))
+while true; do
+    case "\${args[i]:-}" in
+        -v | --label) i=\$((i + 2)) ;;
+        -w) i=\$((i + 2)) ;;
+        -e)
+            # Real \`docker run -e KEY=VALUE\` seeds the container's initial
+            # env with that literal value; \`-e KEY\` (bare, no \`=\`) instead
+            # forwards whatever value the docker CLIENT's own env already
+            # has. This stub does not really isolate a container -- it just
+            # execs the trailing command in THIS shell -- so it must actually
+            # \`export\` a KEY=VALUE pair to reproduce that seeding; a bare
+            # KEY needs no action since it is already inherited. Without
+            # this, \`-e LOOM_SPAWN_CONTAINERIZED=1\` (the recursion guard)
+            # would never actually take effect and the recursed
+            # spawn-claude.sh would re-enter containment mode forever.
+            _val="\${args[i+1]:-}"
+            case "\$_val" in
+                *=*) export "\$_val" ;;
+            esac
+            i=\$((i + 2))
+            ;;
+        *) break ;;
+    esac
+done
+i=\$((i + 1)) # skip the image name
+exec "\${args[@]:i}"
+STUB
+chmod +x "$CONTAIN_STUB_DIR/docker"
+
+# Test: default (no config, no env override) -> containment stays disabled,
+# docker is never invoked (byte-for-byte pre-#7429 default behavior).
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    env -u LOOM_SWEEP_CONTAINERIZED LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "stub-claude ran" "$output" \
+    "containment disabled by default: the spawn still runs directly (#7429)"
+assert_eq "" "$(cat "$DOCKER_LOG" 2>/dev/null)" \
+    "containment disabled by default: docker is never invoked (#7429)"
+
+# Test: runtimes.containment.enabled=true wraps the spawn in `docker run`,
+# under the path-parity mount contract, defaulting to the loom-worker image,
+# and re-execs spawn-claude.sh itself as the containerized command — the
+# recursed invocation (simulated by the stub's exec-through) still reaches
+# the claude stub with its args intact.
+echo '{"runtimes": {"containment": {"enabled": true}}}' > "$CONTAIN_WS/.loom/config.json"
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_contains "containerized dispatch ENABLED" "$output" \
+    "runtimes.containment.enabled=true: spawn-claude logs the containment decision (#7429)"
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "-v $CONTAIN_WS:$CONTAIN_WS" "$docker_log" \
+    "containerized dispatch: workspace mounted at path parity (MOUNT-CONTRACT.md §1, #7429)"
+assert_contains "ghcr.io/rjwalters/loom-worker:latest" "$docker_log" \
+    "containerized dispatch: defaults to the ghcr.io/rjwalters/loom-worker image (#7429)"
+assert_contains "$CONTAIN_WS/.loom/scripts/spawn-claude.sh" "$docker_log" \
+    "containerized dispatch: re-execs spawn-claude.sh itself as the containerized command (#7429)"
+assert_contains "stub-claude ran, args=-p ping" "$output" \
+    "containerized dispatch: the recursed invocation still reaches the claude stub with args intact (#7429)"
+
+# Test: LOOM_SWEEP_CONTAINERIZED=0 env override wins over config true.
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CONTAINERIZED=0 LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+assert_eq "" "$(cat "$DOCKER_LOG" 2>/dev/null)" \
+    "LOOM_SWEEP_CONTAINERIZED=0 env override wins over runtimes.containment.enabled=true config (#7429)"
+
+# Test: LOOM_SWEEP_CONTAINER_IMAGE overrides the image.
+: > "$DOCKER_LOG"
+output=$(LOOM_WORKSPACE="$CONTAIN_WS" LOOM_DAEMON_BIN="$DAEMON_BIN" PATH="$CONTAIN_STUB_DIR:$PATH" \
+    LOOM_SWEEP_CONTAINER_IMAGE="ghcr.io/example/custom-worker:1.2.3" LOOM_SWEEP_CPU_QUOTA=0 \
+    "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" 2>&1 || true)
+docker_log="$(cat "$DOCKER_LOG" 2>/dev/null)"
+assert_contains "ghcr.io/example/custom-worker:1.2.3" "$docker_log" \
+    "LOOM_SWEEP_CONTAINER_IMAGE overrides the containerized image (#7429)"
+
+rm -f "$CONTAIN_WS/.loom/config.json"
+rm -rf "$CONTAIN_WS" "$CONTAIN_STUB_DIR"
+
+# ============================================================
 # Section 8: claude-wrapper.sh `Execution error` retry + permanent-death
 #            diagnostics (issue #4255)
 #
@@ -1780,6 +2071,43 @@ line two
 Execution error" "max retries (2) exceeded" 2>&1
 DRIVER
 ee_death=$(WRAPPER="$WRAPPER" bash "$EE_DIR/death-driver.sh" 2>&1)
+# --- Unit: export_headless_session_marker() (issue #6645) -------------------
+#
+# The daemon spawns claude-wrapper.sh DIRECTLY (verified live: the process
+# chain is loom-daemon -> claude-wrapper.sh -p ... -> claude -p ...), never via
+# spawn-claude.sh, so the wrapper needs its own copy of the print-mode marker
+# the Stop guard reads. Driven through the SOURCE_ONLY seam because `main`
+# itself runs the full pre-flight.
+cat > "$EE_DIR/headless-driver.sh" <<'DRIVER'
+#!/usr/bin/env bash
+CLAUDE_WRAPPER_SOURCE_ONLY=1 source "$WRAPPER"
+set +e
+run_case() {
+    local label="$1"; shift
+    (
+        unset LOOM_HEADLESS_SESSION
+        export_headless_session_marker "$@" >/dev/null 2>&1
+        echo "${label}=${LOOM_HEADLESS_SESSION:-unset}"
+    )
+}
+run_case PRINT_SHORT -p "/loom:sweep 1"
+run_case PRINT_LONG --print "/loom:sweep 1"
+run_case PRINT_EQ --print=text "/loom:sweep 1"
+run_case INTERACTIVE --dangerously-skip-permissions "/loom:judge 1"
+run_case NOARGS
+DRIVER
+ee_headless=$(WRAPPER="$WRAPPER" bash "$EE_DIR/headless-driver.sh" 2>&1)
+assert_contains "PRINT_SHORT=1" "$ee_headless" \
+    "claude-wrapper exports LOOM_HEADLESS_SESSION=1 for -p (#6645)"
+assert_contains "PRINT_LONG=1" "$ee_headless" \
+    "claude-wrapper exports LOOM_HEADLESS_SESSION=1 for --print (#6645)"
+assert_contains "PRINT_EQ=1" "$ee_headless" \
+    "claude-wrapper exports LOOM_HEADLESS_SESSION=1 for --print=<fmt> (#6645)"
+assert_contains "INTERACTIVE=unset" "$ee_headless" \
+    "claude-wrapper leaves a slash-command (script -q, interactive) run UNMARKED (#6645)"
+assert_contains "NOARGS=unset" "$ee_headless" \
+    "claude-wrapper leaves an argument-less run UNMARKED (#6645)"
+
 assert_contains "permanent death (max retries (2) exceeded)" "$ee_death" \
     "log_permanent_death labels the reason (#4255)"
 assert_contains "exit_code=42" "$ee_death" \
@@ -2157,8 +2485,141 @@ STUB
       echo -e "  ${RED}FAIL${NC}: auth-dead whole-pool exhaustion exits non-zero (#6030)"
   fi
 
-  rm -rf "$AD_WS" "$AD_STUB" "$AD_WS2" "$AD_STUB2"
+  # --- #6614: a REVOKED token (JSON 401 envelope) is token-fatal on the FIRST
+  # occurrence — ZERO additional CLI invocations against the same credential.
+  #
+  # This is the end-to-end half of the classify-error fix: the incident had the
+  # wrapper burn all 5 retries against one revoked token because the JSON
+  # envelope defeated the TOKEN_EXPIRED regex. The stub counts invocations per
+  # token, so "retried the same dead token" is asserted as a COUNT (exactly 1),
+  # not merely inferred from the exit code.
+  AD_WS3="$(mktemp -d)"
+  mkdir -p "$AD_WS3/.loom/tokens"
+  chmod 700 "$AD_WS3/.loom/tokens"
+  printf '%s' "tok-alpha" > "$AD_WS3/.loom/tokens/alpha.token"
+  printf '%s' "tok-beta"  > "$AD_WS3/.loom/tokens/beta.token"
+  chmod 600 "$AD_WS3/.loom/tokens/"*.token
+
+  AD_CALLS3="$(mktemp)"
+  AD_STUB3="$(mktemp -d)"
+  cat > "$AD_STUB3/claude" <<STUB
+#!/usr/bin/env bash
+case " \$* " in
+  *" -p "*) ;;
+  *) exit 0 ;;
+esac
+printf '%s\n' "\${CLAUDE_CODE_OAUTH_TOKEN}" >> "$AD_CALLS3"
+if [[ "\${CLAUDE_CODE_OAUTH_TOKEN}" == "tok-alpha" ]]; then
+    echo 'Failed to authenticate. API Error: 401 {"type":"authentication_error","message":"OAuth access token has been revoked."}'
+    exit 1
 fi
+echo "stub-claude success on token=\${CLAUDE_CODE_OAUTH_TOKEN}"
+exit 0
+STUB
+  chmod +x "$AD_STUB3/claude"
+
+  # MAX_RETRIES=5 (the production default) on purpose: the pre-fix behavior
+  # burned all five against tok-alpha. Post-fix it must be used exactly once.
+  set +e
+  ad3_out=$(
+    LOOM_WORKSPACE="$AD_WS3" \
+    LOOM_TOKEN_NAME="alpha" \
+    CLAUDE_CODE_OAUTH_TOKEN="tok-alpha" \
+    LOOM_DAEMON_BIN="$DAEMON_BIN" \
+    LOOM_MAX_RETRIES=5 \
+    LOOM_INITIAL_WAIT=1 \
+    LOOM_SHEPHERD_TASK_ID="test-revoked-token" \
+    LOOM_STARTUP_MONITOR_WINDOW=1 \
+    PATH="$AD_STUB3:$PATH" \
+    bash "$WRAPPER" -p "ping" 2>&1
+  )
+  ad3_rc=$?
+  set -e
+
+  ad3_alpha_calls=$(grep -c '^tok-alpha$' "$AD_CALLS3" 2>/dev/null || echo 0)
+  assert_eq "1" "$ad3_alpha_calls" \
+      "a revoked-token 401 is fatal on FIRST occurrence: exactly 1 CLI call on the revoked token, zero retries (#6614)"
+  assert_contains "stub-claude success on token=tok-beta" "$ad3_out" \
+      "wrapper rotates off the revoked token and succeeds on the next account (#6614)"
+  assert_eq "0" "$ad3_rc" \
+      "wrapper exits 0 after revoked-token rotation (#6614)"
+
+  ad3_bad_file="$AD_WS3/.loom/tokens/.bad_tokens"
+  TESTS_RUN=$((TESTS_RUN + 1))
+  if [[ -f "$ad3_bad_file" ]] && grep "alpha" "$ad3_bad_file" | grep -q "auth-dead:"; then
+      TESTS_PASSED=$((TESTS_PASSED + 1))
+      echo -e "  ${GREEN}PASS${NC}: revoked token is marked bad with an 'auth-dead:' reason (#6614)"
+  else
+      TESTS_FAILED=$((TESTS_FAILED + 1))
+      echo -e "  ${RED}FAIL${NC}: revoked token is marked bad with an 'auth-dead:' reason (#6614)"
+      echo "    .bad_tokens: $(cat "$ad3_bad_file" 2>/dev/null || echo '<missing>')"
+  fi
+
+  rm -rf "$AD_WS" "$AD_STUB" "$AD_WS2" "$AD_STUB2" "$AD_WS3" "$AD_STUB3" "$AD_CALLS3"
+fi
+
+# ============================================================
+# Section 9: account-provider resolution from the runtime manifest
+#            (issue #5609, design D8)
+# ============================================================
+
+echo ""
+echo "Testing spawn-claude.sh account-provider resolution from the runtime manifest..."
+
+PROVIDER_WS="$(mktemp -d)"
+mkdir -p "$PROVIDER_WS/.loom/tokens" "$PROVIDER_WS/.loom/runtimes"
+chmod 700 "$PROVIDER_WS/.loom/tokens"
+echo -n "fake-token" > "$PROVIDER_WS/.loom/tokens/only.token"
+chmod 600 "$PROVIDER_WS/.loom/tokens/only.token"
+
+PROVIDER_ARGV_LOG="$(mktemp)"
+PROVIDER_STUB_DIR="$(mktemp -d)"
+cat > "$PROVIDER_STUB_DIR/loom-daemon" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "tokens" && "\$2" == "select" ]]; then
+    printf '%s\n' "\$*" >> "$PROVIDER_ARGV_LOG"
+fi
+exec "$DAEMON_BIN" "\$@"
+STUB
+chmod +x "$PROVIDER_STUB_DIR/loom-daemon"
+
+run_provider_select() {
+    : > "$PROVIDER_ARGV_LOG"
+    LOOM_WORKSPACE="$PROVIDER_WS" LOOM_DAEMON_BIN="$PROVIDER_STUB_DIR/loom-daemon" \
+        PATH="$STUB_DIR:$PATH" \
+        "$SCRIPTS_DIR/spawn-claude.sh" -p "ping" >/dev/null 2>&1 || true
+    cat "$PROVIDER_ARGV_LOG"
+}
+
+if command -v jq >/dev/null 2>&1; then
+    # No runtime manifest at all -> the clap default (claude) still applies.
+    rm -f "$PROVIDER_WS/.loom/runtimes/claude.json"
+    argv="$(run_provider_select)"
+    assert_contains "--provider claude" "$argv" \
+        "no runtime manifest at all resolves to claude (#5609)"
+
+    # claude.json declares its own accountProvider explicitly.
+    cat > "$PROVIDER_WS/.loom/runtimes/claude.json" <<'JSON'
+{"runtime": "claude", "accountProvider": "claude"}
+JSON
+    argv="$(run_provider_select)"
+    assert_contains "--provider claude" "$argv" \
+        "spawn-claude.sh passes the manifest's accountProvider to tokens select (#5609)"
+
+    # A runtime manifest present but missing the accountProvider field still
+    # defaults to claude (D8's fail-open default), never fails closed.
+    cat > "$PROVIDER_WS/.loom/runtimes/claude.json" <<'JSON'
+{"runtime": "claude"}
+JSON
+    argv="$(run_provider_select)"
+    assert_contains "--provider claude" "$argv" \
+        "a runtime manifest with no accountProvider field defaults to claude (#5609)"
+else
+    echo "  SKIP: jq unavailable — account-provider resolution needs it"
+fi
+
+rm -rf "$PROVIDER_WS" "$PROVIDER_STUB_DIR"
+rm -f "$PROVIDER_ARGV_LOG"
 
 # ============================================================
 # Summary

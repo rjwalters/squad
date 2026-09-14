@@ -7,7 +7,9 @@ import { join } from "node:path";
 process.env.SQUAD_DIR = mkdtempSync(join(tmpdir(), "squad-test-"));
 
 const { openDb } = await import("../dist/db.js");
-const { Squad, DEFAULT_IDLE_MINUTES, DEFAULT_STALE_MINUTES } = await import("../dist/core.js");
+const { Squad, DEFAULT_IDLE_MINUTES, DEFAULT_STALE_MINUTES, isPersonaRefinement } = await import(
+  "../dist/core.js"
+);
 
 test.after(() => rmSync(process.env.SQUAD_DIR, { recursive: true, force: true }));
 
@@ -23,6 +25,78 @@ test("send and read", () => {
   assert.equal(msgs.length, 2);
   assert.equal(msgs[0].sender, "claude");
   assert.equal(msgs[1].sender, "codex");
+});
+
+// --- repeated system-message dedup (#59) ------------------------------
+
+test("identical consecutive system messages from the same sender collapse in place", () => {
+  claude.clear();
+  const first = claude.send("mcp startup failed: missing deps", "system");
+  assert.equal(first.occurrences, 1);
+  const second = claude.send("mcp startup failed: missing deps", "system");
+  assert.equal(second.id, first.id, "collapses into the same row instead of inserting a new one");
+  assert.equal(second.occurrences, 2);
+  const third = claude.send("mcp startup failed: missing deps", "system");
+  assert.equal(third.id, first.id);
+  assert.equal(third.occurrences, 3, "occurrences keeps incrementing across repeats");
+
+  const rows = claude.read();
+  assert.equal(rows.length, 1, "the room shows a single collapsed entry, not one per repeat");
+  assert.equal(rows[0].occurrences, 3);
+  assert.ok(Date.parse(rows[0].ts) >= Date.parse(first.ts), "ts refreshed to the latest occurrence");
+});
+
+test("system dedup checks the sender's own last message, not the room's last message overall", () => {
+  claude.clear();
+  claude.send("recurring failure", "system");
+  codex.send("unrelated chatter"); // a different sender's message lands in between
+  const again = claude.send("recurring failure", "system");
+  assert.equal(again.occurrences, 2, "still collapses with claude's own prior message");
+  assert.equal(claude.read().filter((m) => m.sender === "claude").length, 1);
+});
+
+test("chat messages are never collapsed, even if byte-identical", () => {
+  claude.clear();
+  claude.send("same text", "chat");
+  claude.send("same text", "chat");
+  const rows = claude.read();
+  assert.equal(rows.length, 2, "identical chat messages each get their own row");
+  assert.equal(rows[0].occurrences, 1);
+  assert.equal(rows[1].occurrences, 1);
+});
+
+test("system dedup never crosses senders: two personas posting the same body stay separate", () => {
+  claude.clear();
+  claude.send("shared failure text", "system");
+  codex.send("shared failure text", "system");
+  const rows = claude.read();
+  assert.equal(rows.length, 2, "each sender's occurrence lives in its own row");
+  assert.deepEqual(
+    rows.map((m) => m.sender),
+    ["claude", "codex"],
+  );
+  assert.equal(rows[0].occurrences, 1);
+  assert.equal(rows[1].occurrences, 1);
+});
+
+test("a system message that differs from the prior one by even one character is not collapsed", () => {
+  claude.clear();
+  claude.send("failure: connection refused", "system");
+  claude.send("failure: connection refused.", "system"); // trailing period differs
+  const rows = claude.read();
+  assert.equal(rows.length, 2, "not identical, so each gets its own row");
+  assert.equal(rows[0].occurrences, 1);
+  assert.equal(rows[1].occurrences, 1);
+});
+
+test("occurrences increments correctly across many repeats without wrapping", () => {
+  claude.clear();
+  let last;
+  for (let i = 0; i < 25; i++) {
+    last = claude.send("recurring startup failure notice", "system");
+  }
+  assert.equal(last.occurrences, 25);
+  assert.equal(claude.read().length, 1, "still a single collapsed row after many repeats");
 });
 
 test("check excludes own messages and consumes", () => {
@@ -527,4 +601,123 @@ test("checkWait times out empty", async () => {
   claude.clear();
   const msgs = await claude.checkWait(1);
   assert.equal(msgs.length, 0);
+});
+
+// --- persona refinement + identity collision (#50) -------------------------
+
+test("isPersonaRefinement treats a pinned identity as a namespace, not a name", () => {
+  assert.ok(isPersonaRefinement("codex", "codex"), "the pinned name itself refines it");
+  assert.ok(isPersonaRefinement("codex", "codex-2"), "<pinned>-<n> is the fanout convention");
+  assert.ok(isPersonaRefinement("codex", "codex-sol3"), "any suffix, not just a number");
+  assert.ok(isPersonaRefinement("codex", "CODEX-2"), "case-insensitive, like the persona regex");
+  assert.ok(!isPersonaRefinement("codex", "fable"), "an unrelated name is impersonation");
+  assert.ok(!isPersonaRefinement("codex", "codex2"), "no separator — a different name entirely");
+  assert.ok(!isPersonaRefinement("codex", "codex-"), "a bare separator names nobody");
+  assert.ok(!isPersonaRefinement("codex", "sol-codex-2"), "the pin must be the prefix");
+  assert.ok(!isPersonaRefinement("codex", "codex/sol3"), "'/' is outside the persona charset");
+});
+
+test("requestPersona honours a refinement of the pin and refuses anything else", () => {
+  const one = new Squad(db, "codex");
+  const accepted = one.requestPersona("codex-1", "codex");
+  assert.equal(accepted.applied, true, "a refinement of the pin is honoured");
+  assert.equal(accepted.persona, "codex-1");
+  assert.equal(one.persona, "codex-1", "the connection now speaks as codex-1");
+  assert.equal(accepted.note, undefined, "an accepted rename needs no explanation");
+
+  const two = new Squad(db, "codex");
+  const rejected = two.requestPersona("fable", "codex");
+  assert.equal(rejected.applied, false);
+  assert.equal(two.persona, "codex", "the pin still wins against an unrelated name");
+  assert.match(
+    rejected.note,
+    /not a refinement/,
+    "the note says why, not just 'rename ignored'",
+  );
+  assert.match(rejected.note, /codex-/, "…and shows how to refine instead");
+
+  // An unpinned connection keeps the old free-rename behaviour.
+  const anon = new Squad(db, "agent");
+  assert.equal(anon.requestPersona("fable", null).applied, true);
+  assert.equal(anon.persona, "fable", "nothing pinned, so any valid name is accepted");
+});
+
+test("sessions under refined personas of one pinned agent see each other", () => {
+  claude.clear();
+  const sol1 = new Squad(db, "codex-1");
+  const sol2 = new Squad(db, "codex-2");
+  sol1.join();
+  sol2.join();
+
+  sol1.send("front A is closed");
+  sol2.send("front B needs a hand");
+
+  // Self-suppression keys on the sender string, so it only works once the
+  // senders genuinely differ — which is exactly what refinement buys.
+  assert.deepEqual(
+    sol2.check().map((m) => m.body),
+    ["front A is closed"],
+    "codex-2 sees codex-1's message",
+  );
+  assert.deepEqual(
+    sol1.check().map((m) => m.body),
+    ["front B needs a hand"],
+    "codex-1 sees codex-2's message",
+  );
+});
+
+test("join warns when the identity already holds another live session", () => {
+  claude.clear();
+  const first = new Squad(db, "codex");
+  first.join();
+
+  const second = new Squad(db, "codex");
+  const joined = second.join();
+  assert.ok(joined.identity_collision, "a co-named session is told so at join");
+  assert.equal(joined.identity_collision.persona, "codex");
+  assert.deepEqual(
+    joined.identity_collision.session_ids,
+    [first.sessionId],
+    "…and which other session holds the identity",
+  );
+  assert.match(
+    joined.identity_collision.note,
+    /codex-/,
+    "…pointed at the refinement convention that fixes it",
+  );
+
+  assert.equal(
+    new Squad(db, "fable").join().identity_collision,
+    undefined,
+    "a unique identity joins clean",
+  );
+});
+
+test("re-joining is not a collision with yourself", () => {
+  claude.clear();
+  const only = new Squad(db, "codex-1");
+  only.join();
+  assert.equal(
+    only.join().identity_collision,
+    undefined,
+    "join() is idempotent — its own session row is never a twin",
+  );
+});
+
+test("a co-named session whose lease expired is not a live collision", () => {
+  claude.clear();
+  new Squad(db, "codex").join();
+  backdate("codex", DEFAULT_STALE_MINUTES + 1);
+  assert.equal(
+    new Squad(db, "codex").join().identity_collision,
+    undefined,
+    "an expired lease is a dead process, not a live twin",
+  );
+});
+
+test("mcp.ts wires the refinement decision and the collision warning into squad_join", () => {
+  const mcpSrc = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
+  const join = mcpSrc.slice(mcpSrc.indexOf('"squad_join"'), mcpSrc.indexOf('"squad_send"'));
+  assert.match(join, /requestPersona\(/, "squad_join must route renames through requestPersona");
+  assert.match(join, /identity_collision/, "…and surface the collision warning in its note");
 });

@@ -34,6 +34,10 @@
 #                            because launchd jobs and `ssh host 'cmd'` shells
 #                            never source the login profile.
 #   LOOM_NPM_BIN           - Absolute path to `npm`, same resolution rules.
+#   LOOM_PNPM_BIN          - Absolute path to `pnpm`, same resolution rules
+#                            (used for MCP self-repair when the package's own
+#                            "packageManager" field or a tracked pnpm-lock.yaml
+#                            resolves it to pnpm, issue #6779).
 #   LOOM_MODEL             - Model to pass as `claude --model <value>` (issue
 #                            #3477). An explicit `--model` in the wrapper args
 #                            always wins. The flag is appended once before the
@@ -43,6 +47,32 @@
 #                            neither is set, NO --model flag is emitted.
 
 set -euo pipefail
+
+# Self-reap the wrapper's own process GROUP at exit (Issue #6192): this is the
+# primary daemon-dispatch path (dispatch.rs appends `--use-wrapper` by
+# default), and unlike `spawn-claude.sh`'s plain `exec claude`, this script
+# already runs `claude` as a managed foreground/background child (never
+# exec-replaces itself) — so it is the natural, low-risk place to sweep any
+# child it leaves behind (a build tool stuck in disk-wait, a detached `tail`
+# still holding its output pipe, etc.) once IT exits, for ANY reason: a normal
+# retry-loop exit, an exhausted-retries failure, or an external kill (SIGTERM
+# — the daemon's own #4980 group-kill hits this process too, since it is a
+# process-group member). This is bound to THIS process's own exit only — a
+# daemon restart never signals this already-running tree, so it cannot
+# interfere with sweeps surviving daemon restarts (the deliberate design that
+# motivated #6192's careful scoping).
+#
+# The library is only SOURCED here; the trap itself is installed by
+# `_wrapper_exit_cleanup` (defined next to `clear_retry_state` below) at the
+# two `trap ... EXIT` sites this script already had. That indirection is
+# load-bearing: bash keeps exactly ONE EXIT trap, so installing a second one
+# here would be silently replaced by `main()`'s own EXIT trap a moment later
+# and never fire.
+_reap_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/reap-process-group.sh"
+if [[ -f "$_reap_lib" ]]; then
+    # shellcheck source=lib/reap-process-group.sh
+    source "$_reap_lib"
+fi
 
 # Configuration with environment variable overrides
 MAX_RETRIES="${LOOM_MAX_RETRIES:-5}"
@@ -291,6 +321,23 @@ clear_retry_state() {
     fi
 }
 
+# The wrapper's single EXIT handler (Issue #6192). Bash keeps exactly ONE EXIT
+# trap, so the #6192 self-reap has to be folded into the handler this script
+# already installs rather than added as a second `trap ... EXIT` — a second
+# one would silently replace the retry-state cleanup (or be replaced by it,
+# depending on order) instead of composing with it.
+#
+# Order matters: clear the retry state FIRST (cheap, and the thing a retrying
+# supervisor reads), then reap. The reap TERM-then-KILLs, with a 2s grace
+# window in between, so putting it first would delay the state cleanup by
+# seconds on every single wrapper exit.
+_wrapper_exit_cleanup() {
+    clear_retry_state
+    if declare -F loom_reap_own_process_group >/dev/null 2>&1; then
+        loom_reap_own_process_group "claude-wrapper"
+    fi
+}
+
 # Recover from deleted working directory
 # This handles the case where the agent's worktree is deleted while it's running
 # (e.g., by loom-clean, merge-pr.sh, or agent-destroy.sh)
@@ -409,6 +456,63 @@ resolve_mcp_workspace() {
     fi
 }
 
+# Protocol-level MCP health check (#5032 follow-up, issue #143 / 2am#307).
+#
+# Starts the candidate entry point, sends a standard MCP `initialize`
+# JSON-RPC request over its stdin, and checks stdout for a well-formed
+# JSON-RPC response (matching id, with a `result` or `error` field). This
+# replaces a prior implementation that grepped stderr for the literal string
+# "running on stdio" — that string is mcp-loom's OWN startup banner
+# (~/GitHub/loom/mcp-loom/src/index.ts), not part of the MCP protocol itself.
+# Any MCP server that doesn't happen to print that exact banner (e.g.
+# squad's `dist/mcp.js`, which prints nothing on a clean start) false-
+# negatived unconditionally under the old check, regardless of actual
+# health. A protocol-level handshake is used instead of extending the old
+# check into a banner-string allowlist, since an allowlist just breaks again
+# for the next MCP server implementation that doesn't emit a banner.
+#
+# Args: $1 = path to the MCP server entry point (e.g. dist/index.js)
+#       $2 = node binary to invoke it with
+# Sets (for the caller to log on failure): MCP_SMOKE_TEST_STDOUT,
+# MCP_SMOKE_TEST_STDERR.
+# Returns: 0 if a valid JSON-RPC initialize response was observed, 1 otherwise.
+_mcp_smoke_test() {
+    local mcp_entry="$1"
+    local node_bin="$2"
+
+    local init_request='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"loom-mcp-preflight","version":"1.0.0"}}}'
+
+    local tmp_stdout tmp_stderr
+    tmp_stdout=$(mktemp)
+    tmp_stderr=$(mktemp)
+
+    printf '%s\n' "${init_request}" | timeout 5 "${node_bin}" "${mcp_entry}" \
+        >"${tmp_stdout}" 2>"${tmp_stderr}" || true
+
+    MCP_SMOKE_TEST_STDOUT=$(cat "${tmp_stdout}")
+    MCP_SMOKE_TEST_STDERR=$(cat "${tmp_stderr}")
+    rm -f "${tmp_stdout}" "${tmp_stderr}"
+
+    # A healthy MCP server responds to `initialize` with a JSON-RPC 2.0
+    # message carrying the same id (1) and either a `result` or `error`
+    # field, per the MCP/JSON-RPC spec — true regardless of whether the
+    # implementation also happens to print a stderr startup banner.
+    printf '%s' "${MCP_SMOKE_TEST_STDOUT}" | python3 -c "
+import json, sys
+for line in sys.stdin.read().splitlines():
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        obj = json.loads(line)
+    except Exception:
+        continue
+    if isinstance(obj, dict) and obj.get('jsonrpc') == '2.0' and obj.get('id') == 1 and ('result' in obj or 'error' in obj):
+        sys.exit(0)
+sys.exit(1)
+" 2>/dev/null
+}
+
 # Attempt MCP pre-flight for ONE candidate workspace directory: extract the
 # entry point from ${1}/.mcp.json, ensure it exists (rebuilding if
 # missing/stale), and smoke-test it. Split out of check_mcp_server so the
@@ -485,26 +589,28 @@ for name, srv in servers.items():
         return 1
     fi
 
-    # Smoke test: start MCP server and verify it emits the startup message
-    # The MCP server writes "Loom MCP server running on stdio" to stderr on success.
-    # Use a short timeout - we just need to see the startup message.
-    # `node` is resolved via explicit candidate paths, not a bare PATH lookup:
-    # a non-login ssh session / launchd job never sources the login profile, so
-    # /opt/homebrew/bin is not on PATH (#5032, same reasoning as #4875).
-    local mcp_stderr node_bin
+    # Smoke test: start the MCP server and perform a protocol-level handshake
+    # (see _mcp_smoke_test above) rather than grepping for a server-specific
+    # startup banner. `node` is resolved via explicit candidate paths, not a
+    # bare PATH lookup: a non-login ssh session / launchd job never sources
+    # the login profile, so /opt/homebrew/bin is not on PATH (#5032, same
+    # reasoning as #4875).
+    local node_bin
     node_bin="$(_locate_node_tool node)" || node_bin="node"
     [[ -n "${node_bin}" ]] || node_bin="node"
-    mcp_stderr=$(timeout 5 "${node_bin}" "${mcp_entry}" </dev/null 2>&1 || true)
 
-    if echo "${mcp_stderr}" | grep -qi "running on stdio"; then
+    if _mcp_smoke_test "${mcp_entry}" "${node_bin}"; then
         log_info "MCP server health check passed (${mcp_config})"
         return 0
     fi
 
     # MCP server failed to start - log the error
     log_warn "MCP server health check failed (${mcp_config})"
-    if [[ -n "${mcp_stderr}" ]]; then
-        log_warn "MCP stderr: ${mcp_stderr}"
+    if [[ -n "${MCP_SMOKE_TEST_STDERR}" ]]; then
+        log_warn "MCP stderr: ${MCP_SMOKE_TEST_STDERR}"
+    fi
+    if [[ -n "${MCP_SMOKE_TEST_STDOUT}" ]]; then
+        log_warn "MCP stdout: ${MCP_SMOKE_TEST_STDOUT}"
     fi
 
     # Attempt rebuild and retry
@@ -732,15 +838,18 @@ _LOOM_NODE_TOOL_DIRS=(
     /snap/bin
 )
 
-# _locate_node_tool <node|npm> -> echoes an absolute path, or nothing (rc 1).
-# Precedence: $LOOM_NODE_BIN / $LOOM_NPM_BIN override -> PATH -> the explicit
-# candidate list above -> nvm-style versioned installs (newest first).
+# _locate_node_tool <node|npm|pnpm> -> echoes an absolute path, or nothing
+# (rc 1). Precedence: $LOOM_NODE_BIN / $LOOM_NPM_BIN / $LOOM_PNPM_BIN override
+# -> PATH -> the explicit candidate list above -> nvm-style versioned installs
+# (newest first, pnpm only — pnpm is not installed under nvm's own tree, but a
+# corepack-shimmed pnpm can land next to a per-version node install there).
 _locate_node_tool() {
     local tool="$1"
     local override=""
     case "${tool}" in
         node) override="${LOOM_NODE_BIN:-}" ;;
         npm)  override="${LOOM_NPM_BIN:-}" ;;
+        pnpm) override="${LOOM_PNPM_BIN:-}" ;;
     esac
 
     if [[ -n "${override}" && -x "${override}" ]]; then
@@ -784,6 +893,7 @@ _node_tool_search_paths() {
     case "${tool}" in
         node) echo "\$LOOM_NODE_BIN" ;;
         npm)  echo "\$LOOM_NPM_BIN" ;;
+        pnpm) echo "\$LOOM_PNPM_BIN" ;;
     esac
     echo "${tool} on \$PATH"
     local dir
@@ -793,16 +903,101 @@ _node_tool_search_paths() {
     echo "${NVM_DIR:-${HOME}/.nvm}/versions/node/*/bin/${tool}"
 }
 
-# True (rc 0) when <pkg_dir>/node_modules is missing, empty, or a broken
-# half-install — i.e. mechanically repairable by `npm ci` rather than a genuine
-# build-source error (#5032).
+# Resolve which package manager an MCP server's dependency tree is actually
+# managed with — from the package's OWN declaration, never from which
+# lockfile a self-repair run happened to leave lying around (#6779). A prior
+# `npm ci` self-repair against a pnpm-managed package leaves an untracked
+# package-lock.json as pure residue; trusting "package-lock.json present"
+# alone made that residue re-trigger the same wrong-manager self-repair on
+# every subsequent run — pnpm install -> judged unusable -> npm ci -> fresh
+# untracked package-lock.json -> repeat.
 #
-# "Broken half-install" is the robb-pro root cause: node_modules existed and
+# Precedence:
+#   1. package.json's own "packageManager" field (e.g. "pnpm@11.20.0" -> pnpm)
+#   2. Whichever manager-specific lockfile the package's OWN git history
+#      tracks (pnpm-lock.yaml / yarn.lock beat an untracked package-lock.json)
+#   3. Whichever manager-specific lockfile merely exists on disk, still
+#      preferring pnpm-lock.yaml / yarn.lock over package-lock.json — an
+#      untracked package-lock.json is exactly the self-inflicted residue this
+#      function exists to stop trusting
+#   4. npm (unchanged default when nothing above resolves)
+#
+# Echoes exactly one of: pnpm, yarn, npm
+_mcp_resolve_package_manager() {
+    local pkg_dir="$1"
+    local pkg_json="${pkg_dir}/package.json"
+
+    if [[ -f "${pkg_json}" ]]; then
+        # `timeout` is not present on a bare macOS install; degrade to a
+        # direct call rather than hanging the caller.
+        local -a _py=()
+        if command -v timeout >/dev/null 2>&1; then
+            _py=(timeout 10 "${LOOM_PYTHON}")
+        else
+            _py=("${LOOM_PYTHON}")
+        fi
+
+        local declared
+        declared=$("${_py[@]}" -c "
+import json, sys
+try:
+    with open('${pkg_json}') as f:
+        cfg = json.load(f)
+except Exception:
+    sys.exit(0)
+pm = cfg.get('packageManager')
+if isinstance(pm, str) and pm:
+    print(pm.split('@')[0].strip())
+" 2>/dev/null || echo "")
+        case "${declared}" in
+            pnpm|yarn|npm)
+                echo "${declared}"
+                return 0
+                ;;
+        esac
+    fi
+
+    # No explicit declaration — prefer a lockfile the package's own git
+    # history tracks over one that merely exists (the untracked-residue case).
+    local lock manager
+    for lock in pnpm-lock.yaml yarn.lock; do
+        if [[ -f "${pkg_dir}/${lock}" ]] && \
+           git -C "${pkg_dir}" ls-files --error-unmatch "${lock}" >/dev/null 2>&1; then
+            case "${lock}" in
+                pnpm-lock.yaml) echo "pnpm" ;;
+                yarn.lock)      echo "yarn" ;;
+            esac
+            return 0
+        fi
+    done
+
+    # Nothing tracked (not a git repo, or the tracked lockfile disagrees with
+    # what's on disk) — fall back to raw presence, pnpm/yarn still ranked
+    # ahead of package-lock.json so an untracked residue file never outranks
+    # a real pnpm/yarn lockfile.
+    if [[ -f "${pkg_dir}/pnpm-lock.yaml" ]]; then
+        echo "pnpm"
+        return 0
+    fi
+    if [[ -f "${pkg_dir}/yarn.lock" ]]; then
+        echo "yarn"
+        return 0
+    fi
+
+    echo "npm"
+}
+
+# True (rc 0) when <pkg_dir>/node_modules is missing, empty, or a broken
+# half-install — i.e. mechanically repairable by the resolved package
+# manager's install command rather than a genuine build-source error (#5032).
+#
+# "Broken half-install" is the laptop-host root cause: node_modules existed and
 # was non-empty, but node_modules/@modelcontextprotocol/sdk was an EMPTY
 # directory, so `npm run build` died with MODULE_NOT_FOUND exactly like a real
 # source error. Checking that every declared dependency resolves to a directory
-# containing its own package.json catches that case; a `require` failure for a
-# dependency the package never declared is correctly NOT treated as repairable.
+# containing its own package.json catches that case for an npm-shaped tree; a
+# `require` failure for a dependency the package never declared is correctly
+# NOT treated as repairable.
 _mcp_node_modules_unusable() {
     local pkg_dir="$1"
     local node_modules="${pkg_dir}/node_modules"
@@ -811,6 +1006,25 @@ _mcp_node_modules_unusable() {
         return 0
     fi
     if [[ -z "$(ls -A "${node_modules}" 2>/dev/null)" ]]; then
+        return 0
+    fi
+
+    # A pnpm-managed tree is a symlink farm rooted at node_modules/.pnpm (or,
+    # under node-linker=hoisted, a flat tree pnpm itself wrote and records in
+    # node_modules/.modules.yaml) — not the npm-shaped
+    # "every declared dep flattened straight into node_modules/<dep>/" layout
+    # the walk below assumes. Re-deriving usability the npm way against a
+    # correctly-installed pnpm tree is exactly what converted a healthy
+    # install into "unusable" and triggered `npm ci` on it (#6779). Trust
+    # pnpm's own install bookkeeping instead.
+    if [[ "$(_mcp_resolve_package_manager "${pkg_dir}")" == "pnpm" ]]; then
+        if [[ -d "${node_modules}/.pnpm" ]] && \
+           [[ -n "$(ls -A "${node_modules}/.pnpm" 2>/dev/null)" ]]; then
+            return 1
+        fi
+        if [[ -f "${node_modules}/.modules.yaml" ]]; then
+            return 1
+        fi
         return 0
     fi
 
@@ -847,13 +1061,35 @@ for section in ('dependencies', 'devDependencies'):
     return 1
 }
 
+# After a self-repair reports SUCCESS but the follow-up build still fails, the
+# raw error is often as unhelpful as `sh: tsc: command not found` — accurate,
+# but it leaves the two very different explanations (a devDependency's binary
+# never actually installed vs. the build ran under the wrong package manager
+# for a devDependency the OTHER manager would have provided) for an operator
+# to rediscover from scratch every time (#6779). Name both candidate causes
+# instead of only surfacing the raw tool-not-found line.
+# $1 = path to a file holding the build's combined stdout+stderr
+# $2 = the package manager the build actually ran with (pnpm|yarn|npm)
+_mcp_build_failure_hint() {
+    local build_log="$1"
+    local manager="$2"
+
+    if grep -qE 'command not found|not recognized as an internal or external command' \
+        "${build_log}" 2>/dev/null; then
+        log_error "Likely cause: a devDependency's binary is missing from node_modules/.bin (partial install), or the build ran under the wrong package manager (resolved: ${manager}) for what this package actually declares. Check package.json's \"packageManager\" field and re-run '${manager} install' by hand."
+    fi
+}
+
 # Attempt to rebuild the MCP server and re-verify.
 #
-# Before `npm run build`, self-repair a missing/empty/half-installed
-# node_modules with `npm ci` when a package-lock.json is present (#5032) —
-# without it the two very different failures (unusable dependency tree vs.
-# genuine build-source error) are indistinguishable at the call site and both
-# needed an operator to run `npm ci` by hand.
+# Before running the build, self-repair a missing/empty/half-installed
+# node_modules with the resolved package manager's install command when its
+# own lockfile is present (#5032) — without a lockfile that install command
+# cannot run at all, so fall straight through to the build and let it report
+# the error. The manager is chosen once, up front, by
+# _mcp_resolve_package_manager (#6779) — never by which lockfile happens to
+# be sitting on disk, since a prior wrong-manager self-repair can itself leave
+# a stray lockfile behind.
 _try_mcp_rebuild() {
     local mcp_entry="$1"
 
@@ -867,54 +1103,90 @@ _try_mcp_rebuild() {
         return 1
     fi
 
-    local npm_bin node_bin node_dir
-    npm_bin="$(_locate_node_tool npm)" || npm_bin=""
-    if [[ -z "${npm_bin}" ]]; then
-        log_error "npm not found - cannot rebuild the MCP bundle at ${mcp_dir}"
-        log_error "Searched: $(_node_tool_search_paths npm | tr '\n' ' ')"
-        log_error "Set \$LOOM_NPM_BIN to an absolute npm path, or install node."
+    local manager
+    manager="$(_mcp_resolve_package_manager "${mcp_dir}")"
+
+    local mgr_bin node_bin node_dir
+    mgr_bin="$(_locate_node_tool "${manager}")" || mgr_bin=""
+    if [[ -z "${mgr_bin}" ]]; then
+        log_error "${manager} not found - cannot rebuild the MCP bundle at ${mcp_dir}"
+        log_error "Searched: $(_node_tool_search_paths "${manager}" | tr '\n' ' ')"
+        case "${manager}" in
+            pnpm) log_error "Set \$LOOM_PNPM_BIN to an absolute pnpm path, or install pnpm." ;;
+            yarn) log_error "Set \$LOOM_NODE_BIN to an absolute node path and ensure yarn is on PATH, or install yarn." ;;
+            *)    log_error "Set \$LOOM_NPM_BIN to an absolute npm path, or install node." ;;
+        esac
         return 1
     fi
-    # npm's own shim execs `node`; a minimal PATH breaks it even once npm
-    # itself is resolved, so put the resolved node's directory on PATH for the
-    # build subshells.
+    # A package-manager shim execs `node`; a minimal PATH breaks it even once
+    # the manager itself is resolved, so put the resolved node's directory on
+    # PATH for the build subshells.
     node_bin="$(_locate_node_tool node)" || node_bin=""
     node_dir=""
     [[ -n "${node_bin}" ]] && node_dir="$(dirname "${node_bin}")"
 
-    log_info "Attempting MCP server rebuild in ${mcp_dir}..."
+    log_info "Attempting MCP server rebuild in ${mcp_dir} (package manager: ${manager})..."
 
-    # Self-repair: an unusable dependency tree plus a lockfile is mechanically
-    # fixable — run `npm ci` first. Without a lockfile `npm ci` cannot run at
-    # all, so fall straight through to the build and let it report the error.
+    local -a install_cmd=() build_cmd=()
+    local lockfile repair_hint
+    case "${manager}" in
+        pnpm)
+            install_cmd=(install --frozen-lockfile)
+            build_cmd=(run build)
+            lockfile="pnpm-lock.yaml"
+            repair_hint="cd ${mcp_dir} && pnpm install --frozen-lockfile && pnpm run build"
+            ;;
+        *)
+            # yarn falls through to the npm-shaped commands below rather than
+            # gaining its own self-repair path — #6779's acceptance criteria
+            # only require pnpm parity; a package declaring yarn without an
+            # npm lockfile simply reports "cannot self-repair" exactly like
+            # the pre-existing npm-without-lockfile case, and still attempts
+            # the build (unchanged behavior from before this fix).
+            install_cmd=(ci)
+            build_cmd=(run build)
+            lockfile="package-lock.json"
+            repair_hint="cd ${mcp_dir} && npm ci && npm run build"
+            ;;
+    esac
+
+    # Self-repair: an unusable dependency tree plus the manager's own lockfile
+    # is mechanically fixable — run the install command first.
     if _mcp_node_modules_unusable "${mcp_dir}"; then
-        if [[ -f "${mcp_dir}/package-lock.json" ]]; then
-            log_warn "MCP node_modules missing/incomplete in ${mcp_dir} - running 'npm ci' (self-repair)"
+        if [[ -f "${mcp_dir}/${lockfile}" ]]; then
+            log_warn "MCP node_modules missing/incomplete in ${mcp_dir} - running '${manager} ${install_cmd[*]}' (self-repair)"
             if ( set -o pipefail
                  cd "${mcp_dir}" && PATH="${node_dir:+${node_dir}:}${PATH}" \
-                     "${npm_bin}" ci 2>&1 | tail -5 ) >&2; then
-                log_info "npm ci completed - dependency tree repaired"
+                     "${mgr_bin}" "${install_cmd[@]}" 2>&1 | tail -5 ) >&2; then
+                log_info "${manager} ${install_cmd[*]} completed - dependency tree repaired"
             else
                 # No network / corrupted lockfile / registry auth failure.
-                # Abort loudly: `npm run build` on the same broken tree would
-                # only produce a confusing MODULE_NOT_FOUND.
-                log_error "npm ci failed in ${mcp_dir} - cannot repair the MCP dependency tree"
-                log_error "Repair manually: cd ${mcp_dir} && npm ci && npm run build"
+                # Abort loudly: running the build on the same broken tree
+                # would only produce a confusing MODULE_NOT_FOUND.
+                log_error "${manager} ${install_cmd[*]} failed in ${mcp_dir} - cannot repair the MCP dependency tree"
+                log_error "Repair manually: ${repair_hint}"
                 return 1
             fi
         else
-            log_warn "MCP node_modules missing/incomplete in ${mcp_dir} but no package-lock.json - cannot self-repair with 'npm ci'"
+            log_warn "MCP node_modules missing/incomplete in ${mcp_dir} but no ${lockfile} - cannot self-repair with '${manager} ${install_cmd[*]}'"
         fi
     fi
 
-    # Run npm build (suppressing verbose output)
+    # Run the build (suppressing verbose output), capturing the full combined
+    # output to a scratch file so a failure can be classified below without
+    # re-running the build.
+    local build_log
+    build_log=$(mktemp)
     if ( set -o pipefail
          cd "${mcp_dir}" && PATH="${node_dir:+${node_dir}:}${PATH}" \
-             "${npm_bin}" run build 2>&1 | tail -5 ) >&2; then
+             "${mgr_bin}" "${build_cmd[@]}" 2>&1 | tee "${build_log}" | tail -5 ) >&2; then
         log_info "MCP rebuild completed"
+        rm -f "${build_log}"
     else
         log_error "MCP rebuild failed"
-        log_error "Repair manually: cd ${mcp_dir} && npm ci && npm run build"
+        _mcp_build_failure_hint "${build_log}" "${manager}"
+        rm -f "${build_log}"
+        log_error "Repair manually: ${repair_hint}"
         return 1
     fi
 
@@ -924,18 +1196,19 @@ _try_mcp_rebuild() {
         return 1
     fi
 
-    local mcp_stderr
     [[ -n "${node_bin}" ]] || node_bin="node"
-    mcp_stderr=$(timeout 5 "${node_bin}" "${mcp_entry}" </dev/null 2>&1 || true)
 
-    if echo "${mcp_stderr}" | grep -qi "running on stdio"; then
+    if _mcp_smoke_test "${mcp_entry}" "${node_bin}"; then
         log_info "MCP server health check passed after rebuild"
         return 0
     fi
 
     log_error "MCP server still fails after rebuild"
-    if [[ -n "${mcp_stderr}" ]]; then
-        log_error "MCP stderr after rebuild: ${mcp_stderr}"
+    if [[ -n "${MCP_SMOKE_TEST_STDERR}" ]]; then
+        log_error "MCP stderr after rebuild: ${MCP_SMOKE_TEST_STDERR}"
+    fi
+    if [[ -n "${MCP_SMOKE_TEST_STDOUT}" ]]; then
+        log_error "MCP stdout after rebuild: ${MCP_SMOKE_TEST_STDOUT}"
     fi
     return 1
 }
@@ -1412,9 +1685,10 @@ is_account_auth_dead() {
         return
     fi
     # Fallback if the classifier lib wasn't sourced — kept in lockstep with
-    # `lib/classify-error.sh`'s TOKEN_EXPIRED pattern.
+    # `lib/classify-error.sh`'s TOKEN_EXPIRED pattern (including #6614's
+    # JSON-envelope and revoked-token phrasings).
     [[ "${exit_code}" -ne 0 ]] && echo "${output}" \
-        | grep -qiE "401[^a-z]*authentication_error|invalid bearer token|OAuth token has expired|token has expired"
+        | grep -qiE "401[^a-z]*authentication_error|\"type\"[[:space:]]*:[[:space:]]*\"?authentication_error|token (has been|was) revoked|invalid bearer token|OAuth token has expired|token has expired"
 }
 
 # Echo a short human phrase describing why the account was considered
@@ -1422,7 +1696,13 @@ is_account_auth_dead() {
 _auth_dead_phrase() {
     local output="$1"
     local m
-    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|invalid bearer token|OAuth token has expired|token has expired" | head -1)"
+    # Kept in lockstep with `lib/classify-error.sh`'s TOKEN_EXPIRED pattern.
+    # `authentication_error` appears bare (no `401` prefix, no quotes) so the
+    # JSON-enveloped 401 of #6614 yields a clean phrase for the `.bad_tokens`
+    # reason string instead of falling through to the generic default — grep
+    # returns the LEFTMOST match, so the quoted `"type":"` wrapper is never
+    # captured with it.
+    m="$(echo "${output}" | grep -ioE "401[^a-z]*authentication_error|(OAuth )?(access )?token (has been|was) revoked|authentication_error|invalid bearer token|OAuth token has expired|token has expired" | head -1)"
     echo "${m:-401/invalid credential}"
 }
 
@@ -2015,7 +2295,7 @@ start_startup_monitor() {
                                 grep -oE 'MCP server "[^"]+"' | grep -oE '"[^"]+"' | \
                                 tr -d '"' | grep -v '^loom$' | sort -u | head -3 | \
                                 tr '\n' ',' | sed 's/,$//')
-                            _fail_detail=$(printf '%s\n' "${_mcp_fail_lines}" | head -1 | \
+                            _fail_detail=$(printf '%s\n' "${_mcp_fail_lines%%$'\n'*}" | \
                                 grep -oE 'Cannot find module[^;|]*|ENOENT[^;|]*|spawn ENOENT[^;|]*' | \
                                 head -1 | sed 's/[[:space:]]*$//' | cut -c1-80 || true)
                         fi
@@ -2254,7 +2534,7 @@ run_with_retry() {
         _FLUSH_TEMP_OUTPUT=""
         _FLUSH_LOG_FILE=""
         _FLUSH_PRE_LOG_LINES=0
-        trap clear_retry_state EXIT
+        trap _wrapper_exit_cleanup EXIT
 
         output=$(cat "${temp_output}")
 
@@ -2518,10 +2798,47 @@ run_preflight_checks() {
     return 0
 }
 
+# --- Headless-session marker for the Stop guard (issue #6645) ---
+#
+# `guard-background-subagents.sh` blocks a stop that would orphan a background
+# child. That block is correct in headless `-p` mode (ending the turn kills the
+# process) and a pure false positive in an interactive session (children
+# survive the turn boundary and their completion notifications arrive on a
+# later turn), so the guard must be able to tell the two apart.
+#
+# The guard's primary signal is the owning `claude` process's own argv. This
+# export is the defense-in-depth belt for the dispatch path `loom-daemon`
+# actually uses: the daemon spawns THIS script directly, not `spawn-claude.sh`,
+# so the identical export in `spawn-claude.sh` does not cover a
+# daemon-dispatched sweep. Env vars exported here are inherited by `claude` and,
+# in turn, by its hook subprocesses (verified live on 2026-08-22: a Stop hook's
+# environment carries the full harness environment, including `CLAUDE_PID`).
+#
+# Set ONLY when print mode is actually requested. This script deliberately runs
+# slash-command agents in INTERACTIVE mode under `script -q` rather than
+# `--print` (see the `_has_slash_cmd` note in run_with_retry, #2608), and those
+# sessions must NOT be marked headless -- they would inherit exactly the
+# friction #6645 removes. Anything this function cannot positively identify as
+# print mode is left unmarked, which is safe: the guard's own fail-closed
+# default already resolves an unmarked, unclassifiable session to headless.
+export_headless_session_marker() {
+    local arg
+    for arg in "$@"; do
+        case "$arg" in
+            -p | --print | --print=*)
+                export LOOM_HEADLESS_SESSION=1
+                log_info "Session mode: headless print mode -- LOOM_HEADLESS_SESSION=1 (#6645)"
+                return 0
+                ;;
+        esac
+    done
+    return 0
+}
+
 # Main entry point
 main() {
     # Ensure retry state file is cleaned up on exit (normal or abnormal)
-    trap clear_retry_state EXIT
+    trap _wrapper_exit_cleanup EXIT
 
     log_info "Claude wrapper starting"
     log_info "Arguments: $*"
@@ -2589,6 +2906,10 @@ main() {
             log_info "Explicit --model in args wins over LOOM_MODEL='${LOOM_MODEL}'"
         fi
     fi
+
+    # Headless-session marker for the Stop guard (issue #6645). Must run
+    # BEFORE run_with_retry so the export is in place for every attempt.
+    export_headless_session_marker "$@"
 
     # Run Claude with retry logic
     log_info "Pre-flight complete, launching Claude CLI..."

@@ -69,16 +69,38 @@ discover_project_goals
 
 ### Backlog Balance Check
 
-Before promoting new issues, check the current backlog distribution:
+Before promoting new issues, check the current backlog distribution.
+
+**The Tier 3 count excludes `loom:operator-only` and `loom:blocked` occupants
+(#7613).** Both labels route an issue permanently outside the automation
+queue — `loom:operator-only` waits on a human decision, `loom:blocked` waits
+on an external/timing condition neither Champion nor a Builder can clear —
+mirroring the exact exclusion `champion.md`'s own Priority 2/3 discovery
+queries already apply. An issue in either state cannot free itself by being
+promoted or closed through the normal pipeline, so counting it against a cap
+that only ever clears via promotion-or-closure can pin the cap **indefinitely**:
+once enough operator-only/blocked issues accumulate under `tier:maintenance`,
+the raw open-issue count sits at or above the cap forever, silently blocking
+every future Tier 3 proposal regardless of how much *actually promotable*
+Tier 3 backlog exists. Live example: this repo's `tier:maintenance` set was
+`#7415, #6969, #6650, #5512, #4136` (raw count 5, at the cap) but 4 of those 5
+carried `loom:operator-only`/`loom:blocked` — the real occupant count was 1.
 
 ```bash
 check_backlog_balance() {
   echo "=== Backlog Tier Balance ==="
 
-  # Count issues by tier
+  # Count issues by tier. Tier 3 additionally excludes loom:operator-only and
+  # loom:blocked occupants (#7613) — see the note above this function.
   tier1=$(gh issue list --label="tier:goal-advancing" --state=open --json number --jq 'length')
   tier2=$(gh issue list --label="tier:goal-supporting" --state=open --json number --jq 'length')
-  tier3=$(gh issue list --label="tier:maintenance" --state=open --json number --jq 'length')
+  tier3_json=$(gh issue list --label="tier:maintenance" --state=open --json number,labels \
+    --jq '[.[] | select([.labels[].name] | contains(["loom:operator-only"]) | not) |
+    select([.labels[].name] | contains(["loom:blocked"]) | not)]')
+  tier3=$(printf '%s' "$tier3_json" | jq 'length')
+  # Sorted, comma-joined occupant list — feed this verbatim into Step 3c's
+  # classify-capacity-defer.sh --occupants argument as $OCCUPANTS.
+  tier3_occupants=$(printf '%s' "$tier3_json" | jq -r '[.[].number] | sort | map("#" + tostring) | join(",")')
   unlabeled=$(gh issue list --label="loom:issue" --state=open --json number,labels \
     --jq '[.[] | select([.labels[].name] | any(startswith("tier:")) | not)] | length')
 
@@ -86,7 +108,7 @@ check_backlog_balance() {
 
   echo "Tier 1 (goal-advancing): $tier1"
   echo "Tier 2 (goal-supporting): $tier2"
-  echo "Tier 3 (maintenance):     $tier3"
+  echo "Tier 3 (maintenance):     $tier3 (occupants: ${tier3_occupants:-none})"
   echo "Unlabeled:                $unlabeled"
   echo "Total ready issues:       $total"
 
@@ -118,7 +140,7 @@ When multiple proposals are available for promotion, prioritize by tier:
 **Rate Limiting by Tier**:
 - Tier 1: Promote all qualifying proposals (no limit)
 - Tier 2: Promote up to 2 per iteration
-- Tier 3: Promote only 1 per iteration, and only if fewer than 5 Tier 3 issues already in backlog
+- Tier 3: Promote only 1 per iteration, and only if fewer than 5 Tier 3 issues already in backlog (the `tier3` count from the Backlog Balance Check above, which already excludes `loom:operator-only`/`loom:blocked` occupants, #7613)
 
 ### Assigning Tier Labels During Promotion
 
@@ -236,6 +258,168 @@ unblocked.
 `LOOM_MAX_UNESCALATION_RESCANS` (default **5**) bounds the per-pass cost the same
 way the tier limits bound promotions; a backlog of stuck escalations drains over
 several passes rather than spending one pass entirely on re-scanning.
+
+---
+
+## Pass 0b: Stale `loom:evaluating` Claim Re-Scan (#6828)
+
+**Run this once, immediately after Pass 0 above, before evaluating anything.**
+Like Pass 0, this looks at issues `champion.md`'s Priority 2/3 discovery
+queries never surface on their own — this time issues carrying
+`loom:evaluating` itself, not `loom:operator-only`.
+
+**The failure mode it closes.** `champion.md`'s discovery queries exclude
+every issue carrying `loom:evaluating`, correctly — that keeps a concurrent
+Champion pass from double-claiming a proposal someone else is actively
+evaluating (#4954). The "Claim (staleness-aware...)" section above already
+reclaims a **stale** `loom:evaluating` claim — one left behind by a prior
+Champion pass that died mid-evaluation without ever writing a verdict — but
+that code only runs on an issue **after** it has already been selected by a
+discovery query. Since discovery excludes every `loom:evaluating` issue
+unconditionally, a stale claim is never selected by anything, ever, so its
+own reconciliation code is unreachable in practice: the two mechanisms assume
+each other runs, and neither can reach the other. Confirmed live on a real
+downstream repo: a `loom:evaluating` claim sat for 9 days after the Champion
+pass that set it died, invisible to every later pass, even though its stated
+blocker had long since cleared.
+
+```bash
+# One list call per tick, bounded. `loom:evaluating` is only ever added
+# alongside loom:curated/architect/hermit/auditor, so a direct label query is
+# sufficient here — no need to loop over the four proposal labels the way
+# Pass 0 does for loom:operator-only.
+gh issue list --label "loom:evaluating" --state open --limit 200 \
+  --json number --jq '.[] | .number' \
+  | sort -un | head -n "${LOOM_MAX_EVALUATING_RESCANS:-5}" | while read -r N; do
+  STALE_OUT=$(./.loom/scripts/check-evaluating-staleness.sh --issue "$N"); STALE_RC=$?
+  DECISION=$(printf '%s\n' "$STALE_OUT" | sed -n 's/^DECISION=//p')
+  AGE_MIN=$(printf '%s\n' "$STALE_OUT" | sed -n 's/^AGE_MIN=//p')
+
+  if [ "$STALE_RC" -ne 12 ]; then
+    # FRESH (a genuinely in-flight concurrent claim, #4954 — leave it alone),
+    # NOT_PRESENT (raced away between the list call and here — nothing to
+    # do), or an environment error (fail safe: do nothing rather than guess).
+    echo "#$N: $DECISION — not reclaiming"
+    continue
+  fi
+
+  RECLAIM_MARKER="<!-- champion:evaluating-stale-reclaim -->"
+  # Raw JSON, filtered with a local `jq --arg` (NOT `gh ... --jq --arg ...` —
+  # `gh`'s own --jq takes a single literal filter string with no --arg support).
+  COMMENTS_JSON=$(gh issue view "$N" --json comments)
+  PRIOR_RECLAIMS=$(printf '%s\n' "$COMMENTS_JSON" \
+    | jq --arg m "$RECLAIM_MARKER" '[.comments[] | select((.body // "") | contains($m))] | length')
+
+  if [ "$PRIOR_RECLAIMS" -ge "$(( ${LOOM_MAX_EVALUATING_RECLAIMS:-3} - 1 ))" ]; then
+    # This would be the Nth reclaim of the SAME issue — reclaiming again would
+    # only repeat the same crash-and-orphan loop. Route to a human instead of
+    # looping forever (mirrors Step 4's escalation shape for a repeatedly
+    # unrevised proposal, generalized here to a claim that keeps going stale).
+    gh issue comment "$N" --body "<!-- champion:evaluating-stale-escalated -->
+**Champion: Escalating to Operator — Repeated Stale \`loom:evaluating\` Claim**
+
+This issue's \`loom:evaluating\` claim has gone stale and been reclaimed $PRIOR_RECLAIMS time(s) already (most recently ${AGE_MIN}m old, threshold ${LOOM_STALE_EVALUATING_MINUTES:-15}m). A Champion evaluation keeps starting on this issue and dying before writing a verdict — reclaiming again would only repeat the same loop. Something is stopping evaluation from completing on this specific issue (a crash, a timeout, an environment problem), which needs a human to investigate rather than another automated retry.
+
+---
+*Automated by Champion role*" \
+      && gh issue edit "$N" --remove-label "loom:evaluating" --add-label "loom:operator-only,loom:operator-mechanical"
+  else
+    gh issue comment "$N" --body "$RECLAIM_MARKER
+**Champion: Reclaiming stale \`loom:evaluating\` claim**
+
+This issue's \`loom:evaluating\` claim is ${AGE_MIN}m old (>= the ${LOOM_STALE_EVALUATING_MINUTES:-15}m threshold) — a prior Champion evaluation likely died mid-pass without writing a verdict. Releasing the claim so the issue re-enters the normal promotion queue; a later pass evaluates it from scratch.
+
+---
+*Automated by Champion role*" \
+      && gh issue edit "$N" --remove-label "loom:evaluating"
+  fi
+done
+```
+
+**Do NOT re-evaluate inline here.** This pass only removes the stale label
+(and, on repeated staleness, escalates) — it never runs the 8 promotion
+criteria itself. Once the label is gone the issue is an ordinary candidate
+again and matches `champion.md`'s Priority 2/3 discovery query in the same or
+a later pass, so the normal idempotency/claim/evaluate machinery runs on it
+exactly once, the normal way — this pass never becomes a second, parallel
+evaluation path.
+
+`LOOM_MAX_EVALUATING_RESCANS` (default **5**) bounds the per-pass cost the
+same way `LOOM_MAX_UNESCALATION_RESCANS` bounds Pass 0 — a backlog of stuck
+claims drains over several passes rather than spending one pass entirely on
+re-scanning. `LOOM_MAX_EVALUATING_RECLAIMS` (default **3**) bounds how many
+times the SAME issue may be silently reclaimed before this pass stops
+retrying and routes it to `loom:operator-only,loom:operator-mechanical`
+instead — `loom:operator-mechanical`, not `loom:operator-decision`, because a
+claim that goes stale repeatedly on one specific issue points at something
+breaking evaluation itself (a crash, a timeout, an environment problem), not
+at a preference a human needs to weigh in on.
+
+**Race safety.** Two concurrent Pass 0b runs (or a Pass 0b run racing a
+concurrent Champion evaluation that is mid-flight) can both read the same
+issue as `STALE` and both attempt to reclaim it. `check-evaluating-staleness.sh`
+performs a fresh, uncached read on every invocation, so the loser of a race
+either reads `NOT_PRESENT` (the winner already removed the label) or `FRESH`
+(a fresh claim was re-added between the two reads) on its NEXT invocation and
+does nothing further — and `gh issue edit --remove-label` is itself
+idempotent, so even in the narrow window where both readers observed `STALE`
+before either wrote, the loser's removal is a harmless no-op against a label
+that is already gone.
+
+---
+
+## Pass 0c: Approved-Without-`loom:issue` Reconciliation (#6862)
+
+**Run this once, immediately after Pass 0b above, before evaluating anything.**
+Like Pass 0 and Pass 0b, this looks at issues `champion.md`'s Priority 2/3
+discovery queries never surface on their own — this time issues that carry a
+`Champion Review: APPROVED` verdict comment but never actually received
+`loom:issue`.
+
+**The failure mode it closes.** Step 3b's promotion write used to be two
+independent, unchecked `gh` calls: the label edit, then the verdict comment.
+On issue #6464 (approved 2026-08-18) the comment posted but the label edit
+silently did not — the issue's label timeline showed only `loom:auditor` and
+`loom:evaluating` transitions, `loom:issue` was never applied. The issue sat
+"approved" in its own comment thread for 6 days, invisible to Builder (which
+filters on `loom:issue`), until a later Champion pass noticed by reading the
+label timeline by hand, then re-evaluated it from scratch under a possibly
+different tier. Step 3b now writes the label first and verifies it with a
+read-back before posting the comment (see below), which prevents NEW
+instances of this — but does nothing for issues already stuck in the old
+state, and this pass is the backstop for both.
+
+```bash
+# GitHub's `in:comments` search qualifier shortlists candidates without
+# scanning every open issue's full comment thread — mirrors Pass 0's per-label
+# loop shape, but the query itself does the label exclusion (`-label:`) so no
+# separate jq filter is needed here.
+gh issue list --search 'in:comments "Champion Review: APPROVED" -label:loom:issue' \
+  --state open --limit 200 --json number --jq '.[] | .number' \
+  | sort -un | head -n "${LOOM_MAX_PROMOTION_MISMATCH_RESCANS:-5}" | while read -r N; do
+  ./.loom/scripts/check-promotion-landed.sh --issue "$N" --apply
+done
+```
+
+`check-promotion-landed.sh --apply` decides and acts; this loop does not. Per
+issue it does exactly one of:
+
+| `DECISION` | What happened |
+|---|---|
+| `OK` | No APPROVED comment (a search false-positive, or `loom:issue` already present — a concurrent pass may have just reconciled it) — nothing done |
+| `OK` (timeline-confirmed) | `loom:issue` is currently absent, but the label timeline shows it WAS applied after the newest APPROVED comment and the issue has since legitimately progressed further (e.g. `loom:issue` -> `loom:building`, or -> `loom:blocked`) — the promotion landed; this is not #6862's failure mode, and re-adding `loom:issue` here would corrupt the issue's current, further-along state (#6933) |
+| `NOT_OPEN` | Issue is closed — nothing left to reconcile |
+| `COMPLETED` | Recovered the tier from the verdict comment's "Goal Alignment" line, applied `loom:issue` + that tier, and **confirmed the addition via its own read-back** — the issue is now a normal, Builder-visible `loom:issue` |
+| `ESCALATED` | Could not safely complete (tier unrecoverable from the comment text, or the completing edit's own read-back still failed) — posted an explanatory comment and added `loom:operator-only,loom:operator-mechanical` rather than guess |
+| `ALREADY_ESCALATED` | Tier unrecoverable, but the issue already carries `loom:operator-only` from a prior run — a human already owns it, so no duplicate comment is posted and no redundant label edit is issued (#6942) |
+
+Nothing here re-runs the 8 evaluation criteria or re-derives a tier from
+scratch — the original verdict already did that work; this pass only
+reconciles a write that should have landed and did not.
+`LOOM_MAX_PROMOTION_MISMATCH_RESCANS` (default **5**) bounds the per-pass cost
+the same way `LOOM_MAX_UNESCALATION_RESCANS` and `LOOM_MAX_EVALUATING_RESCANS`
+bound Pass 0 and Pass 0b — a backlog of stuck mismatches drains over several
+passes rather than spending one pass entirely on reconciliation.
 
 ---
 
@@ -452,6 +636,65 @@ Use conservative judgment. **Do NOT promote** if:
 
 ---
 
+### Dependency-Defer Fast Path — run this FIRST, before the Idempotency check
+
+**Problem this section fixes.** Step 4's dependency-timing gate
+(`classify-dependency-block.sh --check-defer`) is correct, but it is
+reachable **only** from inside Step 4's escalation branch — which is itself
+reachable only after the body-hash idempotency check below has run to
+completion and decided either "no marker match" or "skip budget exhausted."
+Any pass that, for whatever reason, does not walk that exact call chain end
+to end never reaches the gate at all, and nothing then stops it from
+posting a fresh comment — even when the gate, if it HAD been consulted,
+would have returned `DEFER` on an unchanged fingerprint. (Observed in the
+wild: a proposal accumulated six duplicate "Champion Review: STILL DEFERRED
+(no change)" comments across several days even though the dependency-timing
+gate returned `DEFER` with an unchanged blocker fingerprint on every one of
+those passes — illustrative, not a fixed reference for this repo.)
+
+**The fix: check unconditionally, first, ahead of and independent of every
+other mechanism in this file.** Before the Idempotency check, before
+Step 1, before writing **any** comment on a proposal that already carries a
+Champion comment — look for the most recent recorded
+`<!-- champion:dep-defer:<fp> -->` marker and re-derive the CURRENT answer.
+If both agree the proposal is still deferred at the same fingerprint, stop
+completely for this issue this pass:
+
+```bash
+ISSUE_NUMBER=<number>
+
+# Most recent dep-defer marker recorded on ANY existing comment (not just
+# the marker's own verdict comment — a defer marker can end up patched
+# onto a comment this check does not otherwise inspect).
+ALL_COMMENTS_BODY=$("$GH_READ" issue view "$ISSUE_NUMBER" --json comments \
+  --jq '[.comments[].body] | join("\n---\n")' 2>/dev/null)
+EXISTING_DEFER_FP=$(printf '%s\n' "$ALL_COMMENTS_BODY" \
+  | grep -oE '<!-- champion:dep-defer:[0-9a-f]+ -->' \
+  | sed -E 's/<!-- champion:dep-defer:([0-9a-f]+) -->/\1/' \
+  | tail -n 1)
+
+if [ -n "$EXISTING_DEFER_FP" ]; then
+  DEP_RC=0
+  DEFER_OUT=$(./.loom/scripts/classify-dependency-block.sh --issue "$ISSUE_NUMBER" --check-defer) || DEP_RC=$?
+  CURRENT_FP=$(printf '%s\n' "$DEFER_OUT" | sed -n 's/^BLOCKER_FINGERPRINT: //p')
+
+  if [ "$DEP_RC" -eq 0 ] && [ -n "$CURRENT_FP" ] && [ "$CURRENT_FP" = "$EXISTING_DEFER_FP" ]; then
+    echo "#$ISSUE_NUMBER already deferred at fingerprint $CURRENT_FP and still DEFER — STOP. No comment, no claim, no further reasoning about this issue this pass. Continue the batch loop to the next issue."
+    # HARD STOP for this issue: do not run the Idempotency check below, do
+    # not proceed to Step 1, do not post anything.
+  fi
+fi
+```
+
+**Only two outcomes let this issue proceed past the fast path**:
+`DEP_RC=3` (`REEVALUATE` — every recorded blocker has since closed, so the
+old verdict is stale) or `CURRENT_FP` differing from `$EXISTING_DEFER_FP`
+(the blocker set itself changed). Either falls through to the Idempotency
+check and the rest of the Promotion Workflow unchanged — a changed or
+cleared blocker set must still produce a fresh evaluation.
+
+---
+
 ## Concurrency Guard and Idempotency (`loom:evaluating`)
 
 **Problem this section fixes (#4954)**: an unrevised `loom:architect` proposal re-entering the queue every cycle used to get a **full re-evaluation and a fresh "NEEDS REVISION" comment every single time** — six duplicate comments over ~6.5 hours in the incident that motivated this section — and two evaluations landed comments 40 seconds apart because nothing claimed the issue while it was being evaluated. The same three mechanisms `champion-pr-merge.md`'s Capped-PR Recovery Pass already uses for PRs (idempotency marker, escalation marker, `loom:operator-only` routing) apply here, adapted with a Curator-style (`loom:curating`) claim label instead of the full Judge-style CAS machinery — proposal evaluation runs seconds to a few minutes, not the review-duration timescale `judge.md`'s stale-claim system is sized for.
@@ -633,35 +876,39 @@ Invariants a future edit must preserve:
 
 ### Claim (staleness-aware, run only when NOT skipped above)
 
+The staleness check below (`check-evaluating-staleness.sh`) is the SAME script the
+"Pass 0b: Stale `loom:evaluating` Claim Re-Scan" section uses (see above, and
+`champion.md`'s Priority 2/3 discovery notes) — one implementation of "how old
+is this labeled event", never two copies that can drift apart (#6828):
+
 ```bash
 ISSUE_NUMBER=<number>
 
-# Plain `gh` — claim arbitration, never "$GH_READ" (mirrors judge.md's rule for
-# its Stale Claim Check: a stale cache would reintroduce the double-claim race
-# this exists to close).
-CURRENT_LABELS=$(gh issue view "$ISSUE_NUMBER" --json labels --jq '[.labels[].name] | join(",")')
+# check-evaluating-staleness.sh does its own plain (uncached) `gh issue view` +
+# timeline read for claim arbitration — never "$GH_READ" (mirrors judge.md's
+# rule for its Stale Claim Check: a stale cache would reintroduce the
+# double-claim race #4954 closed).
+STALE_OUT=$(./.loom/scripts/check-evaluating-staleness.sh --issue "$ISSUE_NUMBER"); STALE_RC=$?
+DECISION=$(printf '%s\n' "$STALE_OUT" | sed -n 's/^DECISION=//p')
+CLAIM_AGE_MIN=$(printf '%s\n' "$STALE_OUT" | sed -n 's/^AGE_MIN=//p')
 
-if echo ",$CURRENT_LABELS," | grep -q ",loom:evaluating,"; then
-  CLAIMED_AT=$(gh api "repos/{owner}/{repo}/issues/$ISSUE_NUMBER/timeline" --paginate \
-    --jq '[.[] | select(.event=="labeled" and .label.name=="loom:evaluating")] | last | .created_at // empty' \
-    | sort | tail -n 1)
-  if [ -n "$CLAIMED_AT" ]; then
-    CLAIM_AGE_MIN=$(( ($(date -u +%s) - $(date -u -d "$CLAIMED_AT" +%s)) / 60 ))
-  else
-    CLAIM_AGE_MIN=0   # unknown — fail safe, treat as fresh
-  fi
-  if [ "$CLAIM_AGE_MIN" -lt "${LOOM_STALE_EVALUATING_MINUTES:-15}" ]; then
-    echo "#$ISSUE_NUMBER already claimed by a concurrent evaluation (${CLAIM_AGE_MIN}m ago) — skipping, not stomping"
-    # Continue the batch to the next issue.
-  else
-    echo "Reclaiming stale loom:evaluating claim on #$ISSUE_NUMBER (age ${CLAIM_AGE_MIN}m >= ${LOOM_STALE_EVALUATING_MINUTES:-15}m) — a prior Champion pass likely died mid-evaluation"
-  fi
+if [ "$STALE_RC" -eq 1 ]; then
+  # Usage/environment error (e.g. a `gh` call failed) — fail safe: proceed to
+  # claim as though no concurrent claim existed, exactly like the pre-#6828
+  # inline check did when its own `gh` calls could not resolve a timestamp.
+  echo "WARNING: could not determine #$ISSUE_NUMBER's loom:evaluating staleness ($STALE_OUT) — proceeding to claim"
+elif [ "$DECISION" = "FRESH" ]; then
+  echo "#$ISSUE_NUMBER already claimed by a concurrent evaluation (${CLAIM_AGE_MIN}m ago) — skipping, not stomping"
+  # Continue the batch to the next issue.
+elif [ "$DECISION" = "STALE" ]; then
+  echo "Reclaiming stale loom:evaluating claim on #$ISSUE_NUMBER (age ${CLAIM_AGE_MIN}m >= ${LOOM_STALE_EVALUATING_MINUTES:-15}m) — a prior Champion pass likely died mid-evaluation"
 fi
+# DECISION=NOT_PRESENT (STALE_RC=10) means no concurrent claim exists at all — fall straight through to claiming, same as before.
 
 gh issue edit "$ISSUE_NUMBER" --add-label "loom:evaluating"
 ```
 
-`LOOM_STALE_EVALUATING_MINUTES` (default **15**) — named to mirror `LOOM_STALE_REVIEWING_MINUTES`/`LOOM_STALE_TREATING_MINUTES`, on a shorter scale since proposal evaluation has no build/CI wait.
+`LOOM_STALE_EVALUATING_MINUTES` (default **15**) — named to mirror `LOOM_STALE_REVIEWING_MINUTES`/`LOOM_STALE_TREATING_MINUTES`, on a shorter scale since proposal evaluation has no build/CI wait. `check-evaluating-staleness.sh` reads the same env var (or an explicit `--threshold-minutes`) for its own default.
 
 **Release the claim** — `--remove-label "loom:evaluating"` — as part of the SAME `gh issue edit` command that writes the outcome (promote, reject, or escalate) in Steps 3/4 below, never as a separate call. This keeps "claimed but no verdict written yet" the only window where the label is genuinely in flight.
 
@@ -706,21 +953,55 @@ Assess the issue's alignment with current project goals:
 
 Re-run the "Verdict-time recheck" (above) immediately before this write; abort if `loom:evaluating` is gone.
 
+**Label write FIRST, verified, THEN the comment (#6862).** The label edit and
+the verdict comment used to be two independent, unchecked `gh` calls — on
+issue #6464 the comment posted while the label edit silently did not, and the
+issue sat "approved" in its own comment thread for 6 days, invisible to
+Builder (which filters on `loom:issue`), until a later pass noticed by
+reading the label timeline by hand. Do the label write first, confirm it
+landed with a read-back (never trust the edit's exit code alone — the same
+lesson `push-lease-verify.sh` and `verdict-staleness-guard.sh` already encode
+for their own writes), and post the comment **only** once `loom:issue` is
+confirmed present — so a failed label edit can never leave behind an
+"already approved" comment that contradicts the issue's real state:
+
 ```bash
-# Add loom:issue AND the appropriate tier label; release the loom:evaluating
-# claim in the SAME command that writes the outcome.
+ISSUE_NUMBER=<number>
+TIER_LABEL="tier:goal-advancing"  # OR tier:goal-supporting OR tier:maintenance
+
+# Add loom:issue AND the tier label; release the loom:evaluating claim and
+# drop the now-superseded proposal label in the SAME command.
 # NOTE: loom:curated is preserved (indicates issue went through curation)
 # Other proposal labels (loom:architect, loom:hermit, loom:auditor) are removed
-gh issue edit <number> \
-  --remove-label "loom:architect" \
-  --remove-label "loom:hermit" \
-  --remove-label "loom:auditor" \
-  --remove-label "loom:evaluating" \
-  --add-label "loom:issue" \
-  --add-label "tier:goal-advancing"  # OR tier:goal-supporting OR tier:maintenance
+promote_labels() {
+  gh issue edit "$ISSUE_NUMBER" \
+    --remove-label "loom:architect" \
+    --remove-label "loom:hermit" \
+    --remove-label "loom:auditor" \
+    --remove-label "loom:evaluating" \
+    --add-label "loom:issue" \
+    --add-label "$TIER_LABEL"
+}
 
-# Add promotion comment with tier rationale
-gh issue comment <number> --body "**Champion Review: APPROVED**
+promote_labels
+LOOM_ISSUE_LANDED=$(gh issue view "$ISSUE_NUMBER" --json labels \
+  --jq '[.labels[].name] | any(. == "loom:issue")')
+
+if [ "$LOOM_ISSUE_LANDED" != "true" ]; then
+  # One retry — the edits are idempotent (re-adding an already-present label
+  # or re-removing an already-absent one is a no-op), so a retry can only
+  # help, never double-apply.
+  promote_labels
+  LOOM_ISSUE_LANDED=$(gh issue view "$ISSUE_NUMBER" --json labels \
+    --jq '[.labels[].name] | any(. == "loom:issue")')
+fi
+
+if [ "$LOOM_ISSUE_LANDED" != "true" ]; then
+  echo "ERROR: #$ISSUE_NUMBER — loom:issue did NOT land after 2 attempts. STOP: do NOT post the APPROVED comment — it would contradict the issue's real state. Leave the issue as-is and continue the batch loop to the next issue; a later pass (or Pass 0c's reconciliation check below) retries it."
+  # HARD STOP for this issue: no verdict comment, no further promotion steps.
+else
+  # loom:issue is CONFIRMED present — only now post the promotion comment.
+  gh issue comment "$ISSUE_NUMBER" --body "**Champion Review: APPROVED**
 
 This issue has been evaluated and promoted to \`loom:issue\` status. All quality criteria passed:
 
@@ -739,7 +1020,93 @@ This issue has been evaluated and promoted to \`loom:issue\` status. All quality
 
 ---
 *Automated by Champion role*"
+fi
 ```
+
+**Step 3c: Capacity Deferral — the tier's rate limit blocks promotion this pass (#6729)**
+
+All 8 criteria can pass and Step 3b still not fire: "Rate Limiting by Tier"
+above caps Tier 2 at 2 promotions per iteration and Tier 3 at 1 promotion per
+iteration (and only when fewer than 5 Tier 3 issues are already in the
+backlog). When the cap is what blocks promotion — not a quality problem — this
+is a **capacity deferral, not a rejection**: no revision is needed, so Step 4's
+`VERDICT_MARKER` is never written and the proposal's label
+(`loom:curated`/`loom:architect`/`loom:hermit`/`loom:auditor`) is left
+untouched, exactly as an ordinary re-queue for next iteration.
+
+**Without a guard this repeats every pass for an issue that keeps losing the
+same capacity gate**, even though nothing about the proposal or the backlog
+composition changed — the same class of noise the dependency-timing gate
+(`classify-dependency-block.sh --check-defer`, #5664) already closed for
+open-dependency deferrals, just triggered by a different gate. Observed live:
+#6628 accumulated 10 near-identical "Tier 3 backlog cap reached" comments over
+~22 hours; #6647 and #6649 each accumulated 2-3 more, all citing the SAME five
+occupant `tier:maintenance` issues. `classify-capacity-defer.sh` closes it the
+same way the dependency gate closes its own case — keyed to the **tier and
+occupant set** that explains the deferral, since a capacity deferral has no
+verdict comment to piggyback its marker on:
+
+```bash
+# OCCUPANTS: the same backlog occupant set already computed by
+# "Backlog Balance Check" ($tier3_occupants, which already excludes
+# loom:operator-only/loom:blocked issues, #7613) — pass it through verbatim,
+# comma- or whitespace-separated, `#` prefix optional. The literal value below
+# is illustrative only.
+CAP_RC=0
+./.loom/scripts/classify-capacity-defer.sh --issue "$ISSUE_NUMBER" \
+  --tier "tier:maintenance" --occupants "$tier3_occupants" \
+  --apply || CAP_RC=$?
+```
+
+| `CAP_RC` | Marker | What to do |
+|---|---|---|
+| `1` | `POST_COMMENT` + `REASON: first-deferral` or `composition-changed` | **Post the deferral comment** (template below) — this is either the first time this issue hit this tier's cap, or the occupant set has changed since the last one, so an operator can still see when and why it is stuck |
+| `0` | `SKIP_COMMENT` | **Do not post a comment.** The tier and occupant set are byte-identical to the last capacity-deferral comment on this issue — `--apply` already bumped that comment's `<!-- champion:capacity-defer-seen:<fingerprint>:<n> -->` counter in place (or reported a harmless warning on stderr if nothing was found to patch; never a reason to post a fresh comment instead) |
+| `2` | — | The script could not read the issue or the arguments were malformed. Fail toward the pre-#6729 behaviour — post the deferral comment as before |
+
+**Posting the deferral comment (`CAP_RC=1`)** — carries the two markers the
+next pass's `classify-capacity-defer.sh` call needs to recognize an unchanged
+recurrence, seeded the same way the reject path seeds
+`champion:unrevised-skips:...:0`:
+
+```bash
+gh issue comment "$ISSUE_NUMBER" --body "<!-- champion:capacity-defer:tier:maintenance:$FINGERPRINT -->
+<!-- champion:capacity-defer-seen:$FINGERPRINT:1 -->
+**Champion Review: Tier 3 backlog cap reached — deferring promotion**
+
+Evaluated against all 8 promotion criteria; all pass:
+
+- [criterion-by-criterion rationale, as in a normal APPROVED verdict]
+
+**Not promoted this pass — Tier 3 (maintenance) backlog cap.** [Tier rationale.]
+The backlog currently holds exactly 5 open \`tier:maintenance\` issues (#6612,
+#6076, #6068, #5512, #4136), so this one is held back this iteration rather
+than pushed to a 6th.
+
+This is a **capacity deferral, not a rejection** — no revision is needed, so no
+verdict marker is being written and the proposal label is left untouched. A
+future Champion pass will re-evaluate it fresh once the Tier 3 backlog drops
+below 5 (or a Tier 3 promotion slot frees up).
+
+---
+*Automated by Champion role*"
+```
+
+`$FINGERPRINT` is the value the script printed — use it verbatim, do not
+recompute it by hand. Do not release `loom:evaluating` here with a *different*
+outcome than the rest of the batch loop expects: a capacity deferral is
+neither a promotion nor a rejection, so treat it the same way a skip is
+treated in "Issue Promotion Batch Processing" below — continue the loop to the
+next issue, do not count it against the tier limits (it was not promoted this
+pass, but nothing about the proposal was found wanting either).
+
+**No escalation counterpart, and none should be added.** Unlike the N=2
+unrevised-proposal escalation, a capacity deferral is never a merits problem —
+it never needs a human decision, and the condition ends the moment the
+backlog composition changes, an event the very next pass's fingerprint
+comparison detects for free. Bounding a state that already self-resolves and
+never needs a human would only reintroduce the noise this section exists to
+close.
 
 ### Step 4: Reject (One or More Criteria Fail)
 
@@ -869,10 +1236,11 @@ Work through all available curated issues, applying the tier-based rate limits t
 
 Continue evaluating issues until all have been processed or all applicable tier limits are reached. This prevents issues from waiting unnecessarily across multiple 10-minute intervals when they've already met quality criteria.
 
-**Per-issue order in the loop**: run the "Idempotency check" first, then the "Claim" step (skip if a concurrent evaluation holds a fresh `loom:evaluating`, reclaim if stale) — both from "Concurrency Guard and Idempotency" above — before Step 1 (Read). The idempotency check has **three** outcomes, not two:
+**Per-issue order in the loop**: run the "Dependency-Defer Fast Path" first — before anything else, including the Idempotency check — then the "Idempotency check", then the "Claim" step (skip if a concurrent evaluation holds a fresh `loom:evaluating`, reclaim if stale) — the latter two from "Concurrency Guard and Idempotency" above — before Step 1 (Read). The idempotency check has **three** outcomes, not two:
 
 | Idempotency outcome | Next action |
 |---|---|
+| Dependency-Defer Fast Path hard-stop (recorded `dep-defer` fingerprint unchanged) | Continue the batch loop to the next issue — no comment, no claim, nothing below this row runs |
 | No marker match (new or revised proposal) | Claim → Step 1 (Read) → Step 2 (Evaluate) → Step 3 or 4 |
 | Marker match, `UNREVISED_EVALS < ${LOOM_MAX_UNREVISED_EVALUATIONS:-2}` | Tally the skip (`PATCH` the existing verdict comment), continue the loop to the next issue |
 | Marker match, budget exhausted (`ESCALATE_UNREVISED=yes`) | Claim → **Step 4's escalation branch directly** (skip Steps 1–3: the text is unchanged, so re-evaluating cannot change the verdict) — but run Step 4's **dependency-timing gate** first: `DEFER` continues the loop with no label and no comment, `REEVALUATE` sends you to Step 1 after all (#5664) |
@@ -880,6 +1248,8 @@ Continue evaluating issues until all have been processed or all applicable tier 
 | `FORCE_REEVALUATE=yes` (the self-healing un-escalation just cleared `loom:operator-only`) | Claim → Step 1 (Read) → Step 2 → Step 3 or 4, ignoring the marker entirely (#5664) |
 
 A skip (either the idempotency skip or a fresh-claim skip) means: continue the loop to the next issue, do not count it against the tier limits (it was neither promoted nor rejected this pass). An escalation **is** a verdict — count it as you would a rejection.
+
+**Capacity deferral (Step 3c, #6729) is a third kind of non-verdict**, distinct from both a skip and a rejection: all 8 criteria passed, but the tier's rate limit blocked promotion this pass. `classify-capacity-defer.sh` decides whether that deferral is worth a fresh comment (composition changed, or first time) or should stay silent (same tier + same occupant set as the last deferral comment on this issue) — see Step 3c above for the exact commands. Either way, continue the loop to the next issue without counting it against the tier limits — it is not a rejection (the proposal label and body are untouched, no verdict marker is written) and not a promotion.
 
 ### When NOT to Promote
 
@@ -892,7 +1262,7 @@ Regardless of quality, do NOT promote an issue if:
 
 ### When NOT to Even Claim (fresh `loom:evaluating`)
 
-Do not claim or evaluate an issue that already carries a fresh `loom:evaluating` label — a concurrent Champion pass (this process's own batch loop, a cron tick, or a role-runner tick on another host) is actively evaluating it. See "Claim (staleness-aware...)" above for the exact age check; skip and continue the batch rather than waiting.
+Do not claim or evaluate an issue that already carries a fresh `loom:evaluating` label — a concurrent Champion pass (this process's own batch loop, a cron tick, or a role-runner tick on another host) is actively evaluating it. See "Claim (staleness-aware...)" above for the exact age check; skip and continue the batch rather than waiting. **The one exception (#6828)**: "Pass 0b: Stale `loom:evaluating` Claim Re-Scan" may *remove* the label first, when — and only when — the claim itself (not the proposal's content) has gone stale, per the same age check. Once the label is gone the issue is an ordinary candidate again for the normal Priority 2/3 discovery query; while a fresh claim is present, nothing here claims or evaluates it.
 
 ---
 

@@ -11,8 +11,8 @@ CODEX=1
 LINK=1
 DRY=0
 REENTRY=0
-CLAUDE_PERSONA="${SQUAD_CLAUDE_PERSONA:-claude}"
-CODEX_PERSONA="${SQUAD_CODEX_PERSONA:-codex}"
+CLAUDE_PERSONA="${SQUAD_CLAUDE_PERSONA:-}"
+CODEX_PERSONA="${SQUAD_CODEX_PERSONA:-}"
 
 usage() {
   cat <<EOF
@@ -21,7 +21,7 @@ usage: ./install.sh [options] [target-repo]
 Installs into the target repo (default .):
   .mcp.json                        squad MCP entry for Claude Code, with the
                                    room pinned to <repo>/.squad (persona "$CLAUDE_PERSONA")
-  .claude/commands/squad/*.md      /squad:join, /squad:goals, /squad:card, /squad:clear
+  .claude/commands/squad/*.md      /squad:join, /squad:goals, /squad:card, /squad:fanout, /squad:clear
   .claude/skills/squad/SKILL.md    conventions + tool reference
   .claude/skills/squad/install-metadata.json
                                    installed version + commit (tracked), so
@@ -58,7 +58,9 @@ options:
   --no-codex    skip all writes outside the target repo
   --no-link     skip \`npm link\`; the closing output uses the node path form
   --reentry     install the opt-in Claude Code re-entry Stop hook (see above);
-                default off
+                default off. Codex has no end-of-turn hook to install: its
+                re-entry counterpart is the \`squad codex-reentry\` supervisor,
+                which needs no install step — run it instead of \`codex\`
   --no-reentry  explicit no-op (re-entry is already off by default); accepted
                 so \`--reentry\`'s counterpart always parses
   --dry-run     print every planned write (including any outside the target
@@ -81,6 +83,12 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# The optional Stop hook runs separately from MCP and must share an explicit identity.
+if [[ $REENTRY -eq 1 && -z "$CLAUDE_PERSONA" ]]; then
+  echo "--reentry requires SQUAD_CLAUDE_PERSONA=<unique-name> so the hook and MCP share an identity" >&2
+  exit 1
+fi
 
 TARGET="$(cd "$TARGET" && pwd)"
 echo "squad source: $SRC"
@@ -121,7 +129,7 @@ if [[ $DRY -eq 1 ]]; then
     echo
   fi
   echo "target repo ($TARGET):"
-  echo "  .claude/commands/squad/*.md          copy /squad:join, /squad:goals, /squad:card, /squad:clear"
+  echo "  .claude/commands/squad/*.md          copy /squad:join, /squad:goals, /squad:card, /squad:fanout, /squad:clear"
   echo "  .claude/skills/squad/SKILL.md        copy skill"
   echo "  .claude/skills/squad/install-metadata.json"
   echo "                                       version $VERSION_VALUE, commit $COMMIT, layout_version 1 (tracked)"
@@ -230,10 +238,12 @@ const [file, serverPath, persona, squadDir] = process.argv.slice(2);
 let cfg = {};
 if (fs.existsSync(file)) cfg = JSON.parse(fs.readFileSync(file, "utf8"));
 cfg.mcpServers ??= {};
+const env = { ...cfg.mcpServers.squad?.env, SQUAD_DIR: squadDir };
+if (persona) env.SQUAD_PERSONA = persona;
 cfg.mcpServers.squad = {
   command: "node",
   args: [serverPath],
-  env: { SQUAD_PERSONA: persona, SQUAD_DIR: squadDir },
+  env,
 };
 fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
 console.log(`merged squad server into ${file}`);
@@ -285,11 +295,24 @@ Tools (all pull-based; nothing ever wakes you):
   lists as \`stale\` once its holder's presence lease expires, so it can be
   taken over
 - \`squad_card_create\` / \`squad_card_list\` / \`squad_card_get\` /
-  \`squad_card_transition\` / \`squad_card_evidence_add\` — Science Cards: a
-  structured tracker for a claim moving through QUESTION -> ... ->
+  \`squad_card_transition\` / \`squad_card_evidence_add\` /
+  \`squad_card_update\` — Science Cards: a structured tracker for a claim
+  moving through QUESTION -> ... ->
   SUPPORTED/FALSIFIED/INCONCLUSIVE/ABANDONED. Transitions are validated
-  against the allowed graph and evidence-gated for SUPPORTED; every mutation
-  is auto-announced
+  against the allowed graph and evidence-gated for SUPPORTED; \`update\` edits
+  creation-time fields only, never phase; every mutation is auto-announced
+- \`squad_diverge_open\` / \`squad_diverge_submit\` / \`squad_diverge_status\` /
+  \`squad_diverge_close\` — divergence rounds: each participant submits
+  independently and nothing is revealed until the round closes (explicitly,
+  or automatically once every expected participant has submitted) — use one
+  before discussing, when independent takes matter
+- \`squad_review_open\` / \`squad_review_claim\` / \`squad_review_resolve\` /
+  \`squad_review_cancel\` / \`squad_review_list\` — directed review requests:
+  a durable "you specifically, look at this" with target, refs, priority,
+  and optional expiry. pending -> claimed (target acks) -> resolved
+  (claimant closes); either side may cancel. Pending requests directed at
+  you ride along in \`squad_join\`/\`squad_check\` — work them most-urgent
+  first; every transition is auto-announced
 - \`squad_clear\` — wipe the room (destructive; needs explicit user intent)
 
 Conventions: claim a goal in chat before working on it; report results when
@@ -309,7 +332,16 @@ another session is live under it; say so rather than reasoning around it.
 
 Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
 the loop: check(wait 25s) → respond/work → repeat. Claude also gets
-\`/squad:card\` for Science Card operations.
+\`/squad:card\` for Science Card operations and \`/squad:fanout\` for running
+several workers of one agent on disjoint fronts.
+
+Identity: unpinned MCP sessions automatically use provider-model-session names.
+A pinned persona is a namespace, not a fixed name — to run more than
+one session as this agent, re-join with a refined \`persona\` (\`<pinned>-<n>\`,
+e.g. \`codex-2\`); same-named sessions are filtered out of each other's messages
+and \`squad_join\` warns when it detects one. Subagents must reach the room
+through the CLI with their own \`SQUAD_PERSONA=<name> squad …\`, never the
+inherited MCP tools (one connection, one persona).
 EOF
 write_block "$TARGET/CLAUDE.md" "$BLOCK"
 write_block "$TARGET/AGENTS.md" "$BLOCK"
@@ -358,16 +390,14 @@ if [[ $CODEX -eq 1 ]] && confirm "Register squad with Codex (~/.codex/prompts + 
 
   CODEX_TOML="$HOME/.codex/config.toml"
   touch "$CODEX_TOML"
-  if grep -qF "# BEGIN SQUAD MCP" "$CODEX_TOML"; then
-    tmp="$(mktemp)"
-    awk '
-      /# BEGIN SQUAD MCP/ { skip = 1 }
-      !skip { print }
-      /# END SQUAD MCP/ { skip = 0 }
-    ' "$CODEX_TOML" > "$tmp"
-    mv "$tmp" "$CODEX_TOML"
-  fi
+  # TOML can express env as inline, multiline, or a separate table. Preserve
+  # an existing server block verbatim rather than guessing at its structure.
+  if grep -qE '^\[mcp_servers\.squad\][[:space:]]*' "$CODEX_TOML"; then
+    echo "preserved existing Codex squad configuration (edit its environment directly to change a pin)"
+  else
   cp "$CODEX_TOML" "$CODEX_TOML.squad-backup"
+  # shellcheck disable=SC2016 # JavaScript template interpolation, not shell expansion.
+  CODEX_ENV="$(node -e 'console.log(process.argv[1] ? `{ SQUAD_PERSONA = ${JSON.stringify(process.argv[1])} }` : "{}")' "$CODEX_PERSONA")"
   cat >> "$CODEX_TOML" <<EOF
 
 # BEGIN SQUAD MCP
@@ -379,10 +409,11 @@ if [[ $CODEX -eq 1 ]] && confirm "Register squad with Codex (~/.codex/prompts + 
 [mcp_servers.squad]
 command = "node"
 args = ["$SRC/dist/index.js"]
-env = { SQUAD_PERSONA = "$CODEX_PERSONA" }
+env = $CODEX_ENV
 # END SQUAD MCP
 EOF
   echo "merged [mcp_servers.squad] into $CODEX_TOML (backup: $CODEX_TOML.squad-backup)"
+  fi
 else
   echo "skipped Codex global setup"
 fi
@@ -423,5 +454,5 @@ echo
 echo "done. the flow:"
 echo "  cd $TARGET"
 echo "  terminal 1: claude → /squad:goals <the mission>  then  /squad:join"
-echo "  terminal 2: codex  → /squad-join"
+echo "  terminal 2: codex  → /squad-join   (or: $CLI_CMD codex-reentry, which re-enters itself)"
 echo "  terminal 3: $CLI_CMD tail    # watch the room"

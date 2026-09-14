@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# check-defaults-version-bump.sh - Fail a PR that changes defaults/ without
-# either bumping VERSION or declaring an explicit no-surface-change marker
-# (#5874).
+# check-defaults-version-bump.sh - Fail a PR that changes the watched
+# surface (defaults/ by default) without either bumping VERSION or
+# declaring an explicit no-surface-change marker (#5874, #6480).
 #
 # Why this exists: every file under defaults/ is copied into every
 # consumer's installed .loom/{scripts,hooks,roles,docs,bin}/ +
@@ -21,26 +21,73 @@
 # an author declare "this change does not alter installed behavior" without a
 # version bump.
 #
+# Consumer-repo use case (#6480): any repo shaped like Loom -- one that ships
+# its own installable surface via an install.sh that copies files into other
+# repos, keying its own currency checks off its own VERSION (e.g.
+# rjwalters/repo's Repo Skills, rjwalters/anvil, rjwalters/squad) -- can
+# reuse this exact script to gate its own VERSION on its own surface. Point
+# --paths (or VERSION_BUMP_WATCH_PATHS) at that repo's installable paths
+# instead of defaults/; everything else (the VERSION file name, marker text,
+# exit codes) stays the same.
+#
 # Usage:
 #   check-defaults-version-bump.sh --base <ref> [--head <ref>]
+#                                   [--paths <p1> [<p2>...]]
 #     --base <ref>   Git ref/sha to diff FROM (the PR's base commit, e.g. a
 #                     fetched base sha, or origin/main for a local check).
 #                     Required.
 #     --head <ref>   Git ref/sha to diff TO. Defaults to HEAD.
+#     --paths <p1> [<p2>...]
+#                     One or more pathspecs to watch (repeatable -- each
+#                     --paths flag may take multiple path arguments, and the
+#                     flag itself may be passed more than once; all given
+#                     paths accumulate). Defaults to `defaults/` so Loom's
+#                     own CI job and every existing caller are unaffected.
+#                     Also settable via the VERSION_BUMP_WATCH_PATHS
+#                     environment variable (a whitespace-separated list),
+#                     which --paths overrides when both are given.
 #   check-defaults-version-bump.sh --help
 #
 # No-surface-change marker: a PR whose body OR whose HEAD-reachable commit
 # messages (between --base and --head) contain the literal string
 #     <!-- loom:no-surface-change -->
-# is exempt even when defaults/ changed and VERSION did not. Pass the PR body
-# via the PR_BODY environment variable (GitHub Actions:
+# is exempt even when a watched path changed and VERSION did not. Pass the PR
+# body via the PR_BODY environment variable (GitHub Actions:
 # `env: PR_BODY: ${{ github.event.pull_request.body }}`); the commit-message
 # path needs no extra plumbing beyond --base/--head.
 #
+# CAVEATS for the calling CI job (#6577 -- both bit a real PR, #6576):
+#   - Commit-message path: `git log --format=%B "${BASE}..${HEAD}"` can only
+#     see commits actually present in the local checkout. A default
+#     `actions/checkout@v7` run on a `pull_request` event fetches a SHALLOW,
+#     single-commit checkout of the synthetic `refs/pull/<N>/merge` ref --
+#     whose own commit message is "Merge <head> into <base>", not any real
+#     branch commit -- so a marker placed in a genuine commit message is
+#     invisible even though `--base`/`--head` were passed correctly. The
+#     caller MUST check out with enough history (`fetch-depth: 0`, or at
+#     least deep enough to reach `--base`) AND pass an explicit `--head`
+#     (e.g. `ref: ${{ github.event.pull_request.head.sha }}` +
+#     `--head "${{ github.event.pull_request.head.sha }}"`) instead of
+#     relying on the default merge-ref checkout and the `--head` default of
+#     the literal string "HEAD".
+#   - PR_BODY path: this env var is a snapshot of the PR body captured in
+#     the webhook payload that triggered THIS workflow run. A body edit made
+#     after the triggering push (e.g. `gh pr edit --body ...` with no new
+#     commit) does not retrigger the workflow, so a marker added to the body
+#     post-push is invisible to any already-queued or already-run check --
+#     and re-running the same workflow run (`gh run rerun`) replays the
+#     ORIGINAL stored event payload, so it does NOT pick up a live body
+#     edit either. If you add the marker to the body only, after already
+#     pushing, push a new commit (an empty one is fine, e.g.
+#     `git commit --allow-empty -m 'trigger marker check'`) to retrigger
+#     `synchronize` with a fresh payload -- or just put the marker in a
+#     commit message from the start, which the commit-message path (once
+#     the caller fetches sufficient history, as above) picks up reliably.
+#
 # Exit codes:
-#   0 - nothing under defaults/ changed in the diff, OR VERSION was also
-#       changed, OR the no-surface-change marker is present.
-#   1 - defaults/ changed, VERSION was not, and no marker is present.
+#   0 - nothing under the watched paths changed in the diff, OR VERSION was
+#       also changed, OR the no-surface-change marker is present.
+#   1 - a watched path changed, VERSION was not, and no marker is present.
 #   2 - bad usage (missing/invalid --base or --head).
 
 set -euo pipefail
@@ -49,6 +96,7 @@ MARKER='<!-- loom:no-surface-change -->'
 
 BASE=""
 HEAD="HEAD"
+WATCH_PATHS=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -60,8 +108,15 @@ while [[ $# -gt 0 ]]; do
       HEAD="${2:-}"
       shift 2
       ;;
+    --paths)
+      shift
+      while [[ $# -gt 0 && "$1" != --* ]]; do
+        WATCH_PATHS+=("$1")
+        shift
+      done
+      ;;
     --help|-h)
-      sed -n '2,38p' "$0" | sed 's/^# \{0,1\}//'
+      sed -n '2,91p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -86,23 +141,39 @@ if ! git rev-parse --verify --quiet "${HEAD}^{commit}" >/dev/null; then
   exit 2
 fi
 
+# --paths on the command line wins; otherwise fall back to the
+# VERSION_BUMP_WATCH_PATHS env var (whitespace-separated); otherwise the
+# original hardcoded default of defaults/, so every existing caller
+# (Loom's own CI job included) is byte-for-byte unchanged.
+if [[ ${#WATCH_PATHS[@]} -eq 0 ]]; then
+  if [[ -n "${VERSION_BUMP_WATCH_PATHS:-}" ]]; then
+    # shellcheck disable=SC2206  # intentional word-splitting on a
+    # whitespace-separated path list
+    WATCH_PATHS=($VERSION_BUMP_WATCH_PATHS)
+  else
+    WATCH_PATHS=("defaults/")
+  fi
+fi
+
+WATCHED_DESC="${WATCH_PATHS[*]}"
+
 # Deliberately a direct two-ref diff, not a merge-base-narrowed one -- this
 # script is invoked from a shallow single-commit-fetch CI checkout where the
 # base and head shallow histories may not share enough depth to resolve a
 # merge-base. A direct diff answers the question this check actually cares
-# about ("does applying head's changes touch defaults/ without touching
+# about ("does applying head's changes touch a watched path without touching
 # VERSION") without requiring ancestry.
-CHANGED_FILES="$(git diff --name-only "$BASE" "$HEAD" -- defaults/ 2>/dev/null || true)"
+CHANGED_FILES="$(git diff --name-only "$BASE" "$HEAD" -- "${WATCH_PATHS[@]}" 2>/dev/null || true)"
 
 if [[ -z "$CHANGED_FILES" ]]; then
-  echo "check-defaults-version-bump: OK — no defaults/ changes in this diff."
+  echo "check-defaults-version-bump: OK — no changes under watched path(s) ($WATCHED_DESC) in this diff."
   exit 0
 fi
 
 VERSION_CHANGED="$(git diff --name-only "$BASE" "$HEAD" -- VERSION 2>/dev/null || true)"
 
 if [[ -n "$VERSION_CHANGED" ]]; then
-  echo "check-defaults-version-bump: OK — defaults/ changed and VERSION was bumped."
+  echo "check-defaults-version-bump: OK — watched path(s) ($WATCHED_DESC) changed and VERSION was bumped."
   exit 0
 fi
 
@@ -118,7 +189,7 @@ if git log --format=%B "${BASE}..${HEAD}" 2>/dev/null | grep -qF "$MARKER"; then
   exit 0
 fi
 
-echo "check-defaults-version-bump: FAIL — defaults/ changed without a VERSION bump:" >&2
+echo "check-defaults-version-bump: FAIL — watched path(s) ($WATCHED_DESC) changed without a VERSION bump:" >&2
 echo "" >&2
 echo "$CHANGED_FILES" | sed 's/^/  /' >&2
 echo "" >&2
@@ -126,7 +197,7 @@ echo "Every file under defaults/ is copied into consumers' installed" >&2
 echo ".loom/{scripts,hooks,roles,docs,bin}/ + .claude/commands/loom/ surfaces at" >&2
 echo "install time -- NOT refreshed by a git pull (#3777). VERSION is the only" >&2
 echo "mechanical signal consumers have that those copies are stale, so a" >&2
-echo "defaults/ change must bump it (at minimum the patch component):" >&2
+echo "watched-path change must bump it (at minimum the patch component):" >&2
 echo "    ./scripts/version.sh bump patch" >&2
 echo "" >&2
 echo "If this change genuinely does not alter installed behavior (e.g. a" >&2

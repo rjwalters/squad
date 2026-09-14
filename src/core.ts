@@ -1,12 +1,29 @@
+import { automaticPersona, type AgentIdentity } from "./identity.js";
 import { randomUUID } from "node:crypto";
-import type { DatabaseSync } from "node:sqlite";
+import { DatabaseSync, backup } from "node:sqlite";
+import { existsSync } from "node:fs";
+import { envMinutes, ROOM_TABLES, SCHEMA_VERSION } from "./db.js";
 
 export interface Message {
   id: number;
   sender: string;
   kind: "chat" | "system";
   body: string;
+  /**
+   * When `occurrences > 1`, `ts` is the *last* occurrence's timestamp, not the
+   * first — see `occurrences` below.
+   */
   ts: string;
+  /**
+   * How many consecutive identical `"system"` messages from `sender` this row
+   * represents (#59). Always 1 for `"chat"` messages, and for a `"system"`
+   * message whose immediately preceding message from the same sender differs
+   * in body. `Squad.send()` collapses an exact repeat into this counter
+   * in place — bumping it and refreshing `ts` — instead of inserting a new
+   * row, so a persistently failing startup (or any other repeating system
+   * notice) occupies one row/slot no matter how many times it recurs.
+   */
+  occurrences: number;
 }
 
 export interface Goal {
@@ -89,6 +106,34 @@ export interface LeaveResult {
   sessions_remaining: number;
 }
 
+/**
+ * The outcome of a requested rename (see `Squad.requestPersona`): whether it
+ * took effect, the identity in force afterwards, and — when it did not — why.
+ */
+export interface PersonaRequestResult {
+  /** The connection's identity after the request (unchanged when refused). */
+  persona: string;
+  /** True when the rename took effect. */
+  applied: boolean;
+  /** Present only when the rename was refused: the reason, for the caller. */
+  note?: string;
+}
+
+/**
+ * Another connection is already in the room under the identity you just
+ * joined as. Co-named sessions are filtered out of each other's messages by
+ * self-suppression (`check()` excludes your own sender), so this is reported
+ * rather than left to be discovered as unexplained silence (#50).
+ */
+export interface IdentityCollision {
+  /** The contested identity. */
+  persona: string;
+  /** Other sessions currently holding it with an unexpired lease. */
+  session_ids: string[];
+  /** Human-readable warning, including the way out. */
+  note: string;
+}
+
 /** What `join()` returns: the caller's lease plus a full room snapshot. */
 export interface JoinResult {
   session_id: string;
@@ -105,6 +150,11 @@ export interface JoinResult {
    */
   pending_reviews: ReviewRequestView[];
   recent: Message[];
+  /**
+   * Set only when the identity you joined under is already held by another
+   * live session — the silent-mute condition from #50.
+   */
+  identity_collision?: IdentityCollision;
 }
 
 /**
@@ -579,13 +629,6 @@ export const DEFAULT_STALE_MINUTES = 30;
  */
 export const DEFAULT_IDLE_MINUTES = 5;
 
-function envMinutes(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-
 function staleMinutes(): number {
   return envMinutes("SQUAD_STALE_MINUTES", DEFAULT_STALE_MINUTES);
 }
@@ -619,14 +662,61 @@ export function presenceState(
  */
 const SESSION_RETENTION_HOURS = 24;
 
+/**
+ * The one separator a refined persona may use. A pinned identity
+ * (`SQUAD_PERSONA`) is a *namespace*, not an exact name: `codex` may join as
+ * `codex-2`, never as `fable`.
+ *
+ * `-` only, deliberately. Issue #50 also floated `codex/sol3`, but `/` is
+ * outside the charset the MCP `persona` argument validates against
+ * (`^[a-z0-9][a-z0-9_-]{0,127}$`), so such a request is rejected by input
+ * validation before any refinement logic sees it — and a persona string is
+ * interpolated into chat announcements, claim listings, and CLI output, where
+ * a path-like separator reads as a path. `_` is left out for the same reason
+ * one separator is better than two: `<pinned>-<n>` is the single convention
+ * documented in the fanout skill, so there is nothing to guess.
+ */
+export const PERSONA_REFINEMENT_SEPARATOR = "-";
+
+/**
+ * Does `requested` refine `pinned`? True for the pinned name itself and for
+ * `<pinned>-<suffix>`; false for everything else. This is what keeps the pin's
+ * anti-impersonation property while letting N sessions of one agent hold
+ * distinct identities: `codex` -> `codex-2` is a refinement, `codex` -> `fable`
+ * is not, and neither is `codex` -> `codex2` (a different name that merely
+ * looks similar). Compared case-insensitively, matching the case-insensitive
+ * regex the `persona` argument is validated with.
+ */
+export function isPersonaRefinement(pinned: string, requested: string): boolean {
+  const base = pinned.toLowerCase();
+  const want = requested.toLowerCase();
+  if (want === base) return true;
+  const prefix = base + PERSONA_REFINEMENT_SEPARATOR;
+  return want.startsWith(prefix) && want.length > prefix.length;
+}
+
 export class Squad {
   /** This connection's session, created lazily on first touch. */
   private _sessionId: string | null = null;
 
   constructor(
     private db: DatabaseSync,
-    private _persona: string,
-  ) {}
+    persona?: string,
+    identity: AgentIdentity = {},
+  ) {
+    this.automaticIdentity = persona === undefined
+      ? { ...identity, sessionId: identity.sessionId ?? randomUUID() }
+      : null;
+    this._persona = persona ?? automaticPersona(db, this.automaticIdentity!);
+  }
+
+  private _persona: string;
+  private automaticIdentity: AgentIdentity | null;
+
+  /** Automatic resume token; explicit personas must resume through SQUAD_PERSONA. */
+  get identityId(): string | null {
+    return this.automaticIdentity?.sessionId ?? null;
+  }
 
   get persona(): string {
     return this._persona;
@@ -639,7 +729,37 @@ export class Squad {
 
   /** Rename this connection's identity (used by persona autofill on join). */
   setPersona(persona: string): void {
+    this.automaticIdentity = null;
     this._persona = persona;
+  }
+
+  /**
+   * Apply a requested identity, honouring a pinned one as a namespace rather
+   * than an exact name (#50). With nothing pinned any valid name is accepted,
+   * as before. With `pinned` set, only a *refinement* of it is accepted — the
+   * pin itself, or `<pinned>-<suffix>` — so N sessions of one pinned agent can
+   * differentiate (`codex-1`, `codex-2`, …) and stop being filtered out of
+   * each other's messages as self-authored, while an unrelated name is still
+   * refused exactly as it was.
+   *
+   * Renaming only ever affects this connection's in-memory identity; the next
+   * `touch()` writes the session row under the new name.
+   */
+  requestPersona(requested: string, pinned?: string | null): PersonaRequestResult {
+    if (requested === this._persona) return { persona: this._persona, applied: false };
+    if (pinned && !isPersonaRefinement(pinned, requested)) {
+      return {
+        persona: this._persona,
+        applied: false,
+        note:
+          `persona is pinned to '${pinned}' by config and '${requested}' is not a refinement ` +
+          `of your pinned identity; rename ignored. To run several sessions as this agent, ` +
+          `join as '${pinned}${PERSONA_REFINEMENT_SEPARATOR}<suffix>' ` +
+          `(e.g. '${pinned}${PERSONA_REFINEMENT_SEPARATOR}2').`,
+      };
+    }
+    this.setPersona(requested);
+    return { persona: this._persona, applied: true };
   }
 
   /**
@@ -649,6 +769,13 @@ export class Squad {
    * is never resurrected — the next operation opens a fresh one.
    */
   touch(): void {
+    // A room clear removes reservations. Restore this still-connected agent
+    // before publishing again; any collision is resolved under the same lock.
+    if (this.automaticIdentity && !this.db.prepare(
+      "SELECT 1 FROM agent_identities WHERE identity_id = ?",
+    ).get(this.identityId!.toLowerCase())) {
+      this._persona = automaticPersona(this.db, this.automaticIdentity);
+    }
     const ts = now();
     this.db
       .prepare(
@@ -685,6 +812,32 @@ export class Squad {
       .prepare("SELECT session_id FROM sessions WHERE persona = ? AND left_ts IS NULL")
       .all(this.persona) as unknown as Array<{ session_id: string }>;
     return rows.map((r) => r.session_id);
+  }
+
+  /**
+   * Sessions *other than this connection's* that currently hold this identity
+   * with an unexpired lease — the co-naming that makes two agents invisible to
+   * each other (#50).
+   *
+   * Two things this deliberately does not count: this connection's own session
+   * (so an idempotent re-join never collides with itself — `join()` calls
+   * `touch()`, which creates exactly that row), and sessions whose lease has
+   * expired (a dead process that never called `leave()` is not a live twin).
+   */
+  collidingSessions(): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT session_id, last_seen, lease_expires_at FROM sessions
+          WHERE persona = ? AND left_ts IS NULL AND session_id IS NOT ?`,
+      )
+      .all(this.persona, this._sessionId) as unknown as Array<{
+      session_id: string;
+      last_seen: string;
+      lease_expires_at: string | null;
+    }>;
+    return rows
+      .filter((r) => presenceState(r.last_seen, r.lease_expires_at) !== "stale")
+      .map((r) => r.session_id);
   }
 
   /**
@@ -733,13 +886,38 @@ export class Squad {
     };
   }
 
+  /**
+   * Post a message. `"system"` messages are deduped against this sender's own
+   * immediately preceding message (#59): if that message is also `"system"`
+   * with an identical body, this call collapses into it in place — bumping
+   * `occurrences` and refreshing `ts` to now — instead of inserting a new
+   * row, so a persistently repeating system notice (e.g. an MCP startup
+   * failure retried on every session start) occupies one row no matter how
+   * many times it recurs. `"chat"` messages are never collapsed, even if
+   * byte-identical to a prior one — only `"system"` is scoped in, per #59's
+   * acceptance criteria. Scoped to *this sender's* last message, not the
+   * table's last message overall, so two different personas posting the same
+   * body never collapse into each other's row.
+   */
   send(body: string, kind: "chat" | "system" = "chat"): Message {
     this.touch();
     const ts = now();
+    if (kind === "system") {
+      const last = this.db
+        .prepare("SELECT * FROM messages WHERE sender = ? ORDER BY id DESC LIMIT 1")
+        .get(this.persona) as unknown as Message | undefined;
+      if (last && last.kind === "system" && last.body === body) {
+        const occurrences = (last.occurrences ?? 1) + 1;
+        this.db
+          .prepare("UPDATE messages SET ts = ?, occurrences = ? WHERE id = ?")
+          .run(ts, occurrences, last.id);
+        return { id: last.id, sender: this.persona, kind, body, ts, occurrences };
+      }
+    }
     const { lastInsertRowid } = this.db
-      .prepare("INSERT INTO messages (sender, kind, body, ts) VALUES (?, ?, ?, ?)")
+      .prepare("INSERT INTO messages (sender, kind, body, ts, occurrences) VALUES (?, ?, ?, ?, 1)")
       .run(this.persona, kind, body, ts);
-    return { id: Number(lastInsertRowid), sender: this.persona, kind, body, ts };
+    return { id: Number(lastInsertRowid), sender: this.persona, kind, body, ts, occurrences: 1 };
   }
 
   /** Stateless recent-history replay. Never touches any cursor. */
@@ -1061,6 +1239,11 @@ export class Squad {
    * check() yields only genuinely new messages.
    */
   join(recentLimit = 30): JoinResult {
+    // Resolved *before* touch(), which creates or renews this connection's own
+    // session row under the same identity: after it, "is someone else already
+    // here under this name?" would always find at least this session. (It is
+    // excluded by session id as well, so a re-join is safe either way.)
+    const colliding = this.collidingSessions();
     this.touch();
     this.pruneSessions();
     const recent = this.read(recentLimit);
@@ -1077,6 +1260,20 @@ export class Squad {
       claims: this.claims(),
       pending_reviews: this.pendingReviews(),
       recent,
+      ...(colliding.length
+        ? {
+            identity_collision: {
+              persona: this.persona,
+              session_ids: colliding,
+              note:
+                `identity collision: '${this.persona}' already has ` +
+                `${colliding.length} other live session${colliding.length === 1 ? "" : "s"}. ` +
+                `Same-named sessions are filtered out of each other's messages as ` +
+                `self-authored, so you would be mutually invisible — re-join with a refined ` +
+                `persona like '${this.persona}${PERSONA_REFINEMENT_SEPARATOR}2' to be heard.`,
+            },
+          }
+        : {}),
     };
   }
 
@@ -1438,14 +1635,134 @@ export class Squad {
    * operation.
    */
   clear(): void {
-    this.db.exec(
-      "DELETE FROM messages; DELETE FROM goals; DELETE FROM claims; DELETE FROM cursors; " +
-        "DELETE FROM session_cursors; DELETE FROM members; " +
-        "DELETE FROM sessions; " +
-        "DELETE FROM divergence_submissions; DELETE FROM divergence_rounds; " +
-        "DELETE FROM review_requests; " +
-        "DELETE FROM science_card_evidence; DELETE FROM science_card_transitions; DELETE FROM science_cards;",
-    );
+    this.db.exec(ROOM_TABLES.map((t) => `DELETE FROM ${t};`).join(" "));
+  }
+
+  /**
+   * Export every room table (ROOM_TABLES, src/db.ts -- the same set clear()
+   * empties) to a single portable SQLite file at destPath, via node:sqlite's
+   * built-in backup() (SQLite's Online Backup API). WAL-safe: backup() reads
+   * committed pages straight through any pending WAL frames, so a
+   * concurrently-open MCP server or CLI process never produces a torn copy
+   * the way a raw `cp` of squad.db can (which can race a WAL checkpoint), and
+   * the destination is a self-contained file -- no `-wal`/`-shm` sidecars for
+   * a caller (or a later `squad import`) to know about.
+   *
+   * Refuses to overwrite an existing file at destPath rather than silently
+   * clobbering it.
+   *
+   * Returns the row count exported per table, for a human-readable summary.
+   *
+   * node:sqlite's module-level `backup()` (as opposed to `DatabaseSync`
+   * instance methods, present since node:sqlite's v22.5.0 debut) landed
+   * later, in Node v22.16.0/v23.8.0 -- package.json's `engines.node` floor
+   * is pinned to v22.16.0 specifically because of this dependency.
+   */
+  async exportRoom(destPath: string): Promise<Record<string, number>> {
+    if (existsSync(destPath)) {
+      throw new Error(`squad export: refusing to overwrite existing file: ${destPath}`);
+    }
+    await backup(this.db, destPath);
+    const copy = new DatabaseSync(destPath, { readOnly: true });
+    try {
+      const counts: Record<string, number> = {};
+      for (const t of ROOM_TABLES) {
+        counts[t] = (copy.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get() as { n: number }).n;
+      }
+      return counts;
+    } finally {
+      copy.close();
+    }
+  }
+
+  /**
+   * Import a room previously produced by exportRoom() into this (already
+   * open) room's database, via a temporary ATTACH DATABASE + table-by-table
+   * INSERT ... SELECT (all within one transaction) rather than replacing the
+   * destination file outright -- so the destination keeps its own on-disk
+   * identity (WAL mode, pragmas) and the "must be empty" refusal below has
+   * something to check.
+   *
+   * Refuses (throws) rather than partially writing or silently merging when:
+   *  - srcPath does not exist (checked before ATTACH, which would otherwise
+   *    silently create an empty file there)
+   *  - srcPath is not a readable SQLite database
+   *  - srcPath's `PRAGMA user_version` does not match this build's
+   *    SCHEMA_VERSION (src/db.ts) -- the export was produced by an
+   *    incompatible (older or newer) squad build
+   *  - srcPath is missing one or more ROOM_TABLES -- not a squad export
+   *  - this room is not empty (any ROOM_TABLES row already present) --
+   *    import is not a merge; run `squad clear` first
+   *
+   * On success, every row in every ROOM_TABLES table is copied verbatim
+   * (ids included); SQLite's own AUTOINCREMENT bookkeeping picks up from the
+   * imported max id per table, so a post-import `squad send` etc. can never
+   * collide with an imported row's id.
+   *
+   * Returns the row count imported per table, for a human-readable summary.
+   */
+  importRoom(srcPath: string): Record<string, number> {
+    if (!existsSync(srcPath)) {
+      throw new Error(`squad import: no such file: ${srcPath}`);
+    }
+    try {
+      this.db.prepare("ATTACH DATABASE ? AS import_src").run(srcPath);
+    } catch (err) {
+      throw new Error(
+        `squad import: could not open ${srcPath}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      let srcVersion: number;
+      try {
+        srcVersion = (this.db.prepare("PRAGMA import_src.user_version").get() as { user_version: number })
+          .user_version;
+      } catch (err) {
+        throw new Error(`squad import: ${srcPath} is not a valid SQLite database`);
+      }
+      if (srcVersion !== SCHEMA_VERSION) {
+        throw new Error(
+          `squad import: schema version mismatch (export is v${srcVersion}, this squad build expects ` +
+            `v${SCHEMA_VERSION}) -- install a matching squad version before importing`,
+        );
+      }
+      const srcTables = new Set(
+        (
+          this.db.prepare("SELECT name FROM import_src.sqlite_master WHERE type = 'table'").all() as {
+            name: string;
+          }[]
+        ).map((r) => r.name),
+      );
+      const missing = ROOM_TABLES.filter((t) => !srcTables.has(t));
+      if (missing.length > 0) {
+        throw new Error(`squad import: ${srcPath} is not a squad export (missing table(s): ${missing.join(", ")})`);
+      }
+      const existing = ROOM_TABLES.map((t) => ({
+        table: t,
+        n: (this.db.prepare(`SELECT COUNT(*) AS n FROM main.${t}`).get() as { n: number }).n,
+      })).filter((c) => c.n > 0);
+      if (existing.length > 0) {
+        throw new Error(
+          "squad import: refusing to import into a non-empty room " +
+            `(${existing.map((c) => `${c.table}: ${c.n}`).join(", ")}) -- run 'squad clear' first`,
+        );
+      }
+      const counts: Record<string, number> = {};
+      this.db.exec("BEGIN");
+      try {
+        for (const t of ROOM_TABLES) {
+          this.db.exec(`INSERT INTO main.${t} SELECT * FROM import_src.${t}`);
+          counts[t] = (this.db.prepare(`SELECT COUNT(*) AS n FROM main.${t}`).get() as { n: number }).n;
+        }
+        this.db.exec("COMMIT");
+      } catch (err) {
+        this.db.exec("ROLLBACK");
+        throw err;
+      }
+      return counts;
+    } finally {
+      this.db.exec("DETACH DATABASE import_src");
+    }
   }
 
   private rowToDivergenceRound(row: {

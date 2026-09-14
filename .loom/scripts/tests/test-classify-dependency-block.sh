@@ -29,11 +29,21 @@ set -uo pipefail
 
 TEST_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SCRIPTS_DIR="$(cd "$TEST_DIR/.." && pwd)"
-DEFAULTS_DIR="$(cd "$SCRIPTS_DIR/.." && pwd)"
 CDB="$SCRIPTS_DIR/classify-dependency-block.sh"
-CHAMPION_PROMO_MD="$DEFAULTS_DIR/.claude/commands/loom/champion-issue-promo.md"
-CHAMPION_MD="$DEFAULTS_DIR/.claude/commands/loom/champion.md"
-CHAMPION_REF_MD="$DEFAULTS_DIR/.claude/commands/loom/champion-reference.md"
+
+# Two `..` reaches repo-root/.claude/commands/loom for an INSTALLED copy
+# (SCRIPTS_DIR is .loom/scripts there); one `..` reaches defaults/.claude/
+# commands/loom when running inside this source repo (SCRIPTS_DIR is
+# defaults/scripts) -- the two layouts differ in depth, so probe both rather
+# than hard-coding one (#6725).
+if [[ -d "$SCRIPTS_DIR/../../.claude/commands/loom" ]]; then
+    PROMPT_DIR="$(cd "$SCRIPTS_DIR/../../.claude/commands/loom" && pwd)"
+else
+    PROMPT_DIR="$(cd "$SCRIPTS_DIR/../.claude/commands/loom" && pwd)"
+fi
+CHAMPION_PROMO_MD="$PROMPT_DIR/champion-issue-promo.md"
+CHAMPION_MD="$PROMPT_DIR/champion.md"
+CHAMPION_REF_MD="$PROMPT_DIR/champion-reference.md"
 
 # Source for the pure helpers BEFORE defining our own colors (the sourced chain
 # defines RED/YELLOW/BLUE/NC itself).
@@ -184,7 +194,7 @@ echo "--- is_dependency_finding: dependency word AND a reference, both required 
 
 assert_true is_dependency_finding '- Technical Feasibility: hard dependency on #3, which is still open' \
     "dependency word + #N is a dependency finding"
-assert_true is_dependency_finding '- Blocked by 2AMLogic/klayout-tools#391' \
+assert_true is_dependency_finding '- Blocked by example-org/tool-repo#202' \
     "cross-repo reference is a dependency finding"
 if is_dependency_finding '- Technical Feasibility: requires a migration plan before this can land'; then
     fail "a dependency WORD with no reference is a merits finding (ordinary English must not defer)"
@@ -854,7 +864,7 @@ assert_eq "3" "$RC" "after healing, the stale dependency verdict triggers a re-e
 
 # =====================================================================
 # End-to-end regression: the 5-issue "recurred after closure" scenario
-# (2AMLogic/sky130-asic-puzzle, 2026-08-08) -- #1 is startable outright, #4 is
+# (example-org/canary-repo, 2026-08-08) -- #1 is startable outright, #4 is
 # startable outright, #2 hard-depends on #1 with NO stated subset (a genuine
 # full park), and #3/#5 each hard-depend on #1 but declare a startable subset
 # independent of it. #1 is open throughout the first half of this test, then

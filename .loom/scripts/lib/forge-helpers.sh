@@ -347,13 +347,20 @@ forge_merge_pr() {
         -d '{"Do":"squash","delete_branch_after_merge":false}'
     fi
   else
+    # Routed through the #6074 permission ladder (#6752): a stale/scope-limited
+    # App installation token 403s this PUT with "Resource not accessible by
+    # integration", which is recoverable with a stronger credential -- the
+    # failure that killed the merge of PR #6751 on 2026-08-22. Every other
+    # failure (409 head-mismatch, "Base branch was modified", 405 merge in
+    # progress) carries no such signature and falls through unretried, so the
+    # callers' existing substring classifiers are unaffected.
     if [[ -n "$expected_head_sha" ]]; then
-      gh api "repos/$nwo/pulls/$pr_number/merge" \
+      forge_gh_perm_safe api "repos/$nwo/pulls/$pr_number/merge" \
         -X PUT \
         -f merge_method=squash \
         -f sha="$expected_head_sha" 2>&1
     else
-      gh api "repos/$nwo/pulls/$pr_number/merge" \
+      forge_gh_perm_safe api "repos/$nwo/pulls/$pr_number/merge" \
         -X PUT \
         -f merge_method=squash 2>&1
     fi
@@ -566,10 +573,13 @@ forge_auto_merge() {
     node_id=$(gh api "repos/$nwo/pulls/$pr_number" --jq '.node_id' 2>/dev/null) || return 1
     [[ -z "$node_id" ]] && return 1
 
+    # The mutation (a WRITE) goes through the #6074 permission ladder (#6752),
+    # like the native `loom-daemon forge auto-merge` this shell path stands in
+    # for; the node_id lookup above is a read and needs no escalation.
     if [[ -n "$expected_head_sha" ]]; then
       local mutation_with_oid='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!, $expectedHeadOid: GitObjectID) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod, expectedHeadOid: $expectedHeadOid}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
 
-      gh api graphql \
+      forge_gh_perm_safe api graphql \
         -f "query=$mutation_with_oid" \
         -F "pullRequestId=$node_id" \
         -F "mergeMethod=SQUASH" \
@@ -577,7 +587,7 @@ forge_auto_merge() {
     else
       local mutation='mutation($pullRequestId: ID!, $mergeMethod: PullRequestMergeMethod!) { enablePullRequestAutoMerge(input: {pullRequestId: $pullRequestId, mergeMethod: $mergeMethod}) { pullRequest { number autoMergeRequest { enabledAt } } } }'
 
-      gh api graphql \
+      forge_gh_perm_safe api graphql \
         -f "query=$mutation" \
         -F "pullRequestId=$node_id" \
         -F "mergeMethod=SQUASH" 2>/dev/null
@@ -587,10 +597,25 @@ forge_auto_merge() {
 
 # --- CI Status Helpers ---
 
+# Distinguished exit code forge_get_check_runs returns when the forge's own
+# response makes clear the failure is a genuine HTTP 404 ("no such
+# resource"), as opposed to any other failure (network blip, 5xx, auth,
+# rate-limit). Callers that poll this function (merge-pr.sh's
+# `_wait_for_checks_then_sync_merge()` and its UNSTABLE-fallback sibling) use
+# this to tell "this repo has no check-runs to wait for" (e.g. GitHub Actions
+# disabled, #6389) apart from a transient fetch failure that should keep
+# polling. Any other nonzero return remains the generic "transient failure"
+# signal (return 1) so existing bounded-poll behavior is unchanged.
+FORGE_CHECK_RUNS_RC_NOT_FOUND=44
+
 # Get CI check runs for a commit.
 # Usage: forge_get_check_runs NWO COMMIT_SHA
 # GitHub: GET /repos/{nwo}/commits/{sha}/check-runs
 # Gitea: GET /repos/{owner}/{repo}/commits/{sha}/statuses (mapped to check-run shape)
+#
+# Return codes: 0 success (JSON on stdout); $FORGE_CHECK_RUNS_RC_NOT_FOUND
+# (44) on a confirmed HTTP 404 (GitHub only — see below); 1 for any other
+# failure.
 forge_get_check_runs() {
   local nwo="$1"
   local commit="$2"
@@ -622,6 +647,13 @@ forge_get_check_runs() {
       }]
     }'
   else
+    # Capture stdout and stderr into separate temp files so a non-2xx
+    # response's HTTP status (which `gh api` reports only on stderr, as
+    # "... (HTTP <code>)") can be inspected without disturbing the JSON
+    # payload on success (#6389).
+    local out_file err_file rc=0
+    out_file=$(mktemp)
+    err_file=$(mktemp)
     gh api "repos/$nwo/commits/$commit/check-runs" \
       --header "Accept: application/vnd.github+json" \
       --jq '{
@@ -632,7 +664,18 @@ forge_get_check_runs() {
           conclusion: .conclusion,
           html_url: .html_url
         }]
-      }' 2>/dev/null
+      }' >"$out_file" 2>"$err_file" || rc=$?
+
+    if [[ $rc -ne 0 ]]; then
+      if grep -q "HTTP 404" "$err_file" 2>/dev/null; then
+        rm -f "$out_file" "$err_file"
+        return "$FORGE_CHECK_RUNS_RC_NOT_FOUND"
+      fi
+      rm -f "$out_file" "$err_file"
+      return 1
+    fi
+    cat "$out_file"
+    rm -f "$out_file" "$err_file"
   fi
 }
 
@@ -908,7 +951,7 @@ is_rate_limit_error() {
 # to ~1h. So there is a window -- after a permission grant has already
 # propagated on GitHub's side, before the cached token ages out -- where one
 # write scope is present and another is not. Observed live 2026-08-12
-# (2AMLogic/2am#252): a Builder's `git push` SUCCEEDED (Contents:write was in
+# (example-org/fleet-repo#304): a Builder's `git push` SUCCEEDED (Contents:write was in
 # the cached token) and the very next `gh pr create` returned
 #
 #     HTTP 403: Resource not accessible by integration
@@ -916,7 +959,7 @@ is_rate_limit_error() {
 # because Pull-requests:write was not. The sweep died with no PR, the issue
 # stayed ready, the daemon re-dispatched it, and the next Builder rebuilt the
 # identical work -- one full duplicate build per pass, plus an orphaned
-# pushed-but-PR-less `feature/issue-*` branch (klayout-tools#851 rebuilt 3+
+# pushed-but-PR-less `feature/issue-*` branch (tool-repo#205 rebuilt 3+
 # times before a human opened the PR by hand).
 #
 # This is a DIFFERENT failure from both neighbours it is easy to conflate with:
@@ -943,6 +986,18 @@ is_rate_limit_error() {
 # Every other failure -- including a 403 that is a genuine permission
 # misconfiguration on a personal token, or a 404, or a rate limit -- falls
 # straight through unretried, exactly as before.
+#
+# #6752 widened the ladder from "`gh` invocations" to "any command whose
+# credential comes from the environment". The merge itself was the hole: on
+# 2026-08-22 `merge-pr.sh --auto` on PR #6751 died with the exact
+# integration-403 above, because BOTH of its merge writes bypassed this ladder
+# -- the native `loom-daemon forge auto-merge` (its own Rust code path) and the
+# shell `forge_merge_pr` REST PUT. The orchestrator recovered by hand with
+# `unset GH_CONFIG_DIR`, i.e. rung 3, done manually. `forge_cmd_perm_safe`
+# below is the same ladder with the `gh` literal lifted out, so the native
+# subcommand escalates through the identical rungs (`loom-daemon forge` shells
+# out to `gh`, so it reads the same GH_TOKEN/GH_CONFIG_DIR the rungs swap);
+# `forge_gh_perm_safe` is now just its `gh`-prefixed spelling.
 
 # is_app_permission_error <text> -> 0 when the text carries GitHub's
 # App-installation permission-scope rejection. Matched on the distinctive
@@ -956,6 +1011,109 @@ is_app_permission_error() {
     *"not accessible by integration"*) return 0 ;;
   esac
   return 1
+}
+
+# ---------------------------------------------------------------------------
+# Forge-transient (outage) vs. credential/permission fault discrimination
+# (issue #6425).
+#
+# Incident, 2026-08-17: during a confirmed GitHub partial outage (Issues API
+# and Git ops degraded per githubstatus; the fleet's own claim_reconciliation
+# logged `HTTP 503: No server is currently available`), two sweeps hit forge
+# WRITE failures and wrote a confident CREDENTIAL diagnosis into their
+# operator-facing summaries -- "this needs operator attention, not a retry ...
+# the GitHub App installation token lacking write permission" -- with an
+# explicit "Action needed from you" line. Both were wrong: the first PR merged
+# normally 17 minutes later with no permission change, and the second repo's
+# writes resumed once GitHub recovered. One of the two summaries even recorded
+# that `gh api /user` ALSO 403'd on the same token (a signal that should have
+# pointed at an outage, since a permission-SCOPE gap does not usually take
+# down an unrelated read) and still concluded "permissions".
+#
+# The fix is two functions, used together by every write call site / summary
+# writer that would otherwise assert a credential diagnosis:
+#
+#   is_forge_transient_error <text>       -> 0 when the text is an outage
+#       signature (5xx, "No server is currently available", a network reset)
+#       that no retry-with-a-different-credential can fix; the correct
+#       response is "retry later", never an operator action item.
+#
+#   forge_write_permission_confirmed <write_error_text>
+#                                          -> 0 ONLY when there is POSITIVE
+#       evidence of a genuine, scoped permission fault: the write's own error
+#       is not itself a forge-transient signature, AND a cheap read
+#       (`gh api /rate_limit`) on the SAME credential context succeeds. A
+#       failing read is evidence of a broader outage/token problem, not a
+#       narrow scope gap, so it does NOT confirm a permission fault -- return
+#       1, the same as when the read is never run.
+#
+# Every caller (sweep.md's merge/write-failure narration, forge_gh_perm_safe's
+# ladder callers) must treat "not confirmed" as "forge writes failing
+# (possible GitHub incident) -- will retry", and must NEVER emit a "needs
+# operator attention" / permission diagnosis without citing that the
+# confirmation check ran and returned positive evidence. See sweep.md, "Forge
+# write failure diagnosis (#6425)".
+
+# is_forge_transient_error <text> -> 0 when the text is an outage-shaped
+# signature: an HTTP 5xx status, GitHub's own "No server is currently
+# available to service your request" 503 wording, a Bad
+# Gateway/Service-Unavailable/Gateway-Timeout phrase, or a connection-level
+# reset/refusal. These are NEVER a permission fault (a scope gap 403s
+# instantly and consistently; it does not surface as a 5xx or a dropped
+# connection), and retrying with a different credential cannot fix a 5xx
+# either -- the only correct remedy is "wait and retry the same call".
+#
+# Anchored on "http 5xx" (not a bare "500"/"502"/... substring) so an
+# unrelated numeral in the text -- an issue/PR number, a byte count -- cannot
+# false-positive; `gh` itself always renders forge HTTP failures as
+# "HTTP <code>: <message>".
+is_forge_transient_error() {
+  local text
+  text=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$text" in
+    *"http 500"*|*"http 502"*|*"http 503"*|*"http 504"*) return 0 ;;
+    *"internal server error"*) return 0 ;;
+    *"bad gateway"*) return 0 ;;
+    *"service unavailable"*) return 0 ;;
+    *"gateway timeout"*) return 0 ;;
+    *"no server is currently available"*) return 0 ;;
+    *"connection reset"*) return 0 ;;
+    *"econnreset"*) return 0 ;;
+    *"econnrefused"*) return 0 ;;
+    *"connection refused"*) return 0 ;;
+  esac
+  return 1
+}
+
+# forge_write_permission_confirmed <write_error_text> -> 0 only with positive
+# evidence of a genuine credential/permission fault; 1 (not confirmed)
+# otherwise -- including when the read probe itself fails, which is evidence
+# of an outage rather than a scoped permission gap. Callers must NOT assert a
+# permission diagnosis unless this returns 0.
+#
+# The probe is `gh api /rate_limit`: cheap, side-effect-free, and answerable
+# by any authenticated token regardless of its installation scopes (issue
+# guidance's own suggested check, alongside the equivalent `gh api /user`).
+forge_write_permission_confirmed() {
+  local write_error="$1"
+
+  # A forge-transient signature is never a permission fault, regardless of
+  # what the read probe does -- short-circuit without spending the API call.
+  if is_forge_transient_error "$write_error"; then
+    return 1
+  fi
+
+  local read_rc=0
+  gh api /rate_limit >/dev/null 2>&1 || read_rc=$?
+  if [[ $read_rc -ne 0 ]]; then
+    # The read ALSO failed on the same credential -- broader outage/token
+    # problem, not a scoped write-only gap. Do not confirm.
+    return 1
+  fi
+
+  # The read succeeded while the write failed on a non-transient error --
+  # positive evidence of a genuine, scoped permission fault.
+  return 0
 }
 
 # _forge_nwo_from_remote -> echoes owner/repo parsed from `git remote get-url
@@ -992,46 +1150,62 @@ _forge_gh_app_fresh_token() {
   printf '%s' "$token"
 }
 
-# _forge_gh_attempt <mode> <token> <stdout_file> <stderr_file> <gh args...>
-# Runs one rung of the ladder. `env` (not a bash var-assignment prefix) does
-# the credential swap so the override is unambiguously in the child's
-# environment and nowhere else -- this shell's own env is never mutated.
-_forge_gh_attempt() {
+# _forge_cmd_attempt <mode> <token> <stdout_file> <stderr_file> <cmd> [args...]
+# Runs one rung of the ladder for an ARBITRARY command. `env` (not a bash
+# var-assignment prefix) does the credential swap so the override is
+# unambiguously in the child's environment and nowhere else -- this shell's own
+# env is never mutated.
+#
+# The command need not be `gh` itself (#6752): `loom-daemon forge …` shells out
+# to `gh` internally and therefore resolves its credential from exactly the same
+# `GH_TOKEN` / `GH_CONFIG_DIR` / `GITHUB_TOKEN` environment, so swapping those
+# for the child escalates the native path identically to the shell path.
+_forge_cmd_attempt() {
   local mode="$1" token="$2" out_file="$3" err_file="$4"
   shift 4
   local rc=0
   case "$mode" in
     ambient)
-      gh "$@" >"$out_file" 2>"$err_file" || rc=$?
+      "$@" >"$out_file" 2>"$err_file" || rc=$?
       ;;
     app-token)
-      env GH_TOKEN="$token" gh "$@" >"$out_file" 2>"$err_file" || rc=$?
+      env GH_TOKEN="$token" "$@" >"$out_file" 2>"$err_file" || rc=$?
       ;;
     personal-token)
-      env -u GITHUB_TOKEN -u GH_CONFIG_DIR GH_TOKEN="$token" gh "$@" >"$out_file" 2>"$err_file" || rc=$?
+      env -u GITHUB_TOKEN -u GH_CONFIG_DIR GH_TOKEN="$token" "$@" >"$out_file" 2>"$err_file" || rc=$?
       ;;
     personal-ambient)
-      env -u GH_TOKEN -u GITHUB_TOKEN -u GH_CONFIG_DIR gh "$@" >"$out_file" 2>"$err_file" || rc=$?
+      env -u GH_TOKEN -u GITHUB_TOKEN -u GH_CONFIG_DIR "$@" >"$out_file" 2>"$err_file" || rc=$?
+      ;;
+    owner-config)
+      # `token` carries a directory path here, not a token -- points `gh` at
+      # an owner-partitioned GH_CONFIG_DIR (#446) instead of swapping the
+      # credential in-process. GH_TOKEN/GITHUB_TOKEN are dropped so they
+      # cannot outrank the directory's own stored credential the same way
+      # personal-token/personal-ambient already drop them for their swaps.
+      env -u GH_TOKEN -u GITHUB_TOKEN GH_CONFIG_DIR="$token" gh "$@" >"$out_file" 2>"$err_file" || rc=$?
       ;;
   esac
   return "$rc"
 }
 
-# Run `gh <args...>`, escalating the credential on -- and ONLY on -- an
-# App-installation permission-scope 403 (#6074). Every write call site that a
-# Builder depends on (PR create, issue comment, label edit) routes through
-# this.
+# Run `<cmd> <args...>`, escalating the credential on -- and ONLY on -- an
+# App-installation permission-scope 403 (#6074, generalized beyond `gh` by
+# #6752). The command's own exit code is preserved verbatim on every rung, so a
+# caller that assigns meaning to specific codes (`loom-daemon forge auto-merge`
+# exits 3 = forge declined, 4 = head-SHA mismatch) still sees them: neither
+# carries the integration-403 signature, so neither is ever retried.
 #
-# Usage: forge_gh_perm_safe pr create --title T --body B ...
-# Stdout: the wrapped call's stdout (e.g. the new PR's URL).
-# Returns the last attempt's exit code; stderr carries the last attempt's
-# error text so an outer rate-limit check still sees what `gh` actually said.
-forge_gh_perm_safe() {
+# Usage: forge_cmd_perm_safe loom-daemon forge auto-merge 42 --method squash
+# Stdout: the wrapped call's stdout.
+# Returns the last attempt's exit code; stderr carries the last attempt's error
+# text so an outer rate-limit/head-mismatch check still sees what it said.
+forge_cmd_perm_safe() {
   local out_file err_file rc=0
   out_file=$(mktemp)
   err_file=$(mktemp)
 
-  _forge_gh_attempt ambient "" "$out_file" "$err_file" "$@" || rc=$?
+  _forge_cmd_attempt ambient "" "$out_file" "$err_file" "$@" || rc=$?
 
   if [[ $rc -ne 0 ]] && is_app_permission_error "$(cat "$err_file" "$out_file" 2>/dev/null)"; then
     local nwo token
@@ -1041,7 +1215,7 @@ forge_gh_perm_safe() {
     if token=$(_forge_gh_app_fresh_token "$nwo"); then
       echo "forge: 403 'not accessible by integration' — retrying with a freshly minted installation token (#6074)" >&2
       rc=0
-      _forge_gh_attempt app-token "$token" "$out_file" "$err_file" "$@" || rc=$?
+      _forge_cmd_attempt app-token "$token" "$out_file" "$err_file" "$@" || rc=$?
     fi
 
     # Rung 3: a personal token. Only worth trying when it is actually a
@@ -1051,17 +1225,198 @@ forge_gh_perm_safe() {
       if [[ -n "${LOOM_PERSONAL_GH_TOKEN:-}" ]]; then
         echo "forge: still 403 after a fresh mint — falling back to LOOM_PERSONAL_GH_TOKEN (#6074)" >&2
         rc=0
-        _forge_gh_attempt personal-token "$LOOM_PERSONAL_GH_TOKEN" "$out_file" "$err_file" "$@" || rc=$?
+        _forge_cmd_attempt personal-token "$LOOM_PERSONAL_GH_TOKEN" "$out_file" "$err_file" "$@" || rc=$?
       elif [[ -n "${GH_CONFIG_DIR:-}${GH_TOKEN:-}${GITHUB_TOKEN:-}" ]]; then
         echo "forge: still 403 after a fresh mint — falling back to the ambient personal gh credential (#6074)" >&2
         rc=0
-        _forge_gh_attempt personal-ambient "" "$out_file" "$err_file" "$@" || rc=$?
+        _forge_cmd_attempt personal-ambient "" "$out_file" "$err_file" "$@" || rc=$?
       fi
     fi
   fi
 
   local out err
   out=$(cat "$out_file" 2>/dev/null || true)
+  err=$(cat "$err_file" 2>/dev/null || true)
+  rm -f "$out_file" "$err_file"
+
+  if [[ -n "$out" ]]; then
+    printf '%s\n' "$out"
+  fi
+  if [[ $rc -ne 0 && -n "$err" ]]; then
+    printf '%s\n' "$err" >&2
+  fi
+  return "$rc"
+}
+
+# Run `gh <args...>` through the same ladder (#6074). Every write call site that
+# a Builder depends on (PR create, issue comment, label edit) routes through
+# this; it is a thin `gh`-prefixed spelling of forge_cmd_perm_safe, so the two
+# stay behaviourally identical by construction.
+#
+# Usage: forge_gh_perm_safe pr create --title T --body B ...
+# Stdout: the wrapped call's stdout (e.g. the new PR's URL).
+# Returns the last attempt's exit code; stderr carries the last attempt's
+# error text so an outer rate-limit check still sees what `gh` actually said.
+forge_gh_perm_safe() {
+  forge_cmd_perm_safe gh "$@"
+}
+
+# ---------------------------------------------------------------------------
+# Wrong-repo `GH_CONFIG_DIR` escalation (2am#446).
+#
+# Incident, 2026-08-21 (`/loom:sweep 438` on `loom-worker-2`): the dispatch
+# environment's `GH_CONFIG_DIR` pointed at a DIFFERENT owner's flat
+# `<workspace>/.loom/gh-config/` (the `loom` daemon-workspace checkout's own
+# credential, minted for `rjwalters/*`), not this repo's. Every `gh` call
+# against `2AMLogic/2am` failed with one of:
+#
+#   GraphQL: Could not resolve to a Repository with the name '2AMLogic/2am'. (repository)
+#   gh: Not Found (HTTP 404)
+#
+# This is a DIFFERENT failure from #6074's cached-permission-window 403
+# (`is_app_permission_error`, above) -- the credential here is not merely
+# missing a scope, it is scoped to the wrong repository entirely, so rung 1
+# (ambient) 404s/GraphQL-fails outright and #6074's ladder never fires (its
+# classifier doesn't match either signature above). `sweep-lease-renew.sh`'s
+# renewal loop failed on every cycle as a direct result, and
+# `resolve-tier-model.sh` (which does not source this file at all before this
+# fix) silently fell through to its tier-3 default with a misleading "likely
+# API quota" diagnosis.
+#
+# The fix borrows the SAME mechanism FLEET.md's "Private-repo clones over ssh"
+# contract already documents for a human ssh session on a locked keychain: a
+# GitHub-App daemon workspace maintains its flat `.loom/gh-config/` credential
+# AND a sibling directory partitioned per owner/org,
+# `<daemon_workspace>/.loom/gh-config-by-owner/<OWNER>/` -- so the correctly
+# scoped credential usually already exists on disk right next to the wrong one
+# that got exported. `_forge_owner_gh_config_dir` derives that sibling path
+# from the CURRENT (wrong) `GH_CONFIG_DIR` itself -- no `hosts.yml` lookup, no
+# hardcoded `loom` -- by recognizing the flat directory's own
+# `<X>/.loom/gh-config` shape and substituting `gh-config-by-owner/<owner>`
+# for its final segment.
+
+# is_repo_mismatch_error <text> -> 0 when the text carries one of the two
+# confirmed wrong-repo signatures above: GitHub's GraphQL "could not resolve
+# to a Repository" rejection (the credential's installation has no access to
+# the name/owner at all), or a REST 404 (`gh`'s own "HTTP 404" rendering,
+# reusing the same `http 404`/`not found` idiom
+# `forge_get_required_status_check_contexts`'s Gitea branch already uses
+# elsewhere in this file). Deliberately text-only and therefore loose on the
+# REST side -- a genuinely missing issue/PR on a CORRECTLY scoped repo also
+# 404s this way, so callers must treat a positive match as "worth trying a
+# different credential for," not as certain proof of a repo mismatch. That is
+# safe here because every caller of `forge_gh_repo_safe` only ever retries the
+# SAME read/write under a DIFFERENT credential and returns the last attempt's
+# real error on failure -- an over-firing match costs one extra (fast, local)
+# `gh` call, never a wrong result.
+is_repo_mismatch_error() {
+  local text
+  text=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$text" in
+    *"could not resolve to a repository"*) return 0 ;;
+    *"http 404"*) return 0 ;;
+  esac
+  return 1
+}
+
+# _forge_owner_from_remote -> echoes just the OWNER segment of
+# `git remote get-url origin`, reusing `_forge_nwo_from_remote`'s zero-API-call
+# parse (never `forge_get_repo_nwo`'s `gh repo view` -- that's GraphQL-backed,
+# so it would just fail the same way the credential this function exists to
+# route around already failed, per #4659's lesson).
+_forge_owner_from_remote() {
+  local nwo
+  nwo=$(_forge_nwo_from_remote) || return 1
+  [[ "$nwo" == */* ]] || return 1
+  printf '%s' "${nwo%%/*}"
+}
+
+# _forge_owner_gh_config_dir <owner> -> echoes the owner-partitioned
+# credential directory this host's daemon maintains for <owner>, IF one is
+# discoverable; returns 1 (nothing on stdout) otherwise so the caller falls
+# through to the `env -u GH_CONFIG_DIR` rung instead of guessing a path.
+#
+# Two sources, in order:
+#   1. LOOM_GH_CONFIG_BY_OWNER_ROOT (env override / test seam) -- the
+#      `.loom/gh-config-by-owner/` directory itself, named directly.
+#   2. The CURRENT `GH_CONFIG_DIR`, when it matches the flat
+#      `<daemon_workspace>/.loom/gh-config` shape the wrong-repo failure mode
+#      actually produces (FLEET.md's contract, and #4458's "Delivery
+#      mechanism") -- the owner-partitioned sibling is derived from it
+#      directly, so this works on ANY daemon_workspace checkout name, not
+#      just `loom`.
+# Either way, the directory must actually exist on disk -- a derived path
+# that isn't there is exactly the "doesn't exist" case the caller's further
+# `env -u GH_CONFIG_DIR` fallback exists for.
+_forge_owner_gh_config_dir() {
+  local owner="$1" root="" dir=""
+  [[ -n "$owner" ]] || return 1
+
+  if [[ -n "${LOOM_GH_CONFIG_BY_OWNER_ROOT:-}" ]]; then
+    dir="${LOOM_GH_CONFIG_BY_OWNER_ROOT%/}/$owner"
+  elif [[ -n "${GH_CONFIG_DIR:-}" ]]; then
+    local current="${GH_CONFIG_DIR%/}"
+    case "$current" in
+      */.loom/gh-config)
+        root="${current%/.loom/gh-config}"
+        dir="$root/.loom/gh-config-by-owner/$owner"
+        ;;
+    esac
+  fi
+
+  [[ -n "$dir" && -d "$dir" ]] || return 1
+  printf '%s' "$dir"
+}
+
+# Run `gh <args...>`, escalating credentials on a confirmed wrong-repo
+# `GH_CONFIG_DIR` (2am#446), ON TOP OF `forge_gh_perm_safe`'s existing #6074
+# ladder (tried first, unchanged) -- so an app-permission 403 still recovers
+# exactly as it did before this function existed.
+#
+# Only fires when `GH_CONFIG_DIR` is actually set: with no `GH_CONFIG_DIR` to
+# begin with, there is nothing this rung can route AROUND, and retrying with
+# `env -u GH_CONFIG_DIR` would be a verbatim replay of rung 1 -- the same
+# "skip an escalation that can't possibly differ" rule `forge_gh_perm_safe`'s
+# own rung 3 already applies to itself.
+#
+# Usage: forge_gh_repo_safe pr create --title T --body B ...
+# Stdout: the successful attempt's stdout. Returns the last attempt's exit
+# code; stderr carries the last attempt's error text.
+forge_gh_repo_safe() {
+  local out_file err_file rc=0
+  out_file=$(mktemp)
+  err_file=$(mktemp)
+
+  local out
+  out=$(forge_gh_perm_safe "$@" 2>"$err_file") || rc=$?
+
+  if [[ $rc -ne 0 && -n "${GH_CONFIG_DIR:-}" ]]; then
+    local first_err combined
+    first_err=$(cat "$err_file" 2>/dev/null || true)
+    combined=$(printf '%s\n%s' "$first_err" "$out")
+
+    if is_repo_mismatch_error "$combined"; then
+      local owner owner_dir escalated=false
+      owner=$(_forge_owner_from_remote 2>/dev/null || echo "")
+
+      if [[ -n "$owner" ]] && owner_dir=$(_forge_owner_gh_config_dir "$owner" 2>/dev/null); then
+        echo "forge: wrong-repo credential signature — retrying against the owner-partitioned directory $owner_dir (2am#446)" >&2
+        rc=0
+        _forge_cmd_attempt owner-config "$owner_dir" "$out_file" "$err_file" "$@" || rc=$?
+        [[ $rc -eq 0 ]] && escalated=true
+        out=$(cat "$out_file" 2>/dev/null || true)
+      fi
+
+      if [[ "$escalated" != "true" ]]; then
+        echo "forge: falling back to env -u GH_CONFIG_DIR (2am#446)" >&2
+        rc=0
+        _forge_cmd_attempt personal-ambient "" "$out_file" "$err_file" gh "$@" || rc=$?
+        out=$(cat "$out_file" 2>/dev/null || true)
+      fi
+    fi
+  fi
+
+  local err
   err=$(cat "$err_file" 2>/dev/null || true)
   rm -f "$out_file" "$err_file"
 
@@ -1140,6 +1495,36 @@ forge_gh_swap_label_rl_safe() {
       return 0
     fi
     echo "gh issue edit (label swap) rate-limited on #$issue_num, and the REST fallback also failed: $out" >&2
+    return 1
+  fi
+  echo "$out" >&2
+  return 1
+}
+
+# Remove a single label from an issue via `gh issue edit --remove-label`,
+# falling back to a REST DELETE on a GraphQL rate-limit rejection. Mirrors
+# forge_gh_swap_label_rl_safe's REST-fallback shape (#4856) minus the
+# add-label half — used where the target issue is closed and should NOT be
+# returned to any queue (#6199: stripping an orphaned `loom:building` claim
+# from an issue a merge just closed, as opposed to the swap-to-`loom:issue`
+# case for a still-open partial-increment issue).
+# Idempotent: `gh issue edit --remove-label` on a label the issue does not
+# carry, and the REST DELETE fallback on the same, both succeed as no-ops.
+# Usage: forge_gh_remove_label_rl_safe NWO ISSUE_NUMBER LABEL
+forge_gh_remove_label_rl_safe() {
+  local nwo="$1" issue_num="$2" label="$3"
+  local out
+  if out=$(forge_gh_perm_safe issue edit "$issue_num" --repo "$nwo" \
+      --remove-label "$label" 2>&1); then
+    return 0
+  fi
+  if is_rate_limit_error "$out"; then
+    local encoded_label
+    encoded_label="${label//:/%3A}"
+    if gh api "repos/$nwo/issues/$issue_num/labels/$encoded_label" -X DELETE >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "gh issue edit (label remove) rate-limited on #$issue_num, and the REST fallback also failed: $out" >&2
     return 1
   fi
   echo "$out" >&2

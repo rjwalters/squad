@@ -351,7 +351,16 @@ fi
 echo ""
 echo "Testing champion-pr-merge.md wiring..."
 
-CHAMPION_MD="$HELPERS_DIR/../.claude/commands/loom/champion-pr-merge.md"
+# Two `..` reaches repo-root/.claude/commands/loom for an INSTALLED copy
+# (HELPERS_DIR is .loom/scripts there); one `..` reaches defaults/.claude/
+# commands/loom when running inside this source repo (HELPERS_DIR is
+# defaults/scripts) -- the two layouts differ in depth, so probe both rather
+# than hard-coding one (#447).
+if [[ -f "$HELPERS_DIR/../../.claude/commands/loom/champion-pr-merge.md" ]]; then
+    CHAMPION_MD="$HELPERS_DIR/../../.claude/commands/loom/champion-pr-merge.md"
+else
+    CHAMPION_MD="$HELPERS_DIR/../.claude/commands/loom/champion-pr-merge.md"
+fi
 
 TESTS_RUN=$((TESTS_RUN + 1))
 if [[ -f "$CHAMPION_MD" ]] && grep -q 'MERGE_RC' "$CHAMPION_MD" && grep -q '"\$MERGE_RC" -eq 3' "$CHAMPION_MD"; then
@@ -396,8 +405,12 @@ fi
 # The native dispatch's `_AM_RC -eq 4` branch must call error_head_moved
 # BEFORE the `_AM_RC -ne 3` (Gitea-decline) check further down, so a 4 never
 # falls through and gets misclassified as a generic native failure.
+#
+# The anchor tolerates the optional `forge_cmd_perm_safe ` prefix the native
+# call carries since #6752 (the App-token 403 escalation ladder): the wrapper
+# preserves the exit code verbatim, so this ordering contract is unchanged.
 native_dispatch_order=$(awk '
-  /AUTO_MERGE_OUTPUT=\$\(loom-daemon forge auto-merge/ { indispatch=1 }
+  /AUTO_MERGE_OUTPUT=\$\((forge_cmd_perm_safe )?loom-daemon forge auto-merge/ { indispatch=1 }
   indispatch && /_AM_RC -eq 4/ { print "mismatch"; exit }
   indispatch && /_AM_RC -ne 3/ { print "decline_check"; exit }
 ' "$MERGE_PR_SRC")
@@ -405,7 +418,7 @@ assert_eq "mismatch" "$native_dispatch_order" "native _AM_RC dispatch checks the
 
 TESTS_RUN=$((TESTS_RUN + 1))
 if awk '
-  /AUTO_MERGE_OUTPUT=\$\(loom-daemon forge auto-merge/ { indispatch=1; next }
+  /AUTO_MERGE_OUTPUT=\$\((forge_cmd_perm_safe )?loom-daemon forge auto-merge/ { indispatch=1; next }
   indispatch && /_AM_RC -eq 4/ { found=1 }
   found && /error_head_moved "PR #\$PR_NUMBER: \$AUTO_MERGE_OUTPUT"/ { print "ok"; exit }
   indispatch && /^    fi$/ { exit }

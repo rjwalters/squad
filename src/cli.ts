@@ -1,3 +1,4 @@
+import { identityFromEnv } from "./identity.js";
 import { openDb, dbPath, squadDir } from "./db.js";
 import {
   Squad,
@@ -129,6 +130,29 @@ Human CLI usage:
   squad clear                 Wipe messages, goals, claims, cursors, members,
                                presence sessions, divergence rounds/submissions,
                                and review requests
+  squad export <path>         Export this room (every table) to a portable
+                               SQLite file at <path> -- WAL-safe (reads
+                               through pending WAL writes); refuses to
+                               overwrite an existing file
+  squad import <path>         Import a room previously written by
+                               'squad export' into this room; refuses on a
+                               schema-version mismatch or a non-empty
+                               destination room (run 'squad clear' first)
+  squad codex-reentry [--persona <name>] [--codex <bin>] [--ttl-minutes <n>]
+                      [--max-attempts <n>] [--no-resume] [--prompt <text>]
+                      [-- <extra codex exec args>]
+                               Run a Codex persona under the re-entry
+                               supervisor: launch 'codex exec' with the
+                               /squad-join prompt and relaunch it (bounded
+                               backoff, resets on an @mention) each time its
+                               turn ends, instead of leaving it parked and
+                               mute. One supervisor per persona, in that
+                               persona's own terminal -- start it where you
+                               would otherwise have run 'codex'. Bounded by
+                               SQUAD_REENTRY_TTL_MINUTES and
+                               SQUAD_REENTRY_MAX_ATTEMPTS, and stopped by
+                               SQUAD_REENTRY_STOP=1 or a .squad/reentry-stop
+                               marker; it announces in the room when it stops
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad help                  Show this help
@@ -138,17 +162,34 @@ from the current directory (falling back to ~/.squad outside any repo). Inside
 a git worktree the room is the primary clone's, so every worktree shares one.
 
 Environment:
-  SQUAD_PERSONA   Identity stamped on messages (default: human)
+  SQUAD_PERSONA   Explicit identity override (default: human without a session token)
+  SQUAD_SESSION_ID Logical agent UUID; reuse across CLI calls and MCP reconnects
+  SQUAD_PROVIDER Provider metadata for automatic agent identity (default: unknown)
+  SQUAD_MODEL    Model metadata for automatic agent identity (default: unknown)
   SQUAD_DIR       Override the data directory (skips repo-root resolution)
   SQUAD_STALE_MINUTES  Presence lease length: minutes of absence after which a
                   member (and its claims) list as stale (default 30)
   SQUAD_IDLE_MINUTES   Minutes of quiet after which a member drops from active
                   to idle — still leased, just paused (default 5)
+  SQUAD_REENTRY_TTL_MINUTES   Re-entry TTL for both re-entry adapters
+                  (default 240); 0 disables re-entry outright
+  SQUAD_REENTRY_MAX_ATTEMPTS  Hard cap on re-entries per arm cycle, used by
+                  'squad codex-reentry' (default 48)
+  SQUAD_REENTRY_STOP   Set to 1 to stop re-entry immediately (or touch
+                  .squad/reentry-stop / .squad/reentry/<persona>.stop)
+  SQUAD_CODEX_BIN      The codex binary 'squad codex-reentry' supervises
+                  (default 'codex')
 `;
 
 function fmt(m: Message): string {
   const time = m.ts.slice(11, 19);
-  return m.kind === "system" ? `${time} -- ${m.body}` : `${time} <${m.sender}> ${m.body}`;
+  // Collapsed system messages (#59) carry occurrences > 1: surface the
+  // repeat count and last-seen time instead of silently showing only the
+  // latest occurrence with no indication earlier ones ever happened.
+  const suffix = m.occurrences > 1 ? ` (seen ${m.occurrences} times, last at ${time})` : "";
+  return m.kind === "system"
+    ? `${time} -- ${m.body}${suffix}`
+    : `${time} <${m.sender}> ${m.body}${suffix}`;
 }
 
 interface DoctorCheck {
@@ -204,8 +245,8 @@ function checkPersona(): DoctorCheck {
     name: "persona",
     ok: true,
     detail:
-      "not pinned -- the MCP server autodetects from the host harness (Claude Code -> claude, " +
-      "Codex -> codex, else 'agent'); this CLI defaults to 'human'",
+      "not pinned -- MCP uses provider-model-session identities (unknown metadata stays unknown); " +
+      "this CLI defaults to 'human', or resumes SQUAD_SESSION_ID when supplied",
   };
 }
 
@@ -242,10 +283,27 @@ export async function runCli(argv: string[]): Promise<void> {
     await runDoctor();
     return;
   }
+  if (cmd === "codex-reentry") {
+    // Handled before the shared `Squad` below: the supervisor is not a
+    // human-persona command (it acts as the Codex persona it supervises) and
+    // it holds the process for hours, so it opens its own connections.
+    const { runCodexReentry, CODEX_REENTRY_USAGE } = await import("./codex-reentry-driver.js");
+    if (rest.includes("--help") || rest.includes("-h")) {
+      console.log(CODEX_REENTRY_USAGE);
+      return;
+    }
+    const summary = await runCodexReentry(rest);
+    console.log(
+      `codex re-entry supervisor stopped after ${summary.runs} run(s) / ` +
+        `${summary.attempts} re-entry(ies): ${summary.stopReason}`,
+    );
+    return;
+  }
 
-  const persona = process.env.SQUAD_PERSONA ?? "human";
+  const persona = process.env.SQUAD_PERSONA || (process.env.SQUAD_SESSION_ID ? undefined : "human");
   const db = openDb();
-  const squad = new Squad(db, persona);
+  // Import must inspect an untouched destination before any identity reservation.
+  const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
     case "send": {
@@ -657,13 +715,32 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     case "leave": {
       const left = squad.leave();
-      if (left.sessions_ended.length === 0) console.log(`${persona} is not in the room`);
-      else console.log(`${persona} left the room (${left.sessions_ended.length} session(s) ended)`);
+      if (left.sessions_ended.length === 0) console.log(`${squad.persona} is not in the room`);
+      else
+        console.log(
+          `${squad.persona} left the room (${left.sessions_ended.length} session(s) ended)`,
+        );
       break;
     }
     case "clear": {
       squad.clear();
       console.log(`cleared room at ${dbPath()}`);
+      break;
+    }
+    case "export": {
+      const destPath = rest[0];
+      if (!destPath) throw new Error("usage: squad export <path>");
+      const counts = await squad.exportRoom(destPath);
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      console.log(`exported ${total} row(s) across ${Object.keys(counts).length} tables to ${destPath}`);
+      break;
+    }
+    case "import": {
+      const srcPath = rest[0];
+      if (!srcPath) throw new Error("usage: squad import <path>");
+      const counts = squad.importRoom(srcPath);
+      const total = Object.values(counts).reduce((a, b) => a + b, 0);
+      console.log(`imported ${total} row(s) across ${Object.keys(counts).length} tables from ${srcPath} into ${dbPath()}`);
       break;
     }
     case "nuke": {
@@ -695,9 +772,12 @@ export function knownCommand(cmd: string | undefined): boolean {
       "who",
       "leave",
       "clear",
+      "export",
+      "import",
       "nuke",
       "path",
       "doctor",
+      "codex-reentry",
       "help",
       "--help",
       "-h",

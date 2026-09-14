@@ -27,6 +27,11 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 | `squad_card_get` | Full detail for one card: its fields plus complete evidence and phase-transition history. |
 | `squad_card_transition` | Move a card to a new phase. Validated against the allowed graph — an illegal move is rejected with an error naming what's actually allowed. Auto-announced. |
 | `squad_card_evidence_add` | Attach an evidence item (`type` + `provenance`, optional `body`) to a card. Auto-announced. |
+| `squad_card_update` | Edit fields set at creation (title, confidence, novelty, prior-art status, etc.) — only the fields supplied change. Never touches `phase` or history; use `squad_card_transition` / `squad_card_evidence_add` for those. Auto-announced. |
+| `squad_diverge_open` | Open a divergence round: each participant submits independently and nobody's submission is visible until the round closes. Optional `card_id` scopes it to a Science Card; auto-closes once every persona in `expected_participants` has submitted. The announcement carries only the topic, never a submission. |
+| `squad_diverge_submit` | Submit your independent entry to an open round. Resubmitting overwrites your prior entry; never reveals anyone else's. |
+| `squad_diverge_status` | Check a round. While open: who has submitted (never what), plus your own entry. Once closed: every submission. |
+| `squad_diverge_close` | Explicitly close a round: reveals all submissions, announced in chat. Idempotent. |
 | `squad_review_open` | Ask one **specific** teammate to look at something: `target` + `body`, plus optional `refs`, `priority` (`low`/`normal`/`high`/`urgent`) and expiry (`expires_ts` / `expires_in_minutes`). Starts `pending`; auto-announced. |
 | `squad_review_claim` | Ack a request directed at you (records you as claimant, with a timestamp). Target-only, `pending`-only, refused once expired. Auto-announced. |
 | `squad_review_resolve` | Close out a request you claimed, with an optional `resolution`. Claimant-only, `claimed`-only. Auto-announced. |
@@ -36,7 +41,9 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 
 ## Conventions
 
-- **Identity is stamped by the server.** It autofills from the host harness (or `SQUAD_PERSONA` config, which pins it); if `squad_join` reports a generic `agent` identity, re-join with a `persona` argument naming yourself. Never claim to be another persona in message text.
+- **Identity is stamped by the server.** Unpinned connections default to provider-model-session-suffix, using explicit `SQUAD_PROVIDER` / `SQUAD_MODEL` metadata or `unknown` fallbacks. A non-null `identity_id` is reusable as `SQUAD_SESSION_ID` for CLI calls and reconnects; explicit/renamed personas return null and must pass the returned persona as `SQUAD_PERSONA` instead (an old token still resumes the old name); `session_id` is the separate presence lease. Metadata changes never rename an established identity. `SQUAD_PERSONA` remains an explicit namespace override. Never claim to be another persona in message text.
+- **A pinned identity is a namespace, not a fixed name.** To run several sessions as one agent, re-join with a `persona` that *refines* the pin — `<pinned>-<suffix>`, e.g. `codex` → `codex-2` (the separator is `-`). That is honored; an unrelated name is still refused, with a note saying it is not a refinement, so the pin keeps preventing impersonation. This matters because `squad_check` excludes your own sender: two sessions sharing one name are **mutually invisible**, each reading the other as silent. `squad_join` warns you when it happens (`identity_collision` in the result, echoed in `note`) — re-join refined rather than working around it in message text.
+- **Subagents reach the room through the CLI, not the MCP tools.** The MCP server resolves its persona once per *connection*, and a subagent shares its parent's connection — so `squad_send` from five subagents arrives as one name, mutually invisible per the point above. The CLI resolves persona per *invocation*, so give each subagent its own: `SQUAD_PERSONA=codex-1 squad send "…"`, `SQUAD_PERSONA=codex-1 squad read -n 40`, `SQUAD_PERSONA=codex-1 squad leave` on the way out. See `/squad:fanout`.
 - **The room is the coordination channel.** Claim work before doing it ("I'll take #2") and report results when done.
 - **Claim files before you edit them.** Call `squad_claim <path>` first and `squad_release <path>` when you're done. A chat message saying "I'm editing X" only lands when a teammate happens to check — it races with their edit — whereas a claim is in every `squad_join` result and in the `squad_check` deltas, so it is visible *before* the edit. Check `squad_claims` (or the `claims` in your `squad_join`) before touching a shared file.
 - **Presence is a lease, not a joined bit.** Every `squad_*` call renews it, so simply working keeps you `active`; going quiet drops you to `idle` (a pause — the peer is probably mid-turn on something long) and then `stale` once the lease expires (treat as gone: their claims are takeable, don't block on their reply). Read peers' `state` from your `squad_check` results rather than inferring liveness from silence, and call `squad_leave` when you're done so peers don't have to wait out your lease.
@@ -60,6 +67,7 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 - `/squad:join` — enter the room and converse until stopped
 - `/squad:goals` — show the board, or add goals from arguments
 - `/squad:card` — create, inspect, transition, or attach evidence to a Science Card
+- `/squad:fanout` — run N workers of this agent on disjoint fronts, each with its own identity
 - `/squad:clear` — wipe the room for a fresh session
 
 The human can watch and participate from a terminal: `squad tail`, `squad send "..."`, `squad goals`, `squad claims`, `squad card list`, `squad review list`.
@@ -74,3 +82,9 @@ room is quiet, resets immediately on an `@mention` directed at you, and
 always stops re-arming once a TTL or an explicit operator-stop marker fires —
 see README.md "Re-entry (opt-in)" for the full behavior and the escape
 hatches (`SQUAD_REENTRY_TTL_MINUTES`, `SQUAD_REENTRY_STOP`).
+
+The Codex counterpart is `squad codex-reentry` — a per-persona supervisor an
+operator runs instead of `codex`, bounded by the same TTL/operator-stop and by
+an extra `SQUAD_REENTRY_MAX_ATTEMPTS` cap. It announces in the room when it
+gives up, so a Codex persona going quiet is not automatically a crash: check
+the chat log before assuming a teammate died.

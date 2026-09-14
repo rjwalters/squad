@@ -30,7 +30,7 @@ each definition, for the terse version of this same table):
 | Label | Question it answers | Does sweep/shepherd skip it? |
 |---|---|---|
 | `loom:blocked` | Waiting on a dependency, but still automatable once that clears | No |
-| `loom:operator-only` | Requires human action or ruling *outside* automation entirely (credentials, infra, hardware, an owner-gated decision) | **Yes** — sweep/shepherd skip it |
+| `loom:operator-only` | Requires human action or ruling *outside* automation entirely (credentials, infra, hardware, an owner-gated decision) | **Yes** — sweep/shepherd skip it, except the narrow capability-matched `loom:operator-mechanical` case (#6893, see "Dispatch path" below) |
 | `loom:needs-capability` | Blocked on a missing tool/agent capability — not an operator-by-right decision, but automation genuinely cannot proceed without the capability existing first (#5817) | **Yes** — sweep/shepherd skip it, identically to `loom:operator-only` today |
 | `loom:operator` | The engine has stopped on this specific artifact and a human must act, but the item stays live in its normal queue so the engine's own release conditions can still fire | **No** — stays in the normal re-evaluation queue |
 
@@ -45,14 +45,21 @@ having to remember to remove it.
 
 | Role | Trigger | Status |
 |---|---|---|
-| Champion (PR merge) | Posts a merge-risk hold (`champion:merge-risk-hold`) because a safety axis is red | **Wired** — `defaults/.claude/commands/loom/champion-pr-merge.md`, "Hold behavior" |
+| Champion (PR merge) | Posts a merge-risk hold (`champion:merge-risk-hold`) because a safety axis is red (criterion #2) | **Wired** — `defaults/.claude/commands/loom/champion-pr-merge.md`, "Hold behavior" |
+| Champion (PR merge) | Posts a critical-file hold (`champion:critical-file-hold`) because criterion #3 matched a critical-file pattern | **Wired** (#6879) — `defaults/.claude/commands/loom/champion-pr-merge.md`, Safety Criteria → 3 → "Durable hold on FAIL" |
+| Champion (issue close) | Holds a merged PR's linked **issue** open because one of its acceptance criteria needs out-of-band verification (live source, real scheduled run, observation over time) and no `loom:ac-verified` marker attests it | **Wired** (#6883) — `defaults/.claude/commands/loom/champion-pr-merge.md`, Step 4 → "Out-of-Band Acceptance-Criteria Gate" |
 | Builder / Doctor | Encounters work that needs credentials, infra, or a policy ruling outside automation (today's `loom:operator-only` use case) | Not yet wired — follow-up work |
 | Judge | A review surfaces a question only a human can answer | Not yet wired — follow-up work |
 | Human | Applies the label directly to any issue or PR | Always available (labels are always human-writable) |
 
-**Scope note**: this first pass (#5502) wires only the Champion merge-risk
-hold entry point end-to-end. `curator.md`, `builder.md`, `doctor.md`,
-`judge.md`, `champion.md`, `champion-common.md`, `champion-issue-promo.md`,
+**Scope note**: this first pass (#5502) wired only the Champion merge-risk
+hold entry point end-to-end; #6879 added a second Champion entry point
+(criterion #3's critical-file hold), and #6883 a third (Step 4's out-of-band
+acceptance-criteria hold) — all three reuse the same label and the same overall
+shape. #6883 is the first entry point that applies the label to an **issue**
+rather than a PR; see "The out-of-band AC hold on an issue (#6883)" under the
+exit rule for how the exit rule reads there. `curator.md`, `builder.md`, `doctor.md`, `judge.md`,
+`champion.md`, `champion-common.md`, `champion-issue-promo.md`,
 `champion-reference.md`, `loom.md`, `sweep.md`, and `watch.md` all reference
 `loom:operator-only` and/or `loom:blocked` today; none of them assume that set
 is exhaustive in a way that required editing for this PR, but none of them
@@ -82,21 +89,106 @@ A human can also clear `loom:operator` directly at any time by removing the
 label — the automated exit rule above is the *default* path, not the only
 one.
 
+### The out-of-band AC hold on an issue (#6883)
+
+Champion's Step 4 gate applies `loom:operator` to an **issue** whose acceptance
+criteria include a step CI structurally cannot perform, when nothing attests it
+was performed (`champion-pr-merge.md` → "Out-of-Band Acceptance-Criteria Gate").
+The exit rule reads the same way it does for the PR holds — the artifact must
+**materially change** — but the artifact here is the *evidence*, not a diff:
+
+| Event | `loom:operator` on the held issue |
+|---|---|
+| Someone performs the step and posts a comment ending `<!-- loom:ac-verified sha=<head> -->` | Cleared **by that human**, along with closing the issue — the marker records the evidence, it does not itself trigger a re-scan |
+| The criterion is reworded because it was never really out-of-band | Cleared by whoever rewords it |
+| Nothing happens | Stays applied — correctly. Nobody has done the thing. |
+
+**There is no automated release for this entry point, and that is deliberate,
+not an oversight.** The PR that would have re-evaluated it is already merged, so
+no Champion tick returns to it; and the condition it encodes ("a human must
+observe something in the world") cannot be discharged by any engine re-read. The
+hold comment therefore states the exit path explicitly rather than implying a
+later pass will notice. `loom:operator`'s defining property still holds — the
+issue stays in every normal queue and is never skipped — so a human, a Curator
+re-read, or a fresh sweep can all still act on it.
+
+### The stale-PR route out of `loom:pr` (#5802, narrowed by #6720)
+
+Champion's stale-PR policy swaps `loom:pr` → `loom:changes-requested` on a PR
+untouched for 24h, so it reaches Doctor for a rebase. That route now fires from
+a **held** state too — before #6720 the sticky-hold bail-out ran first and
+dropped the PR from the pass entirely, so the only automated path from `loom:pr`
+to Doctor was unreachable for exactly the PRs that most needed it (measured:
+21 held PRs, 20 `CONFLICTING`, Doctor's queue empty).
+
+`loom:operator` behaves differently on the two variants, and the split is a
+consequence of the exit rule above rather than an exception to it — the question
+is only whether the human-needed condition is *resolved* by the departure:
+
+| Stale departure to Doctor | `loom:operator` | Rationale |
+|---|---|---|
+| No hold in force (#5802) | **Removed** | Nothing outstanding requires a human; the label was never applied in the first place, so the removal is a no-op. |
+| Hold in force (#6720) | **Kept** | The hold is unresolved and the PR is expected to return still needing a human merge decision. Clearing it would assert "no human is needed" for the whole Doctor round-trip, which is false. |
+
+Keeping the label on that route is safe precisely because of `loom:operator`'s
+defining property — it is re-evaluable and **must never cause an item to be
+skipped**. The consumers confirm it: Doctor's `loom:changes-requested` queue
+excludes `loom:blocked` / `loom:operator-only`, not `loom:operator`; Judge does
+not filter on it; sweep C1c's exclusion (#6398) is a *merge*-route skip, which
+is what the hold wants; and `verdict-staleness-guard.sh` declines to un-park it
+(#5686). Doctor's *Priority 1* queue does exclude `loom:operator` (#5978, so
+autonomous work never force-pushes a held PR), but that queue is `loom:pr`-scoped
+and the routed PR has just left it.
+
+The `champion:merge-risk-hold` marker comment is **preserved** across this
+round-trip. Doctor's rebase is a genuine release *signal* (the diff moved, so the
+axes are re-judged), but the *record* of the hold must survive — it is what keeps
+`PRIOR_HOLD=true`, and therefore keeps Step 2's hold-reversal comment mandatory
+if the PR later merges. A rebase must not launder a held PR into an unheld one.
+
+**#6852 narrows the "Hold in force" row further.** Routing to Doctor on that row
+is now conditional on the PR carrying genuine unresolved feedback (a failing
+required check) *in addition to* the hold — a **hold-only** stale PR (the hold
+is the sole blocker; CI is passing or has no checks) is left on `loom:pr`
+instead of being routed, to stop an unproductive "rebase treadmill" where `main`
+moving repeatedly forces a rebase that cannot resolve the actual blocker (a
+pending human merge decision). `loom:operator` and the hold marker are
+unaffected either way — see `champion-pr-merge.md` → "Held-PR Health Pass" →
+"#5 under a hold" for the exact routing decision, and "Hold-only Stale PR —
+suspend the route" for the suspended path.
+
 ## Current implementation
 
-Only the Champion merge-risk-hold entry/exit pair is wired today:
+Two Champion entry/exit pairs are wired today, both in the same file:
 
-- **Entry** — `defaults/.claude/commands/loom/champion-pr-merge.md`, criterion
-  #2's "Hold behavior" block (`gh pr edit ... --add-label loom:operator`,
-  posted alongside the `champion:merge-risk-hold` marker).
-- **Exit** — the same file's Step 2 ("Add Pre-Merge Comment"), gated on the
-  non-empty `$HOLD_REVERSAL_BLOCK` built by the release precheck (`gh pr edit
-  ... --remove-label loom:operator`, posted alongside the
-  `champion:merge-risk-hold-cleared` marker).
-
-Both reuse the single release precheck at `champion-pr-merge.md` ("Sticky
-holds — a hold does NOT clear on a re-read alone") rather than re-deriving
-release state independently.
+- **Criterion #2 (merge-risk hold)**:
+  - **Entry** — `defaults/.claude/commands/loom/champion-pr-merge.md`, criterion
+    #2's "Hold behavior" block (`gh pr edit ... --add-label loom:operator`,
+    posted alongside the `champion:merge-risk-hold` marker).
+  - **Exit** — the same file's Step 2 ("Add Pre-Merge Comment"), gated on the
+    non-empty `$HOLD_REVERSAL_BLOCK` built by the release precheck (`gh pr edit
+    ... --remove-label loom:operator`, posted alongside the
+    `champion:merge-risk-hold-cleared` marker).
+  - **Conditional exit** — the same file's "PR Rejection Workflow → Stale PR"
+    block, which removes the label only when no hold is in force
+    (`MERGE_BLOCKED_BY_HOLD != true`) and keeps it otherwise; see "The stale-PR
+    route out of `loom:pr`" above (#5802 / #6720).
+  - Reuses the release precheck at `champion-pr-merge.md` ("Sticky holds — a
+    hold does NOT clear on a re-read alone") rather than re-deriving release
+    state independently.
+- **Criterion #3 (critical-file hold, #6879)**:
+  - **Entry/exit** — `defaults/.claude/commands/loom/champion-pr-merge.md`,
+    Safety Criteria → 3 → "Durable hold on FAIL" block, run immediately after
+    criterion #3's check-loop. `gh pr edit ... --add-label loom:operator`
+    alongside the `champion:critical-file-hold` marker on FAIL;
+    `gh pr edit ... --remove-label loom:operator` alongside the
+    `champion:critical-file-hold-cleared` marker the first time a later push
+    no longer matches any critical-file pattern.
+  - Needs **no** sticky-hold precheck: criterion #3's check-loop is a
+    deterministic file-pattern match, not a judgment call, so there is no
+    "same diff scores differently on a later read" case to guard against —
+    the FAIL/PASS verdict itself, recomputed fresh every tick, is the release
+    signal.
 
 **One consumer honors the hold without ever setting it (#5686)**: the
 stale-verdict machinery (`defaults/scripts/verdict-staleness-guard.sh` and
@@ -135,6 +227,158 @@ by four sub-kind labels applied *alongside* it:
 | `loom:operator-mechanical` | Needs host or admin access, a credential, or another mechanical action — no judgement required | No (needs the action to happen) |
 | `loom:operator-decision` | The act requires authority the operator alone holds — a preference call or an authority act (binds the entity/a third party, irreversible public disclosure, spending/authorisation, credentials only the operator holds, accepting risk on the entity's behalf, physical-world action) | No (needs a human ruling) |
 | `loom:operator-objective` | The decision is determined once the operator states an objective — the item names the candidate objectives and the answer under each (#5826) | Yes — clears the moment the objective is given, and one answer often unblocks several items at once |
+
+**Dispatch semantics vs. the "no judgement required" framing (#6881).**
+"Self-clearing?" above answers a different question than "does sweep/shepherd
+skip it?" — every sub-kind, `loom:operator-mechanical` included, is skipped
+identically today, because the skip is implemented once, keyed on the *base*
+`loom:operator-only` label (`sweep.md`'s `all`-sentinel taxonomy and Mode C
+pre-flight; `loom-daemon/src/work_finder.rs`'s `PARK_LABELS`), and the
+sub-kind is additive metadata the skip logic does not currently branch on.
+`loom:operator-mechanical`'s "no judgement required" describes the *nature of
+the work* — a worker with the right host/credential/admin access could do it
+without a ruling — not a claim that it is dispatched differently than
+`loom:operator-decision`; the base label wins for all four sub-kinds **unless
+the capability lane below applies**.
+
+**Updated by #6893.** The skip is now capability-aware for the mechanical
+sub-kind specifically — see "Dispatch path" under the convention below. The
+paragraph above still describes the default: a `loom:operator-mechanical` item
+with no capability declaration, or one this worker cannot satisfy, is skipped
+identically to the other three sub-kinds. What changed is that "no judgement
+required" is no longer *only* a routing hint — for a declaring item on a
+declaring host it is now a real, narrow, propose-only dispatch path.
+
+### Capability-declaration convention (`<!-- loom:capability=<name> -->`, #6885/#6892)
+
+Before a capability-aware dispatch path (#6885's Part 2, tracked as #6893) can
+distinguish "a worker holding the declared capability may attempt this" from
+"park it", a `loom:operator-mechanical` item needs a machine-readable way to
+state what it needs. This convention defines that marker. **It is meaningful
+only alongside `loom:operator-mechanical`** — the other three sub-kinds
+(`loom:operator-blocked`, `loom:operator-decision`, `loom:operator-objective`)
+ignore it entirely and stay hard-skipped exactly as today, unconditionally,
+regardless of whether a marker happens to be present in their body.
+
+**Marker syntax.** Mirrors the `<!-- loom:complexity=<tier> -->` convention
+(see `defaults/.claude/commands/loom/curator.md` → "Complexity routing
+marker") exactly in form: an HTML comment in the issue/PR body, invisible in
+rendered Markdown, trivially greppable. One marker per required capability,
+each on its own line:
+
+```html
+<!-- loom:capability=host-sudo -->
+<!-- loom:capability=cloud-profile:prod-aws -->
+```
+
+Unlike the complexity marker (exactly one tier per item), a
+`loom:operator-mechanical` item may carry **more than one** capability
+marker. Multiple markers are **ANDed** — a worker must hold every declared
+capability, not just one of them, before the item is dispatchable. An item
+with `loom:operator-mechanical` and **no** marker at all declares no known
+capability requirement and stays hard-skipped by the base label exactly as
+today, until the dispatch path (#6893) says otherwise.
+
+**Closed vocabulary (small, extensible, fail-closed).**
+
+| Value | Meaning |
+|---|---|
+| `host-sudo` | Needs root/administrator access on the execution host |
+| `forge-admin-token` | Needs a GitHub/Gitea token with admin (not just repo-write) scope |
+| `cloud-profile:<name>` | Needs a named cloud credential profile, e.g. `cloud-profile:prod-aws` |
+| `tailnet-access` | Needs access to the private tailnet/VPN |
+
+The vocabulary is deliberately small — extend it by adding a row here (and
+the matching entry in `defaults/scripts/extract-capability-markers.sh`'s
+`KNOWN_LITERALS`/`KNOWN_PREFIXES`), not by any item inventing its own value.
+**An unrecognized or misspelled value MUST fail closed**: treated identically
+to "no capability declared" (the item stays hard-skipped), never silently
+ignored or treated as satisfied. This applies symmetrically — an item
+declaring a typo'd value is exactly as undispatchable as one declaring
+nothing, and (Part 2's concern, not this doc's) a worker's own declared
+holds must be checked against the same closed vocabulary.
+
+**Parser convention.** Anchor to the full `<!-- loom:capability=<value> -->`
+comment form, never a bare substring — the same anchoring
+`require-complexity-marker.sh` uses for `loom:complexity`, and for the same
+reason (#4840): prose that merely *quotes* the marker syntax as literal
+example text (exactly as this section does above, and as the issue that
+introduced this convention did in its own body) must never be mistaken for a
+live marker. The value grammar is `[a-z0-9][a-z0-9:_-]*` — lowercase
+alphanumerics with `:`/`_`/`-` separators, generalizing the complexity
+marker's plain `[a-z]*` to accommodate the colon-parameterized
+`cloud-profile:<name>` family. Unlike the complexity marker (`tail -1`, last
+match wins because only one tier is ever valid), a capability-bearing item
+collects **every** matching marker, deduplicated — the whole declared set
+matters, not just the last one written. The whitespace immediately before
+the closing `-->` is optional — `<!--loom:capability=host-sudo-->` and
+`<!-- loom:capability=host-sudo -->` parse identically — but both reference
+parsers anchor extraction on the closing delimiter itself (#6914), so a
+value never picks up the delimiter's own leading dashes when there is no
+space to stop it first.
+
+A reference implementation of this exact contract lives at
+`defaults/scripts/extract-capability-markers.sh` (tests:
+`defaults/scripts/tests/test-extract-capability-markers.sh`). Both the Rust
+daemon side (`loom-daemon/src/work_finder.rs`, #6893) and any
+markdown-orchestration (`sweep.md`) side implementing the actual
+capability-aware dispatch check should parse a body identically to that
+reference rather than deriving their own regex, so the two surfaces cannot
+silently diverge on what counts as a valid marker.
+
+The convention work itself (#6892) made **no dispatch-logic change**. #6893
+added the consumer described next.
+
+### Dispatch path (#6893) — propose-only, opt-in per host, fail-closed
+
+Two surfaces read the marker and may route a `loom:operator-mechanical` item
+somewhere other than the `loom:operator-only` park:
+
+| Surface | Where |
+|---|---|
+| Daemon (Tier 2 dispatch) | `loom-daemon/src/capability.rs` + `WorkItem::is_skipped_with_capabilities` / the `SweepRegistry` step-2.7 park guard |
+| Sweep (`all` sentinel + Mode C C0) | `defaults/.claude/commands/loom/sweep.md` → "Capability-aware `loom:operator-mechanical` lane" |
+
+Both apply the **same four gates**, in order, and any failure means "skipped
+exactly as before":
+
+1. **The host declares capabilities.** `LOOM_WORKER_CAPABILITIES` (a comma- or
+   whitespace-separated list of closed-vocabulary values) is set in the
+   *environment*. Unset — the default everywhere — makes the whole path inert.
+   It is deliberately **not** readable from `.loom/config.json`: a capability is
+   a property of the machine and its credentials, and a file committed to git
+   must not be able to assert that the host running it has root. A worker's own
+   declared values are validated against the same closed vocabulary, so a typo'd
+   hold grants nothing.
+2. **Labels are exactly the mechanical shape** — `loom:operator-only` **and**
+   `loom:operator-mechanical`, and **none** of `loom:operator-decision`,
+   `loom:operator-blocked`, `loom:operator-objective`, `loom:needs-capability`,
+   `loom:blocked`, `loom:operator`. A contradictory pairing resolves in favour
+   of the judgement sub-kind.
+3. **The body declares ≥1 marker and every declared value is recognized** (the
+   fail-closed rule above; an unknown value is exactly as undispatchable as no
+   value).
+4. **The host holds every declared capability** (markers are ANDed).
+
+**What the lane may then do is produce a proposal — never a live credentialed
+action.** The worker emits the exact commands (or a PR) for an operator to
+approve and stops; the item keeps both labels and is not closed. A
+live-execution mode is a separate, explicit opt-in that this work deliberately
+did not build.
+
+**When a declared capability is not held**, the item still parks — but the
+worker leaves a comment naming the missing capability, turning a silent stall
+into a capability request.
+
+**When anything encountered turns out to require a judgement call** rather than
+mechanical execution, the worker hard-stops and relabels
+`loom:operator-mechanical` → `loom:operator-decision` (or
+`loom:operator-objective`), which makes the stop durable: gate 2 refuses the
+item on every later pass.
+
+`loom:needs-capability` is **unaffected** — different label, different problem
+(see "Bidirectional routing" below): it asserts the capability does not exist
+yet, which no worker can hold.
 
 ### The classifying question, before choosing `loom:operator-decision` (#5826)
 
@@ -196,7 +440,13 @@ judgement call as a disguise. Keep working; don't park it.
    regex — see their headers). A backtick-quoted issue reference alone (e.g.
    `` `owner/repo#123` `` in prose) does not satisfy this — the phrase itself
    must be present so a future automated pass can extract it without an LLM
-   read.
+   read. That same machine-readable line (plus an epic-phase issue's
+   `**Epic**: #N` header) is also what Curator's read-only "Checking
+   Operator-Only Premises" re-check (`curator.md`, #6849) parses to notice
+   when a parked issue's named blocker or parent epic has since closed — it
+   posts a comment surfacing the finding and never touches this label or its
+   sub-kind, so naming the blocker here is what makes that re-check possible
+   at all.
 4. **When the sub-kind is `loom:operator-decision`, the same comment MUST name
    the disagreement axis and state why it's a preference rather than a fact
    (#5826).** A bare "requires judgement" does not satisfy the rule — apply
@@ -241,7 +491,7 @@ without a sub-kind in the same argument.
 
 ## `loom:needs-capability` — a narrower claim than `loom:operator-only` (#5817)
 
-A fleet-wide census (2AMLogic/2am#184) found `loom:operator-only` carrying at
+A fleet-wide census (example-org/fleet-repo#301) found `loom:operator-only` carrying at
 least two very different populations under one label: issues that are
 genuinely **operator-by-right** (disclosure flips, spending, legal, tier
 grants, fleet membership — a human must rule regardless of tooling), and
@@ -269,11 +519,11 @@ the same way). Nothing about *routing* differs yet — only the label's
 *meaning* is narrower, and the description now records which capability
 request must land before a human should reconsider it. This issue (#5817) was
 deliberately scoped to the split only; **which label to apply when** and the
-bidirectional routing convention are addressed below (2AMLogic/2am#184's
+bidirectional routing convention are addressed below (example-org/fleet-repo#301's
 remaining asks, #5818).
 
 **Additive only.** No existing `loom:operator-only` issue is retagged as part
-of introducing this label — 2AMLogic/2am#184 explicitly rejected retrofitting
+of introducing this label — example-org/fleet-repo#301 explicitly rejected retrofitting
 the existing backlog ("retrofitting 120 issues is not proposed; apply going
 forward"). The value is in the intake rate for newly filed/curated issues,
 the same "no backfill" principle the operator-only sub-kinds above already
@@ -282,18 +532,18 @@ follow.
 ## Bidirectional routing: `loom:operator-only` ↔ `loom:needs-capability` (#5818)
 
 Splitting the label (#5817, above) answers "which label applies to a *new*
-block." This section answers the other half of 2AMLogic/2am#184's asks: what
+block." This section answers the other half of example-org/fleet-repo#301's asks: what
 an agent does when it re-reads an **existing** `loom:operator-only` issue and
 recognizes the block was never actually operator-by-right — it is unbuilt
 capability that got parked under the cautious label before this split
 existed, or before whoever applied it thought to look for the distinction.
 
-**The worked example that motivated this.** 2AMLogic/2am#184 traced this
-exact shape through `gf180-pll`'s spec-ratification issue, which held three
+**The worked example that motivated this.** example-org/fleet-repo#301 traced this
+exact shape through an analog-canary repo's spec-ratification issue, which held three
 canaries because it was labeled `loom:operator-only` and nobody had connected
 "operator-only" to "the capability this needs — `spec-review`'s ratify
 verdict — already exists, it is just forbidden from acting on its own
-output." The fix, 2AMLogic/klayout-tools#654, promoted `spec-review`'s ratify
+output." The fix, example-org/tool-repo#204, promoted `spec-review`'s ratify
 verdict from advisory to binding: a tool change in the repo that owns the
 capability, not a human ruling at all. Recognizing that shape earlier — a
 capability that exists but is deliberately non-authoritative, not a decision

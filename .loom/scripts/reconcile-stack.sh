@@ -192,13 +192,45 @@ if ! run "${GIT_C[@]}" rebase --onto "$DEFAULT_BRANCH" "$PARENT_BRANCH" "$CHILD_
     exit 2
 fi
 
+# Version-bearing-file sync gate (#7168, extended #7341): `rebase --onto`
+# replays ONLY the child's own commits, so it silently absorbs whatever
+# version-bearing values $DEFAULT_BRANCH already had. A file the child's own
+# commits never touched (in practice .loom/install-metadata.json) never
+# raises a git conflict, so it can end up stale relative to VERSION/the files
+# that WERE part of the rebase -- invisible until CI's "Installer Integration
+# Tests" fails. This script had the identical gap rebase-stacked-children.sh
+# was fixed for in #7168/#7171 (both rebase + force-push directly, never
+# through create-pr.sh) -- run the same shared gate here too, in whichever
+# directory the rebase actually ran (the child worktree when one holds the
+# branch, else the current directory). Skipped under --dry-run: no rebase
+# actually happened, so there is nothing new to check.
+if [[ "$DRY_RUN" != "true" ]] && [[ -x "$SCRIPT_DIR/version-check-gate.sh" ]]; then
+    GATE_CWD="${CHILD_WORKTREE:-.}"
+    if ! (cd "$GATE_CWD" && "$SCRIPT_DIR/version-check-gate.sh" --fix-hint "then push."); then
+        err "Version-bearing files are out of sync for '$CHILD_BRANCH' after rebase onto '$DEFAULT_BRANCH' (see BLOCKER:/Fix: above)."
+        exit 2
+    fi
+fi
+
 # 2. Publish the rewritten child branch. --force-with-lease (never bare --force)
 #    so a concurrent push aborts rather than clobbers. Pushed from the same
 #    worktree the rebase ran in, so the current branch there is the child branch.
 info "Step 2/3: push --force-with-lease"
 if ! run "${GIT_C[@]}" push --force-with-lease; then
-    err "Force-with-lease push was rejected (someone else pushed to $CHILD_BRANCH). Fetch, review, and retry."
-    exit 2
+    # A reported rejection is not always a real one (#6695): Git LFS's
+    # pre-push hook can race the lease re-check on a branch with pending LFS
+    # objects, so the ref update lands while the printed rejection reflects a
+    # stale read. Verify the LIVE remote ref before trusting the reported
+    # failure — never a local remote-tracking ref, which is not re-fetched here.
+    PUSH_RACE_SHA="$("${GIT_C[@]}" rev-parse "$CHILD_BRANCH" 2>/dev/null || true)"
+    # shellcheck source=lib/push-lease-verify.sh
+    source "$SCRIPT_DIR/lib/push-lease-verify.sh"
+    if [[ "$DRY_RUN" != "true" ]] && push_landed_despite_rejection origin "$CHILD_BRANCH" "$PUSH_RACE_SHA" "${GIT_C[@]}"; then
+        warn "PUSH-LEASE-RACE-DETECTED: push --force-with-lease reported a rejection for '$CHILD_BRANCH', but origin already reflects the update ($PUSH_RACE_SHA) — likely the Git LFS pre-push hook racing the lease re-check (#6695). Treating as landed and continuing."
+    else
+        err "Force-with-lease push was rejected (someone else pushed to $CHILD_BRANCH). Fetch, review, and retry."
+        exit 2
+    fi
 fi
 
 # 3. Retarget the child PR's base to the default branch.

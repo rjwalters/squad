@@ -69,6 +69,47 @@ behavior — a forge outage never blocks worktree creation. The #4823 in-flight
 case (remote branch exists, not yet merged, possibly diverged from base) is
 unaffected and still reused exactly as before.
 
+### `git push --force-with-lease` prints a rejection for a ref update that landed (#6695)
+
+On a repository using Git LFS, `git push --force-with-lease=<branch>:<old-sha>
+origin <branch>` can print a rejection —
+
+```
+! [rejected]        <branch> -> <branch> (stale info)
+error: failed to push some refs to '...'
+remote rejected ... is at <new-sha> but expected <old-sha>
+```
+
+— even though the ref update actually **landed** (confirmed by `git
+ls-remote` and the `origin/<branch>` reflog showing an `update by push`
+entry). Suspected cause: the **LFS pre-push hook** races the lease
+re-check — the hook uploads LFS objects and the ref update proceeds on the
+remote, while the printed rejection reflects a lease comparison read at a
+different (already-stale) moment. Both known occurrences were on branches
+with pending LFS objects to upload; a same-session push with nothing to
+upload did not exhibit it.
+
+**Do not treat this message as an automatic retry/re-rebase signal.** An
+agent that trusts the printed rejection alone may retry the push, re-rebase,
+or report failure against a ref that already moved — all of which turn a
+clean state into a confusing one. Before reacting to a `force-with-lease`
+rejection, check the *live* remote ref yourself:
+
+```bash
+git ls-remote origin "refs/heads/<branch>"   # compare against your local tip
+```
+
+If they already match, the push landed — do nothing further. Loom's own
+stacked-PR automation (`reconcile-stack.sh`, `rebase-stacked-children.sh`)
+performs exactly this check via the shared
+`defaults/scripts/lib/push-lease-verify.sh` helper
+(`push_landed_despite_rejection`) whenever a `--force-with-lease` push
+reports failure, and logs the condition with a greppable
+`PUSH-LEASE-RACE-DETECTED` marker so it is never silently folded into an
+ordinary failure. A genuine rejection (the ref really did not move) is still
+reported and handled as a failure — the check only reclassifies a reported
+rejection whose ref update is confirmed to have landed.
+
 ### Cleaning Up Stale Worktrees and Branches
 
 Use the `loom-clean` command to restore your repository to a clean state:
@@ -170,6 +211,59 @@ So: build wherever you like, but **install** what you run — copy the binary to
 `~/.local/bin` (or a package path) and point the unit at that. `loom-daemon`
 itself was only ever immune to this by that accident of install location.
 
+### `.loom/logs/` retention (#6655)
+
+`.loom/logs/` has no bound of its own — every sweep writes its own per-issue
+log (`sweep-issue-<N>.log` from `claude-wrapper.sh`,
+`loom-daemon-sweep-issue-<N>-<ts>.log` from `loom-daemon`) directly into that
+directory, and nothing removed them before this. On a saturated fleet host
+this grows unbounded (one incident: 310 MB across 4,114 `.log` files, the
+oldest six months stale). `archive-logs.sh`'s own `--retention-days` (default
+7, invoked via `loom-daemon cleanup logs`) does **not** cover this — it only
+prunes its own dated `.loom/logs/YYYY-MM-DD/` archive subdirectories (task
+output archives + daemon-state snapshots), a different mechanism entirely.
+
+**`loom-clean` (and the scheduled `com.rjwalters.loom-fleet-clean` launchd
+job, which already runs it) now also prunes stale per-issue logs** as part of
+its normal "Cleaning Stale Logs" phase — no separate flag needed, and
+`--dry-run` lists what it would remove without deleting anything:
+
+```bash
+loom-clean --dry-run   # lists stale logs it would remove, alongside worktrees/branches
+loom-clean --force     # actually removes them
+```
+
+Only files directly under `.loom/logs/` whose name embeds an issue number
+(the `sweep-issue-<N>.log` / `loom-daemon-sweep-issue-<N>-<ts>.log` /
+`issue-<N>-<role>.log` conventions) are ever candidates — singleton
+accumulator logs with no issue number (`role-<name>.log`,
+`guard-decisions.log`, `hook-errors.log`, `daemon-start.log`,
+`main-quarantine.log`, `worktree-removals.log`, …) and anything under a
+subdirectory (`archive-logs.sh`'s own dated archives, `skill-router-seen/`,
+…) are never touched by this pass. A candidate log is removed only once ALL
+of:
+
+1. Its mtime is older than the retention window (below).
+2. Its issue has no live sweep right now (no `.loom/locks/issue-<N>/` claim
+   lock, no `.loom/spawn-loop-state.json` entry).
+3. Its issue has no `.loom/sweep-checkpoint/issue-<N>.json` — a resumable
+   sweep (even one not currently running) keeps its log regardless of age.
+
+**Retention window** — precedence **env > config > default (30 days)**:
+
+```jsonc
+// .loom/config.json
+{ "logs": { "retentionDays": 14 } }
+```
+
+```bash
+LOOM_LOGS_RETENTION_DAYS=14 loom-clean --dry-run
+```
+
+A non-positive or unparseable value at either tier is treated as absent (falls
+through to the next tier), never as "disable retention" — a config typo can
+never silently turn this pass into a no-op.
+
 **Backlog of pre-existing `[gone]` local branches (#4100)**: `merge-pr.sh` deletes
 the local feature branch for every PR it merges as of #4100, but repos that ran
 Loom before that fix accumulated one orphaned local branch per merged issue —
@@ -205,6 +299,111 @@ git worktree remove .loom/worktrees/issue-42 --force
 # Prune orphaned worktrees
 git worktree prune
 ```
+
+### Redirected cargo target dirs are reclaimed with their worktree (#7239)
+
+**Symptom**: an external volume fills with directories like
+`/Volumes/build/cargo-target/issue-<N>` whose worktrees were removed weeks ago.
+One multi-agent host accumulated tens of them and hundreds of GB before the
+volume started pressuring other workloads.
+
+**Cause**: Cargo's output is only `<worktree>/target` by default.
+`CARGO_TARGET_DIR`, or `build.target-dir` in any `config.toml` on Cargo's
+lookup path (commonly `~/.cargo/config.toml` on a host tuned by
+`/repo:host-optimize`), redirects it **outside** the worktree — where no
+removal path ever looked. Removing the worktree therefore left the build
+output behind forever.
+
+**Now**: every worktree-removal path resolves the *actual* target dir before
+removing the worktree (`cargo metadata`, so the value it reads honors the whole
+config hierarchy) and reclaims it afterwards — but only when the redirect is
+attributable to that one worktree, which means a `.cargo/config.toml` inside it
+(see the never-delete list and the limitation below):
+
+- `worktree.sh remove <N>` — bash side, via
+  `defaults/scripts/lib/cargo-target-dir.sh`.
+- `merge-pr.sh`'s post-merge worktree cleanup — same bash library. This is the
+  removal path most worktrees actually take, so it is where the leak was
+  largest.
+- `loom-daemon clean` and the daemon's periodic worktree reaper — Rust side,
+  via `loom-daemon/src/worktree_ops/cargo_target.rs` (both `issue-<N>` and
+  `pr-<N>` worktrees).
+
+Preview what a removal would reclaim, with sizes, without touching anything:
+
+```bash
+./.loom/scripts/worktree.sh remove 42 --dry-run    # or --dry-run --json
+loom-daemon clean --dry-run                        # every candidate worktree
+```
+
+**What it will never delete**, each reported with the reason instead:
+
+- A dir that is only ever named by a **machine-global redirect source**. Two
+  of those exist, and neither can be evidence that a directory belongs to the
+  one worktree being removed, because both resolve identically for *every* path
+  on the host:
+  - the **remover's own ambient `CARGO_TARGET_DIR`**, read from the environment
+    of whatever process is doing the removal; and
+  - `build.target-dir` in **`$CARGO_HOME/config.toml`, or in any ancestor
+    `.cargo/config.toml` above the worktree** — including the machine-wide one
+    `/repo:host-optimize` writes.
+
+  Only a redirect derived from the worktree **itself** — `build.target-dir` in a
+  `.cargo/config.toml` *inside* the worktree — authorizes a delete. On a host
+  whose single shared build cache comes from either global source, worktree
+  removal simply reports and leaves it alone.
+- A dir another **live** worktree also resolves to — the `host-optimize`
+  convention is a *single shared* `target-dir` for the whole machine, and
+  deleting that on one worktree's removal would destroy a sibling's cache
+  mid-build. Containment counts in both directions, and if the sharing question
+  cannot be answered it refuses rather than assuming nobody else uses it. That
+  covers both ways it can go unanswered: `git worktree list` failing, and a
+  live worktree whose configured redirect `cargo metadata` could not read (a
+  mid-edit `Cargo.toml`, a conflicted merge). A sibling that silently degraded
+  to `<sibling>/target` would otherwise look exactly like one that builds
+  somewhere else.
+- A dir a **running process** is using (same evidence-based gate as
+  "Never launch a service from a build-output path" above). The reclaim is
+  deferred, not lost — stop the process and remove again.
+- The repository itself or any ancestor of it, the primary checkout's own
+  `target/` (that belongs to the pressure-gated deep-clean pass), `$HOME`, or
+  any suspiciously shallow path.
+
+An un-redirected `target/` inside the worktree is reported as nothing at all:
+it disappears with the worktree for free, as it always did.
+
+**Limitation — the redirect must be attributable to the worktree, and
+resolvable at removal time.** The reclaim asks Cargo where this worktree's
+output *would* go right now (`CARGO_TARGET_DIR` → `cargo metadata` →
+`<worktree>/target`); it does not guess at a naming template and never deletes
+a path by pattern match. Two shapes are therefore reported rather than
+reclaimed:
+
+- A *per-worktree* `CARGO_TARGET_DIR` exported only inside the agent/build
+  environment (say `…/cargo-target-<issue>`), with the worktree then removed
+  from a shell where that variable is unset. Resolution lands somewhere else
+  and the real directory is left alone — correctly, since nothing at removal
+  time can prove it belonged to that worktree. Re-exporting the variable for
+  the removal does **not** help: an env var read from the remover's own
+  environment is machine-global and is refused outright (see the never-delete
+  list above). Put the redirect where it belongs to the tree instead —
+  `build.target-dir` in a `.cargo/config.toml` **inside the worktree**.
+- A redirect that lives only in `~/.cargo/config.toml` (what
+  `/repo:host-optimize` writes) or in an ancestor `.cargo/config.toml`. Every
+  worktree on the host resolves to that one directory, so no single worktree's
+  removal may delete it; the reclaim treats such a tree as unredirected and
+  does nothing. To get per-worktree reclaim, give each worktree its own
+  `.cargo/config.toml` with a `target-dir` of its own (for example
+  `…/cargo-target/issue-<N>`) — that is the shape this feature reclaims.
+- A worktree whose Cargo manifest is not at its **root** (a nested
+  `backend/Cargo.toml` layout). The pre-check treats a root without a
+  `Cargo.toml` as "cargo never built here", so nothing is resolved or
+  reclaimed. That is a missed reclaim, not data loss — the safe failure
+  direction — but such a directory must be removed by hand.
+
+Directories orphaned *before* this landed have no worktree left to resolve
+from, so they must be removed by hand — check them against `git worktree list`
+first, and stop anything still building into them.
 
 ### A worktree vanished mid-session — who removed it? (#5950)
 
@@ -382,6 +581,56 @@ they find one — scoped to a symlink whose target resolves through a
 `loom-tools` path segment and no longer exists, so a same-named script you
 authored yourself is never touched. No manual action needed on either path.
 
+### `rm` of the installed `loom-daemon` binary is denied in an agent session (#5675)
+
+**Symptom**: a self-build/reinstall verification step run from an agent session
+— `rm -f /opt/homebrew/bin/loom-daemon`, `rm -f /usr/local/bin/loom-daemon`,
+`rm -f ~/.local/bin/loom-daemon`, typically followed by an `ls` of the same path
+to confirm the rebuild replaced it — is blocked with:
+
+```
+BLOCKED: rm target outside repo scope (LOOM_RM_SCOPE=repo): /opt/homebrew/bin/loom-daemon
+```
+
+(pattern `rm-scope-outside-repo`; observed once on 2026-08-07 and triaged under
+the #3898 guard-decision telemetry policy).
+
+**This is correct and stays that way.** The path is outside the repo/worktree
+scope and on no ephemeral allowlist, so the repo-scoped `rm` guard denies it.
+The trigger was reviewed and **kept flagged** rather than allowlisted: no
+supported Loom flow needs to delete the installed binary, so allowlisting
+Loom's own install paths would widen an outside-repo delete for no gain. See
+`defaults/docs/guard-hooks.md` → "Repo-Scoped rm Guard" → "Removing an installed
+`loom-daemon` binary — denied, and never necessary".
+
+**Remedy — overwrite, don't delete**:
+
+```bash
+loom update                                  # machine-level install (~/.local/bin)
+./.loom/scripts/cli/loom-daemon-update.sh    # the same delegate, called directly
+loom-daemon --version                        # baked-in commit confirms which build is live
+```
+
+Both paths provision with `install -m 755` (falling back to `cp -f` +
+`chmod 755`) straight over the existing file — the binary is replaced in place,
+so there is never a delete step to run. If your installed binary is **not** at
+the machine-level default, point the updater at it instead of removing it:
+
+```bash
+LOOM_DAEMON_BIN=/opt/homebrew/bin/loom-daemon ./.loom/scripts/cli/loom-daemon-update.sh
+# or: LOOM_DAEMON_BIN_DIR=/opt/homebrew/bin ...
+```
+
+**If what you actually need is to remove a shadowing binary** — a second
+`loom-daemon` earlier on `PATH` than the one Loom provisions (the #4079
+stale-entry-point shape that the previous entry describes for `loom-*` shims) —
+that is an **operator** action, not an agent one. `loom-daemon-update.sh` warns
+about each such entry point on every run and deliberately deletes nothing. Do
+the removal yourself in a plain shell outside the hooked agent session; a
+headless agent has no sanctioned way through this deny, and the script-file
+workaround is an unsanctioned guard bypass (`defaults/docs/guard-hooks.md` →
+"When a Legitimate Operation Is Pattern-Blocked").
+
 ### Corrupted local git identity (`...github.comecho`, "cannot overwrite multiple values") (#4369)
 
 **Symptom**: `git config user.email <value>` fails with `error: cannot
@@ -523,6 +772,102 @@ cat .loom/config.json.bak
 `loom-daemon init` against a workspace that already has a `.loom/config.json`, so
 repeat provisioning passes cannot re-enter this path on a tuned host.
 
+### Conflict markers left in `.loom/config.json` after a `git stash pop` (#6499)
+
+`.loom/config.json` is **tracked**, and every existing repo carries at least
+one host-specific field patched locally in the working tree (e.g.
+`safehouse.socket`, `observability.ingestKeyFile`, a stale `room` value —
+#5457 is the durable fix that will stop this). Because that patch sits
+uncommitted on top of a tracked file, a `git stash push`/`git stash pop`
+cycle against the primary checkout (whether run by a human or an agent) can
+conflict on it — and if that conflict is left unresolved, `.loom/config.json`
+ends up on disk with literal `<<<<<<<` / `=======` / `>>>>>>>` markers
+embedded in it. That is invalid JSON: `config_resolver::resolve_effective_config`
+silently falls back to `{}` for this tier, and the daemon runs on **built-in
+defaults** for every value that file carried — `observability`, `safehouse`,
+`autonomous.roleRunner`, and any other block your host's config tuned,
+disabled or reconfigured without you doing anything.
+
+**Check first, always:**
+
+```bash
+jq . .loom/config.json
+```
+
+A parse error there is definitive — jq's own error message names the exact
+line/column, and the daemon's own boot log carries the same diagnosis at
+`ERROR` (not a buried `WARN`) as of #6499:
+
+```bash
+grep 'config_resolver:.*is unreadable/malformed' ~/.loom/daemon.log
+```
+
+The daemon's periodic primary-checkout pass (`primary_checkout_reaper`, on by
+default) also logs an `ERROR` line naming the unmerged path(s) — e.g.
+`UU .loom/config.json` — on every tick the condition persists, independent of
+a restart, whenever the abandoned-conflict shape (unmerged index entries with
+no merge/rebase actually in progress) is present; see `grep
+'ABANDONED CONFLICT STATE'` / `primary_checkout_reaper:` in the same log.
+`check-main-clean.sh` (the Builder-workflow-invoked counterpart, #6162 AC3)
+reports the identical condition — `ABANDONED CONFLICT STATE` — for any
+tracked file, not just `.loom/config.json`.
+
+**Once the markers are committed, every detector above goes blind.** All three
+key on an *unmerged index entry*, and `git add` clears that — so a
+`chore: resync installed Loom surfaces` pass that sweeps the corrupted file
+into a commit makes the corruption invisible to them while leaving it live in
+the tree (exactly how the #6499 markers reached `main`). The gate for that
+case is content-level, not index-level:
+
+```bash
+./.loom/scripts/check-conflict-markers.sh          # scan every tracked file
+./.loom/scripts/check-conflict-markers.sh --dir .  # or a directory, recursively
+```
+
+It exits `2` and names each offending path with its marker line numbers.
+Detection is extension-agnostic (the gap that let a `.json` file past
+`check-shell-syntax.sh`'s `*.sh`-only `bash -n` gate, #6162) and keys only on
+line-start `<<<<<<< ` / `>>>>>>> `, so a markdown setext heading underline, a
+`=======` separator comment, and inline backticked marker text in prose (as
+in this very section) are all left alone. A fixture that genuinely must
+contain markers opts itself out by embedding the literal string
+`check-conflict-markers:allow` in its own content. This runs in CI on every
+push and PR, unfiltered by changed-path group.
+
+**Resolution is mechanical — keep the local host's own values:**
+
+1. Open the file and find the conflict hunk(s):
+   ```bash
+   grep -n '^<<<<<<<\|^=======\|^>>>>>>>' .loom/config.json
+   ```
+2. For each hunk, keep **this host's** side (the values already in local use
+   on this machine — the socket path, ingest key file path, room, etc. that
+   match this host's own filesystem layout) and delete the markers and the
+   losing side entirely. There is no "correct" side in the abstract; the
+   correct side is whichever one this host was actually running with.
+3. Verify the fix parses:
+   ```bash
+   jq . .loom/config.json
+   ```
+4. If the file is (or was) genuinely unmerged in git's own index — `git
+   status --porcelain` shows a `UU` (or `DD`/`AU`/`UD`/`UA`/`DU`/`AA`) line for
+   it, not just modified — clear that stage-conflict state too, e.g. `git add
+   .loom/config.json` once the content is fixed, or discard the whole
+   conflicted stash-pop attempt with `git reset --merge` and reapply your
+   local patch by hand from memory/backup.
+5. Restart the daemon (`loom-daemon restart`, or however this host manages
+   it) so it picks up the corrected file — the process that hit the parse
+   failure keeps running on defaults for its own lifetime; fixing the file on
+   disk alone does not retroactively fix an already-running process.
+
+If you are unsure which side is correct, do **not** guess — the two Mac
+hosts in the original #6499 incident had *different* correct answers (one
+Mac path, one Linux path) for the same key, because the "conflict" was really
+two different hosts' legitimate local patches colliding via a shared stash.
+A backup of the pre-conflict file (if one exists, e.g. an untracked
+`.loom/config.json.bak-conflict-<date>` sitting alongside it) is the most
+reliable source of truth for what this host's own values were.
+
 ### `install.sh` refuses to run: "Another Loom install is already running" (#4928)
 
 `install.sh`'s `--quick` / `--clean` paths take a per-target lock at
@@ -558,6 +903,78 @@ git -C <target> stash list | grep loom-install   # changes the installer stashed
 ```bash
 # Check daemon logs
 tail -f ~/.loom/daemon.log
+```
+
+### `loom-daemon-start.sh` refuses: "agent-session context detected" (#6568)
+
+```
+WARNING: agent-session context detected -- this shell exports: LOOM_ROLE LOOM_SWEEP_CLAIM_OWNED LOOM_TERMINAL_ID
+ERROR: refusing to start -- this would overwrite the REAL daemon configuration with
+an agent session's environment (see the WARNING above).
+```
+
+**This is working as designed, not a bug.** Your shell is a Loom agent session
+(a dispatched sweep, a role runner, or a Claude Code terminal that inherited one),
+and the start would have written the **default** supervisor identity —
+`com.rjwalters.loom-daemon` on macOS, `loom-daemon.service` on systemd — from a
+per-invocation environment. That is the 2026-08-17 incident: a sweep exercising
+the start path overwrote the production LaunchAgent on **both** operator Macs
+with its own session env (`/tmp` `WorkingDirectory`, mktemp'd watchdog/socket/pid
+paths, `LOOM_ROLE=sweep-lifecycle`, a stray `LOOM_ROLE_RUNNER_INTERVAL_SECS=900`)
+and ran that way for two days undetected. Pick the option that matches intent:
+
+```bash
+# Exercising / testing the start path -> scope the supervisor identity.
+# (This is what every test in this repo does; it is also the exemption that
+#  keeps existing test-authoring patterns working from a session context.)
+LOOM_LAUNCHD_LABEL=com.example.loom-daemon-test ./.loom/scripts/cli/loom-daemon-start.sh   # macOS
+LOOM_SYSTEMD_UNIT=loom-daemon-test.service     ./.loom/scripts/cli/loom-daemon-start.sh    # systemd Linux
+
+# Genuinely (re)starting the production daemon from inside an agent session,
+# e.g. recovering a fleet host from a Claude Code terminal. Loud, not silent:
+# the warning still prints.
+LOOM_ALLOW_SESSION_DAEMON_START=1 ./.loom/scripts/cli/loom-daemon-start.sh
+
+# Or drop the session context entirely.
+env -u LOOM_ROLE -u LOOM_TERMINAL_ID -u LOOM_SWEEP_CLAIM_OWNED \
+    ./.loom/scripts/cli/loom-daemon-start.sh
+```
+
+`--print-plist` / `--print-unit` are **never** refused — they warn and still
+print, so you can always inspect what a real start would render.
+
+Independently of this refusal, the session-scoped keys themselves
+(`LOOM_SWEEP_*`, `LOOM_TERMINAL_ID`, `LOOM_ROLE`, `LOOM_RUNTIME`) are **always**
+stripped from every rendered plist/unit, and are never carried forward out of an
+already-installed one — if you see
+
+```
+NOTICE: purging 4 AGENT-SESSION env key(s) carried by the installed …
+```
+
+then that host's daemon config was written from an agent session at some point in
+the past; the re-render is cleaning it up. Full writeup:
+[`daemon-reference.md` → Agent-session isolation on the start path](daemon-reference.md).
+
+### Daemon warns it is running from a scratch directory (#6568)
+
+```
+WARNING: this daemon would run out of a SCRATCH / temporary directory (#6568):
+  - WorkingDirectory=/tmp/pr6416-checkout
+  - LOOM_WORKSPACE=/tmp/pr6416-checkout
+```
+
+Advisory, never blocking. Inside a test fixture this is expected (the daemon
+suites deliberately run scratch-rooted daemons). **On a real host it means the
+daemon is misconfigured** — its working directory, logs, and any watchdog /
+socket / pid path underneath it disappear on reboot or tmp cleanup, while the
+daemon keeps reporting healthy. Repair by re-starting from the machine checkout:
+
+```bash
+./.loom/scripts/cli/loom-daemon-stop.sh
+loom start                       # machine-mode dispatcher: WorkingDirectory := ~/.local/share/loom
+launchctl print gui/$(id -u)/com.rjwalters.loom-daemon | grep -A3 'environment'   # macOS: confirm
+systemctl --user cat loom-daemon.service | grep -E 'WorkingDirectory|LOOM_WORKSPACE'  # systemd: confirm
 ```
 
 ### Claude Code not found
@@ -711,6 +1128,49 @@ carries `assessment_failed` / `assessment_errors` for automation.
 - Checks if there's an associated PR (by branch name or body reference)
 - Issues without PRs older than threshold are flagged/recovered
 - Issues with stale PRs are flagged but not auto-recovered (need manual review)
+
+### `loom:building` left on a CLOSED issue (#6199)
+
+The above covers a stuck OPEN issue. A different, purely cosmetic case: a
+**closed** issue that still carries `loom:building` — `gh issue list --label
+loom:building` without `--state open` returns these as noise. `merge-pr.sh`
+strips the label from any issue its own merge closes (`Closes #N` / `Fixes
+#N` / `Resolves #N`), but issues closed by other means (manually, as a
+duplicate, or `--reason "not planned"`) are not covered automatically —
+run `./.loom/scripts/clean-stale-building-labels.sh [--repo OWNER/NAME]
+[--dry-run]` to sweep those (idempotent, safe to re-run).
+
+### A sweep whose CLI has written nothing for days holds `loom:building` forever (#7529)
+
+**Symptom**: a `claude -p /loom:sweep <N>` process has an elapsed time of days,
+its log's last line is the spawn header (or the log has simply gone silent),
+the issue is still `loom:building`, `loom-daemon health` says nothing, and
+neither of the two `#3887`/`#3910` watchdog give-up comments ever posted — the
+sweep was never even *evaluated* by a watchdog, let alone rescued.
+
+**Root cause**: `reconstruct()` (a daemon restart) and `adopt_live_journal_sweeps`
+(#6262, the machine-level `~/.loom/sweeps.json` survivorship path) both
+correctly re-admit a surviving sweep into the registry as `Running` — but
+neither can ever populate a retained `Child` process handle for it (there is
+no way to resurrect one for a pid this daemon instance did not itself fork).
+The startup-hang (#3887) and review-stall (#3910) watchdogs are both gated on
+`self.children.contains_key(sweep_id)`, so a re-admitted entry is invisible to
+either for its entire remaining life — it stays `Running`, correctly listed in
+`status`'s `in_flight`, with zero liveness enforcement.
+
+**Fix**: a fourth backstop (`autonomous.watchdog.staleSweep`, default on)
+reaps exactly the entries the other two cannot reach once their age and log
+silence both cross a sanity ceiling (`staleSweepAgeSecs`, default 3h) — see
+[daemon-reference.md § Config surface](daemon-reference.md#config-surface-loomconfigjson--autonomous)
+for the knobs and the full write-up just below the review-stall watchdog
+section. Computed
+fresh from the registry on every call (not from a tick-populated cache), so
+`loom-daemon status`/`health`'s `stale_sweeps` field/section reports the same
+finding even if the watchdog task's own tick never ran. If you hit this on an
+older daemon build without the backstop, `./.loom/scripts/clean-stale-building-labels.sh`
+(above) does not help here (that script targets *closed* issues) — cancel the
+stray process by hand (`kill <pid>`) and run `loom-recover-orphans --recover`
+to restore `loom:issue`.
 
 ### Uncommitted work in the primary clone can be quarantined at any time — branching does not protect it (#5194)
 
@@ -902,6 +1362,64 @@ precisely the shape of the one stash in 148 that mattered.
 - It only ever considers `loom-quarantine:`-labelled entries. An Auditor drift
   shelf, a Judge park stash, or an ad-hoc `git stash` is never a candidate.
 
+### Taking a stash back off the stack without leaving conflict markers (#6501)
+
+**Never run a bare `git stash pop` in the primary checkout.** Use the verified
+wrapper instead:
+
+```bash
+./.loom/scripts/safe-stash-pop.sh                      # pop stash@{0} in the current repo
+./.loom/scripts/safe-stash-pop.sh --repo /path/to/repo 'stash@{2}'
+./.loom/scripts/safe-stash-pop.sh --dry-run            # preconditions + target, no mutation
+./.loom/scripts/safe-stash-pop.sh --no-restore         # keep a conflicted tree to resolve by hand
+./.loom/scripts/safe-stash-pop.sh --json --quiet       # one structured line for a script
+```
+
+**Why.** `git stash pop` is not atomic. When its 3-way merge conflicts it writes
+`<<<<<<< Updated upstream` / `=======` / `>>>>>>> Stashed changes` into the
+affected **tracked** files, leaves unmerged entries in the index, exits non-zero
+— and stops. Nothing verifies the result. If the caller does not read the exit
+status, the primary checkout is left in an *abandoned conflict state* that looks
+like ordinary dirt, and the next `git add -A && git commit` ships the markers.
+That is exactly how commit `7d169a06` landed a `.loom/config.json` containing a
+live conflict-marker block, silently breaking the daemon's config parse
+fleet-wide (#6499 / #6502).
+
+**What the wrapper guarantees.** Exactly one of these outcomes, always:
+
+| Exit | Meaning |
+|------|---------|
+| `0` | Popped and **verified** clean — no unmerged entries, no conflict markers. Entry consumed, as with a normal pop. |
+| `1` | Precondition failure — not a repo, unborn `HEAD`, a merge/rebase/cherry-pick already in progress, an index that *already* has unmerged entries, or a dirty tree that could not be snapshotted. **Nothing ran.** |
+| `2` | No stash entry at the given ref — nothing to do. |
+| `3` | The pop conflicted; the pre-pop working tree was **restored and verified**, and the stash entry is preserved. |
+| `4` | The pop conflicted and the pre-pop state could **not** be safely restored. The tree is left exactly as `git` left it and every recovery handle is named. |
+| `5` | The pop conflicted and `--no-restore` was given — the conflicted tree is left in place deliberately. |
+
+**Nothing is ever discarded.** The rollback runs only when the stash entry is
+confirmed still on the stack, and the pre-pop tree is captured first as a
+`git stash create` commit anchored under `refs/loom/safe-stash-pop/<stamp>` —
+never `refs/stash`, so it cannot collide with another worktree's stack (the
+#4821 hazard). If either precondition cannot be met the wrapper reports loudly
+instead of rolling back: markers in a tracked file are recoverable, destroyed
+WIP is not. On exit `3` the snapshot ref is kept as insurance; delete it with
+`git update-ref -d <ref>` once you are satisfied.
+
+**Already committed markers?** That is the recovery case, not the prevention
+case: `git grep -n '^<<<<<<< '` across the checkout finds them, and
+`./.loom/scripts/check-main-clean.sh` reports an unmerged index entry with no
+merge in progress as its own distinct, more urgent failure (see its
+"Abandoned-conflict detection" block). Resolve or `git merge --abort` before
+running anything else — the wrapper deliberately refuses to pop on top of a
+pre-existing conflict state (exit `1`).
+
+**Related tools.** Inside an issue worktree, a Builder's own WIP should use
+`./.loom/scripts/worktree.sh stash-push <N>` / `stash-pop <N>`, which anchor to
+a per-issue ref and never touch `refs/stash` at all. `check-main-clean.sh
+--quarantine` moves contamination *onto* the stash stack; `safe-stash-pop.sh` is
+the safe way back off it. `guard-destructive-generic.sh`'s
+`stash-scope:main-checkout` ask names the wrapper in its message.
+
 ## Several unrelated things hang at once (macOS Gatekeeper / `syspolicyd`)
 
 **Symptom:** several unrelated processes — a `cargo` build, a sweep child, a
@@ -1088,6 +1606,86 @@ resolved without a kill-time hook, because none is available):
 **Out of scope**: implementing a `SubagentStop`-style hook, or any daemon-side
 termination-signal channel for Task-tool subagents, is explicitly out of scope
 for this section — see "Root cause" above for why.
+
+### A dead lock-holder PID is not evidence the requesting agent is dead (#6765)
+
+**The section above establishes one direction: a killed subagent leaves no
+teardown signal, so any lock it held keeps looking "held" in its holder
+record.** This section covers the mirror mistake, made by the *orchestrator*
+rather than the lock's own reaper: even once a lock's recorded holder PID is
+confirmed dead, that dead PID is **not** evidence that the agent which
+requested the lock has exited. The two are separate facts, and treating the
+first as proof of the second is unsafe in the direction that matters —
+it licenses acting on someone else's still-in-progress work.
+
+**Why the two facts are separate.** A lock's `holder.json`-style record
+captures whichever PID happened to make the acquiring write — not necessarily
+the dispatched agent's own PID. It can be a short-lived child process the
+agent spawned to do the acquiring, or a PID left over from an earlier dispatch
+the agent has since restarted past (e.g. a session-limit kill followed by a
+fresh dispatch on the same issue). `kill -0 <holder-pid>` only answers "is
+that specific process still running?" — a narrower question than "is the
+agent that asked for this lock still working?" — and an ESRCH from `kill -0`
+is exactly what a genuinely orphaned lock also looks like from the outside;
+the lock record alone cannot distinguish the two.
+
+**Incident.** A research subagent's first dispatch was killed by a session
+limit; a later dispatch acquired a resource lock and wrote a fresh
+`holder.json` carrying its own PID. An orchestrator status check found the
+lock's recorded PID dead, read that as "the agent is dead," reaped the lock,
+and then went further than reaping: it treated the agent's branch as
+abandoned and ran a full review-and-merge cycle against it — opened a PR,
+reviewed it, applied corrections, merged it. The agent was still alive for
+roughly three more hours and discovered the collision only at its own
+close-out, after `main` had already absorbed a competing review pass. Nothing
+was lost only because that agent happened to re-check its base before
+finishing; a less careful one would have force-pushed over the merged review
+cycle or opened a competing PR from a stale branch.
+
+**Reaping a lock and adopting the associated work are separable decisions —
+keep them separate.** Reaping an orphaned lock on a dead-PID signal alone is
+low-risk: the failure mode is "the resource was briefly unavailable while it
+didn't need to be," which self-heals. Adopting the branch or worktree the
+lock was protecting — opening a PR against it, reviewing it, merging it, or
+otherwise acting as though the agent that produced it is finished — is not
+low-risk, and a dead lock-holder PID does **not** license it on its own.
+Do not let one decision imply the other:
+
+- **Reap the lock** on the existing dead-PID basis alone — unchanged by this
+  section.
+- **Do not touch the associated branch/worktree** on that same basis. Before
+  acting on it, get a **positive "this agent is done" signal**, not an
+  inferred one:
+  - If the agent was dispatched as an in-session Task-tool subagent within
+    the *same* orchestrator session, query the harness's own task-liveness
+    surface instead of inferring from a proxy — the same non-blocking poll
+    (e.g. `TaskOutput` on the original dispatch's task id) documented in
+    `defaults/.claude/commands/loom/sweep.md` → "Task-liveness check before
+    Builder re-dispatch (#5897)". That rule was written for one call site
+    (re-dispatching a Builder after a worktree-diff proxy looked like death)
+    but the underlying principle — query positive liveness, don't infer it
+    from a proxy — applies at any point an orchestrator is about to act on
+    the assumption a dispatched subagent has died, lock reaping included.
+  - If the agent was dispatched out-of-session (a separate `loom-daemon`
+    sweep, a different host, any process this orchestrator cannot poll),
+    there is genuinely no definitive liveness signal available from here.
+    Say so explicitly rather than reaching for a proxy, and fall back to
+    checking the forge-visible state of the work itself (a pushed branch, an
+    open PR, a recent commit) to see whether it has already reached a
+    stable, reviewable state on its own terms — that is evidence about the
+    *work*, not a proxy for the *agent's* liveness, and should be read as
+    such.
+- **If no definitive signal is available either way, the conservative
+  default is: assume live, do not adopt the branch.** Wait, or leave the
+  branch for the original agent to reconcile at its own close-out (as
+  happened in the incident above), rather than risk the two-writers-on-one-branch
+  race a wrong adoption creates. This mirrors #5897's "prefer a bounded wait
+  over immediate re-dispatch absent positive evidence of death."
+
+Related: #6320 covers the adjacent case where a **daemon** reclaims an
+in-session sweep's claim because the claim itself carries no lease record —
+the same "no authoritative liveness record for in-session work" gap,
+approached from the claim-record side rather than the lock side.
 
 ## Sweep Dispatch Troubleshooting
 
@@ -1300,6 +1898,134 @@ Manual invocation:
 ./.loom/scripts/check-host-sleep.sh --quiet # stderr warning only, no stdout line
 ```
 
+#### Making it persistent instead of advisory (`host.preventSleep`, #6311)
+
+The check above only warns — it never mutates anything, so re-applying the
+`systemd-inhibit` mitigation by hand on every run/host gets old fast. Opt a
+repo IN to Loom applying it automatically via `.loom/config.json`:
+
+```json
+{ "host": { "preventSleep": true } }
+```
+
+Env override: `LOOM_HOST_PREVENT_SLEEP=1` (or `0` to force-disable).
+Precedence is the standard env > config > default-OFF tier every Loom knob
+uses (see `defaults/scripts/lib/host-sleep-config.sh`). An absent block, or
+any value that isn't a recognizable true/false spelling, resolves to
+disabled — this knob can never block or fail a sweep.
+
+- **Linux/systemd — the actual closable gap.** With the flag on, two
+  self-wrap points apply `systemd-inhibit --what=idle:sleep --who=loom
+  --why=<role>` (unprivileged, no `sudo`) automatically:
+  - `.loom/scripts/spawn-claude.sh` — the single dispatch chokepoint for
+    BOTH headless `/loom:sweep` and scheduled role-runner spawns. `--why`
+    is the child's `$LOOM_ROLE` (e.g. `sweep-lifecycle`). Verify with
+    `systemd-inhibit --list` while a sweep is running — an active `loom`
+    lock should be visible for its whole lifetime.
+  - `loom-daemon-start.sh --foreground` — wraps the foreground daemon
+    process itself. The systemd-unit-managed and nohup-fallback daemon
+    launch paths are deliberately **not** wrapped (both persist the launched
+    process's pid into places `loom-daemon-stop.sh` / the watchdog / `loom-daemon
+    status` treat as the daemon's own identity; prefixing either with
+    `systemd-inhibit` would change what that pid actually IS). In practice
+    this is not a live gap: `idle:sleep` locks are host-wide, not scoped to
+    one process's children, so any one active sweep/role-runner spawn keeps
+    the whole host — daemon included — awake for as long as it runs.
+  - Every wrap point probes first (`systemd-inhibit ... -- true`) and
+    silently skips the wrap on failure (no reachable `systemd-logind`,
+    `systemd-inhibit` missing, non-systemd Linux) — advisory-only
+    `check-host-sleep.sh` still fires normally in that case.
+  - A manually-started **interactive** session (MOM, a terminal running
+    `claude` directly) is not covered by either self-wrap — wrap it by hand
+    as `check-host-sleep.sh` itself still recommends.
+- **macOS — never automated.** The reliable mitigation
+  (`sudo pmset -c sleep 0`) is privileged and host-global; `host.preventSleep`
+  is a deliberate no-op here and **never** invokes `sudo`. Once you've
+  evaluated and applied a mitigation yourself, record it so the warning stops
+  being permanent noise:
+
+  ```json
+  { "host": { "sleepMitigationAcknowledged": "pmset sleep=0 set at image build" } }
+  ```
+
+  (env override `LOOM_HOST_SLEEP_MITIGATION_ACKNOWLEDGED`). This downgrades
+  `check-host-sleep.sh`'s full banner to a one-liner naming your mitigation —
+  it never claims the host IS protected (macOS user-idle sleep assertions are
+  not reliable, per the incident above), it only stops re-printing an
+  already-evaluated warning on every run.
+
+### The base-branch trap: a session-start git snapshot is not evidence about the present (#6718)
+
+**Every agent session's context includes a git status block captured once, at
+session start, and explicitly labelled as a point-in-time snapshot — it does
+not update as the session runs.** This is the harness's own environment
+context, not something any Loom role prompt injects or can suppress. Over a
+long sweep — which by construction runs for hours and merges many PRs — that
+block drifts arbitrarily far from reality: every merge the sweep performs
+moves the default branch out from under it. An agent primed by role guidance
+to watch for **the base-branch trap** (local default branch diverged from
+`origin`, starving new worktrees of recently-merged work — see "Main Branch
+Freshness (#3770)" in `sweep.md`) but holding only that stale snapshot has no
+reason to distrust it: it reports a confident, plausible, and **wrong**
+divergence. This happened twice independently in one session (#6718) — both
+reports cited the exact commit SHA present at the parent session's start,
+hours after several merges had already moved `origin`'s default branch past
+it, with local, remote-tracking, and the forge's own view all agreeing on the
+newer SHA once actually checked.
+
+The false positive is more expensive than a missed one: an agent that believes
+the base branch is starved reasonably refuses to dispatch, escalates to the
+operator, or attempts a corrective push — all three are wrong against a branch
+that is already current, and each has to be disproved by hand before the sweep
+can continue.
+
+**Any role guidance that mentions the base-branch trap (or any other
+long-running check of "is my repository fact still current") must say two
+things, not one:**
+
+1. **Branch state must be read with a live command at the moment of the
+   check** — never inferred from a `git status`/`git log` block already
+   sitting in context, however recent it looks. A block captured at session
+   start is a snapshot of that moment, not a fact about now, and nothing
+   refreshes it for the rest of the session.
+2. **The check must compare three refs, not one, and all three must agree**
+   before concluding the branch is current:
+   - the **local branch** (`git rev-parse <branch>` / `git log -1 <branch>`,
+     run now, not recalled),
+   - the **remote-tracking ref, after an explicit `git fetch`** (a
+     remote-tracking ref you didn't just fetch is a second stale snapshot,
+     not a live fact), and
+   - **the forge's own view** — `gh api repos/<owner>/<repo>/branches/<branch>`
+     or `gh repo view --json defaultBranchRef` for default-branch freshness,
+     `gh pr view`/`gh pr list` for a PR branch — the one source not subject to
+     local clock or fetch skew.
+
+   `./.loom/scripts/check-main-freshness.sh` already performs exactly this
+   bounded fetch-and-compare for the sweep-preflight instance of this check
+   (see "Main Branch Freshness (#3770)" in `sweep.md`) — reach for it, or its
+   pattern, rather than hand-rolling a weaker one-ref comparison. It is
+   **pre-wave-only**: it runs once before the first wave/dispatch and does not
+   re-fire for a Builder/Judge/Doctor subagent spawned mid-sweep, potentially
+   hours and many merges later — that subagent must run its own live check
+   before treating anything about branch freshness as established, not trust
+   the pre-wave result or its own session-start context.
+3. **A reported divergence must carry the live command output that
+   established it** — paste the actual `git fetch` + ref comparison (or
+   `check-main-freshness.sh`'s own output) into the report, not just the
+   conclusion. This lets a downstream orchestrator or human tell a
+   freshly-derived finding apart from one recalled from stale context, without
+   re-deriving it themselves.
+
+This generalizes beyond branch state: any long-running role that reasons about
+a repository fact captured once at session start (a worktree's HEAD, a PR's
+mergeability, a label set) is exposed to the identical failure — branch
+divergence is simply where Loom's own guidance happens to prime agents to look
+hardest. Because the stale snapshot is harness-injected context rather than
+something a role `.md` file adds, no role brief can opt out of *receiving* it;
+the only lever available at the role-prompt layer is strengthening the
+guidance above so agents distrust it by default, which is why it is written
+here once and pointed to, rather than restated per role.
+
 ### Keeping installed `.loom/` copies fresh after a pull (#3770 detect → #3777/#4239 resync)
 
 The installed Loom surfaces the harness actually executes/reads are synced from
@@ -1461,6 +2187,44 @@ overwrites it, list its relative path (e.g. `hooks/guard-destructive.sh`,
 `.loom/resync-ignore`; matching files are reported `skipped`. A full `loom-daemon
 init` / installer run already performs the equivalent recursive copy, so a normal
 reinstall keeps the copies current too.
+
+**Precondition: this flow needs a resolvable `defaults/` source tree (#6202).**
+`resync-installed.sh` resolves its source in priority order: (1) this checkout
+IS the Loom source repo (`defaults/hooks` or `defaults/scripts` present), (2)
+the gitignored `.loom/loom-source-path` sidecar (written only by a local
+`install.sh` / `install-loom.sh` run) points at a local clone of it, or (3) a
+legacy `install-metadata.json` `"loom_source"` field (dead for any post-#5624
+install — that field is no longer written, since it leaked the installing
+machine's absolute path). **None of these exist on a checkout that never ran
+the Loom installer locally** — a fresh developer clone, a CI checkout, or any
+machine that received the repo rather than installing into it — which is
+exactly the population most likely to be running stale surfaces, since they
+never ran the installer that would have refreshed them. On that population the
+script fails on first use with `Could not locate a defaults/ source tree to
+sync from`. `check-main-freshness.sh` now detects the same gap and appends a
+note to its own staleness warning before you reach that failure, rather than
+only after (#6202). Fix: clone <https://github.com/rjwalters/loom> locally,
+then either re-run its installer against this repo or write the sidecar
+yourself: `echo /path/to/local/loom-clone > .loom/loom-source-path`.
+
+**`.loom/loom-source-path` is a DURABLE pointer — never point it into scratch
+space (#6780).** Every future `resync-installed.sh` / `check-main-freshness.sh`
+run keeps reading whatever path is recorded here, for as long as this repo is
+installed, not just for the session that wrote it. Installing from a clone
+made inside a temporary/scratch directory (`/tmp/...`, `/private/tmp/...`, an
+agent session's scratchpad, a CI job's workdir) is fine as a one-off, but
+recording that transient location as the repo's permanent upstream pointer
+turns it into a dead reference the moment the scratch area is cleaned up —
+`install.sh` and `scripts/install-loom.sh` now print a non-blocking warning at
+install time when the resolved source path looks ephemeral, so re-point the
+sidecar at a persistent clone if you see it:
+`echo /path/to/persistent/loom-clone > .loom/loom-source-path`. Both
+`resolve_defaults()` (`resync-installed.sh`) and its read-only mirror
+`resync_precondition_met()` (`check-main-freshness.sh`) also require the
+resolved path to actually contain a populated `defaults/hooks` or
+`defaults/scripts` — a sidecar pointing at a directory that still exists but
+is stale/empty (rather than fully vanished) is treated as unresolvable too,
+not silently reported as "in sync" against nothing.
 
 The same list also declares a file **repo-owned**, so the installer's reinstall
 clean sweep never deletes it — see

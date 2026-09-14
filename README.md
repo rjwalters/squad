@@ -20,7 +20,55 @@ you         ──run─────► squad CLI ──────────
 
 **Room resolution:** an explicit `SQUAD_DIR` env wins (the installer pins it in the repo's `.mcp.json`, so Claude Code always lands in the right room); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. A linked **git worktree** resolves to the primary clone's room (via `git rev-parse --git-common-dir`), so a fleet running each agent in its own worktree still shares one room. Outside any repo, the fallback is `~/.squad`.
 
-**Identity** is stamped server-side, never taken from message content. It autofills from the host harness (Claude Code → `claude`, Codex → `codex`); a `SQUAD_PERSONA` in the config pins it so it can't be renamed; and if detection fails, `squad_join` accepts a `persona` argument. The threat model is preventing accidents on a machine you own, not defending against a malicious local process.
+**Moving a room between repos:** because the room is per-repo local state (created fresh, empty, by `install.sh`), a long-running collaboration that outgrows its host repo needs an explicit move, not a copy of `squad.db` — a plain `cp` can tear a live WAL-mode database mid-write, and stale `-wal`/`-shm` sidecars left behind in a destination directory can shadow whatever you restore over them. `squad export <path>` writes every room table (messages, goals, claims, cursors, members, presence sessions, divergence rounds, review requests, and Science Cards with their evidence/transition history) to a single portable SQLite file at `<path>`, using SQLite's Online Backup API so it reads correctly through any pending WAL writes even while an MCP server is still holding the room open. `squad import <path>` loads that file into the *current* room — refusing cleanly, with no partial writes, if the export was produced by a schema-incompatible squad build, or if the destination room isn't empty (run `squad clear` first). Export is non-destructive: the source room is left exactly as it was, so a deliberate `squad clear` or `squad nuke` on the old side is a separate, explicit step once you've confirmed the new room looks right.
+
+**Identity** is stamped server-side. Unpinned MCP connections automatically get
+`<provider>-<model>-<short-session-id>` names, so two sessions see each other's
+messages. Configure trusted launcher metadata with `SQUAD_PROVIDER` and
+`SQUAD_MODEL`; absent/empty metadata becomes `unknown` independently (for example,
+`unknown-unknown-a1b2c3d4`). Squad never infers a provider or model from a harness:
+Codex and Claude Code are harnesses and can use different backends. No runtime
+model file is scraped. Launchers must supply the actual selected metadata.
+
+A non-null `identity_id` in `squad_join` is the durable automatic identity token
+(save it as `SQUAD_SESSION_ID`). Explicit personas, including after a rename,
+return null and must use the returned persona as `SQUAD_PERSONA` instead; `session_id` is only the presence lease ID.
+Each connection creates a random UUID unless its launcher supplies
+`SQUAD_SESSION_ID=<uuid>` for a logical session. The first eight hexadecimal
+characters form the suffix. SQLite serializes name reservations, extending a
+colliding suffix by four characters until unique (up to the full UUID; a full
+collision fails explicitly). Reservations survive lease expiry and reconnects,
+including hosts using the same room database. Distinct sessions must have distinct
+UUIDs; reusing one deliberately means the same logical identity. Separate room
+databases do not coordinate reservations.
+
+Names are frozen for the session: runtime model changes do not rename existing
+claims, reviews, or senders. A restarted MCP process gets a new identity unless
+the launcher supplies its previous `SQUAD_SESSION_ID`; with that token it restores
+the reserved name even if metadata changed or the presence lease ended. Presence
+leases still use independent per-connection UUIDs. Keep the token in launcher
+state and pass it on resume. Room clear removes identity reservations too; connected agents restore their
+reservation on the next operation (resolving any new collision before sending). Exports
+include them (schema version 3).
+
+Provider/model components are lowercased, non-alphanumerics become hyphens, and
+each is capped at 40 characters. The unique suffix is never truncated. Custom
+join names accept 1–128 ASCII letters, digits, underscores or hyphens, starting
+with a letter or digit. `SQUAD_PERSONA` overrides automatic naming and remains a
+namespace: `codex` accepts `codex-2`, but refuses unrelated names. Explicit join
+renames remain supported; they do not migrate old references, so choose them
+before taking work and retain the returned name as `SQUAD_PERSONA` when resuming.
+Renaming stops exposing the automatic token but preserves its original reservation
+and references: any previously saved token still resumes the original automatic name.
+Custom co-named sessions still receive `identity_collision` warnings.
+
+The human CLI defaults to `human`. To act as an MCP agent, pass its exact returned
+name on every call (`SQUAD_PERSONA=<joined-name> squad send ...`), or share its
+launcher-provided `SQUAD_SESSION_ID`, `SQUAD_PROVIDER`, and `SQUAD_MODEL`. CLI calls
+with a session token restore the same reserved identity across invocations. For
+new CLI workers, generate a UUID once per worker and retain it for all calls.
+Subagents share the parent's MCP connection, so use the CLI with their own token
+or persona; see `/squad:fanout`.
 
 Everything is **pull-only**: nothing ever pushes into an agent's context or wakes it. `squad_check` supports long-polling (`wait_seconds`), so a live conversation is a cheap loop of *check(wait 25s) → respond → check(wait 25s)* with no busy-polling.
 
@@ -44,6 +92,8 @@ Everything is **pull-only**: nothing ever pushes into an agent's context or wake
 | `squad_card_transition` | Move a card to a new phase, validated against the allowed-transition graph (illegal moves are rejected with an error naming what's actually allowed); an empirical-claim card also needs experiment/observation evidence before reaching `SUPPORTED`. Auto-announced in chat. |
 | `squad_card_evidence_add` | Attach an evidence item (`type` + `provenance`, optional `body`) to a card, auto-announced in chat. |
 | `squad_card_update` | Edit fields set at creation (title, confidence, novelty, prior-art status, etc.) — only the fields supplied change. Never touches `phase` or history; use `squad_card_transition`/`squad_card_evidence_add` for those. Auto-announced in chat. |
+| `squad_diverge_open` | Open a divergence round: a bounded window where each participant submits independently and nobody's submission is visible to anyone until the round closes. Optionally scoped to a Science Card (`card_id`); auto-closes once every persona in `expected_participants` has submitted. The chat announcement carries only the topic, never a submission. |
+| `squad_diverge_submit` / `squad_diverge_status` / `squad_diverge_close` | Submit your independent entry to an open round (resubmitting overwrites your own, never reveals anyone else's); check a round (while open: who has submitted, never what; once closed: every submission); explicitly close a round, revealing all submissions with the reveal announced in chat (idempotent). |
 | `squad_review_open` | Ask **one specific** teammate to look at something: a durable directed request with `target`, `refs`, `priority` (`low`/`normal`/`high`/`urgent`), a body, and an optional expiry (`expires_ts` or `expires_in_minutes`). Starts `pending`, auto-announced in chat, and shows up in the target's `squad_join`/`squad_check` — so "this is what's gating me" doesn't have to compete with ordinary prose in the log. |
 | `squad_review_claim` | Acknowledge a request directed at you: records you as claimant with a claim timestamp (the ack/lease the requester is waiting on). Target-only, `pending`-only, and refused once the request has expired. Auto-announced in chat. |
 | `squad_review_resolve` | Close out a request you claimed, with an optional `resolution`. Claimant-only, and only from `claimed` — a `pending` request must be acked first, so the ack is never skipped. Auto-announced in chat. |
@@ -68,7 +118,21 @@ Per-repo writes: a `squad` entry merged into `.mcp.json` (room pinned to `<repo>
 
 If you decline the CLI link (or `npm link` can't write npm's global prefix on your machine), the installer's closing output prints the exact `node <path-to-squad>/dist/index.js <cmd>` form to use instead of `squad <cmd>` everywhere below — trust that output over this README if the two ever disagree.
 
-**Claude's persona is per-repo; Codex's is machine-global.** Claude's `SQUAD_PERSONA` lives in that repo's own `.mcp.json`, so each checkout can name its Claude anything without touching any other repo. Codex has only one `[mcp_servers.squad]` block in `~/.codex/config.toml`, shared by every repo on the machine — `SQUAD_CODEX_PERSONA` sets that single global value, it does not scope to the repo you ran `./install.sh` from. Running `./install.sh` again in a second repo with a different `SQUAD_CODEX_PERSONA` silently overwrites the first repo's choice; there is currently no way to give Codex a different persona per room.
+**Installation and migration:** fresh installs omit `SQUAD_PERSONA` for both
+harnesses. Reinstall preserves existing environment values and custom names.
+Older installs pinned `claude` in the repo's `.mcp.json` and `codex` in the global
+`~/.codex/config.toml` squad block. These values are ambiguous (they may be
+intentional), so the installer never silently removes them. To migrate, remove
+only `SQUAD_PERSONA` from those squad environment entries and restart the MCP
+connections; keep room settings and custom metadata. Existing work references
+keep the old name: finish/reassign that work before starting with new identities.
+`SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` request explicit installer pins.
+An existing Codex server block (including command/args) is preserved verbatim;
+update those paths manually if moving the source checkout. This includes table-form TOML
+environments; edit its pin directly to change it.
+Codex's config is machine-global; its pin applies across repos. The optional
+`--reentry` Stop hook requires an explicit unique `SQUAD_CLAUDE_PERSONA`, because
+its separate process cannot discover a UUID generated inside MCP.
 
 ### Re-entry (opt-in)
 
@@ -109,12 +173,65 @@ forever on unread chatter alone:
   fresh process); it resets when a new arm cycle starts (first invocation
   after install, or after the TTL/operator-stop has allowed a stop).
 
-**Codex equivalent**: none exists yet. As of this writing, this repo's only
-Codex integration points are `~/.codex/prompts/squad-*.md` and
-`~/.codex/config.toml`'s `[mcp_servers.squad]` block — there is no confirmed
-Codex hook/scheduled-task primitive to hang an equivalent re-entry adapter on.
-This is a known gap, not an oversight; a Codex-side re-entry adapter needs a
-primitive that doesn't exist in this codebase yet.
+### Re-entry for Codex: `squad codex-reentry`
+
+Codex has **no end-of-turn hook** to mirror the `Stop` hook above with — its
+only hook event is `pre_tool_use`, and there is no `codex hooks` subcommand at
+all (verified against Codex 0.146.0). A Codex persona running `/squad-join`
+therefore ends its turn on a `task_complete` event and stays alive at ~0% CPU,
+present but mute, until an operator re-invokes it. That silent park caused
+three room outages in one day — one ~5 hours, one leaving 410 theorems
+unverified for 4 hours (#60).
+
+The fix assumes no hook primitive at all. It uses the one thing Codex does
+guarantee: **a `codex exec` run is a process that exits when the turn
+completes.** `squad codex-reentry` is a supervisor around that — start it in
+the terminal where you would otherwise have run `codex` and typed
+`/squad-join`:
+
+```bash
+squad codex-reentry                      # instead of: codex → /squad-join
+squad codex-reentry --persona codex-2    # a second worker (see /squad:fanout)
+squad codex-reentry -- --model o3        # everything after -- goes to `codex exec`
+```
+
+Each time the turn ends, the supervisor reads back *how* it ended from the
+session log (`$CODEX_HOME/sessions/.../rollout-*.jsonl` — the ground truth the
+presence table can't give you, since `stale` is indistinguishable from a
+crash), then re-launches after a bounded wait. A clean `task_complete` is an
+ordinary park; anything else is announced in the room as a failure, not a
+park.
+
+- **The same bounds as the Claude side, from the same code**: the wait between
+  runs is `src/reentry.ts`'s `decide()`, so backoff+jitter, the
+  `SQUAD_REENTRY_TTL_MINUTES` TTL, the `SQUAD_REENTRY_STOP` / `.squad/reentry-stop`
+  / `.squad/reentry/<persona>.stop` operator-stop escape hatch, and the
+  immediate reset on an `@mention` all behave identically. State lives in the
+  same `.squad/reentry/<persona>.json` file.
+- **Two extra guards**, because each Codex re-entry is a *process spawn* rather
+  than a turn of an already-running session: `SQUAD_REENTRY_MAX_ATTEMPTS`
+  (default 48) hard-caps re-entries per arm cycle regardless of wall-clock, and
+  a 10s floor between runs (plus refusing to honor an `@mention`'s
+  immediate-reset after a run that did *not* park cleanly) keeps a broken
+  `codex` binary from spinning at the backoff floor.
+- **One supervisor per persona, in that persona's own foreground terminal — not
+  a shared daemon.** The failure this fixes is a *cascade* (personas parking
+  within ~90s of each other as the room goes quiet), so a single watcher whose
+  own death silently disarmed every persona would reproduce the outage it
+  prevents. There is no pid file and no cross-persona state; a supervisor dying
+  returns exactly one terminal to a shell prompt, and only that persona loses
+  re-entry.
+- **It parks loudly.** On start it tells the room it will self-re-enter; when a
+  bound fires (TTL, attempt cap, operator-stop) it posts that the persona will
+  *not* return without an operator. `codex/prompts/squad-join.md` step 6 reads
+  `SQUAD_REENTRY_SUPERVISOR` (exported into every supervised run) so the
+  persona's own idle message says the matching thing.
+
+`squad codex-reentry --help` lists the flags: `--persona`, `--codex <bin>`,
+`--prompt`, `--ttl-minutes`, `--max-attempts`,
+`--no-resume`. It uses `codex exec resume --last` when the local binary
+advertises that subcommand (probed, not assumed) and a fresh `codex exec`
+session otherwise.
 
 ## Use
 
@@ -123,6 +240,7 @@ cd ~/projects/my-lean-proof
 terminal 1:  claude  →  /squad:goals prove lemma exp_bound; prove lemma sum_split; main theorem
              then    →  /squad:join
 terminal 2:  codex   →  /squad-join
+             or      →  squad codex-reentry   # same thing, but it re-enters itself
 terminal 3:  squad tail                    # watch the room live
              squad send "@claude take exp_bound, @codex take sum_split"
 ```
@@ -131,9 +249,10 @@ Commands (`join` and `goals` behave the same in both harnesses):
 
 - **join** — enter the room, introduce yourself, work the check/respond loop until stopped (agents go idle on their own after ~10 empty checks)
 - **goals** — show the shared board, or add goals from arguments
+- **card** — create, inspect, transition, or attach evidence to a Science Card (Claude only; from Codex or a terminal, use `squad card`)
 - **clear** — wipe the room for a fresh session (Claude only; from Codex or a terminal, use `squad clear`)
 
-Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | card [create|list|show|transition|evidence|edit] | who | leave | clear | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
+Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
 
@@ -243,6 +362,35 @@ Two things worth calling out: the `SUPPORTED` gate only checks that a qualifying
 ```bash
 pnpm test    # builds + runs the node:test suite
 ```
+
+### VERSION bumps for consumer-visible changes
+
+`install.sh` copies `commands/squad/*.md`, `skills/squad/SKILL.md`, and (with
+`--reentry`) `hooks/squad-reentry.sh` into every consumer repo, and
+`codex/prompts/squad-*.md` globally into `~/.codex/prompts/`; every installed
+`.mcp.json` also runs the compiled MCP server straight out of this repo's
+`src/` (via `dist/`), so a server-behavior change reaches consumers as soon as
+this repo updates. `install-metadata.json` records `VERSION` at install time,
+and `/repo:update-tools` compares it against this repo's current `VERSION` to
+detect drift — so a `VERSION` that never moves makes every consumer look
+falsely "current."
+
+**If your PR touches the installed surface** (`commands/squad/`,
+`skills/squad/SKILL.md`, `codex/prompts/`, `hooks/squad-reentry.sh`,
+`install.sh`, `uninstall.sh`, or `src/`) — bump `VERSION` (keep
+`package.json`'s `"version"` and the `McpServer` version string in
+`src/mcp.ts` in sync; `pnpm test` enforces this) via `/loom:bump`, or, if the
+change genuinely does not alter installed behavior (a comment, a typo fix, a
+test-only edit), add this exact marker to the PR body or a commit message
+instead:
+
+```
+<!-- loom:no-surface-change -->
+```
+
+CI (`.github/workflows/version-check.yml`) runs
+`scripts/check-surface-version-bump.sh` on every PR and fails when the
+watched surface changed without either a `VERSION` bump or the marker.
 
 ## License
 

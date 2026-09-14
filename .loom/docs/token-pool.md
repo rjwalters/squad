@@ -43,10 +43,16 @@ machine profile root. Loom rejects traversal, separators, symlink escapes,
 non-directory targets, and a profile root located inside the repository.
 Codex owns `<profile>/auth.json` and may refresh it in place; Loom's registry
 does not open, parse, copy, serialize, or log that file. Operators should keep
-profile directories `0700` and `auth.json` `0600`.
+profile directories `0700` and `auth.json` `0600`. If `.loom/accounts.json` is
+committed and a host has not yet locally provisioned a directory for one of
+its listed entries, inventory simply skips that one name (with a warning) —
+the rest of the pool on that host is unaffected.
 
 Selected accounts expose the non-secret observability identity
-`LOOM_ACCOUNT_PROVIDER` and `LOOM_ACCOUNT_NAME`. Claude selections also retain
+`LOOM_ACCOUNT_PROVIDER` and `LOOM_ACCOUNT_NAME`, plus `LOOM_ACCOUNT_UPSTREAM_ID`
+when the storage backend that produced the selection tracks one (issue #5609
+— today only a Claude selection whose `index.json` row carries an
+`upstream_id`; see "Provider selection" below). Claude selections also retain
 `LOOM_TOKEN_NAME`; Codex selections bind `CODEX_HOME` and never expose an
 equivalent credential variable. Raw provider capacity counts enabled inventory
 candidates only. Quota health, cooldown, ranking, and failover are layered on
@@ -208,6 +214,21 @@ from: `auto` (default) prefers a fresh claude-monitor `ranking.json` and only
 falls back to this CLI's own native probe when one isn't present; `monitor`
 never falls back (an empty report when claude-monitor has nothing fresh);
 `probe` always uses the native probe, ignoring claude-monitor entirely.
+
+**Provider-dispatched probing (issue #5608).** `--source probe` resolves each
+account's provider from `index.json` (a `.token` file with no manifest row is
+treated as `claude`) and only ever sends a `claude` credential to Anthropic's
+API. An account recorded under any other provider (design
+`docs/design/token-pool-provider-identity.md`) reports `status: "unsupported"`
+with `error: "no_probe_adapter:<provider>"` and every utilization/reset field
+unset — it is **never** reported `exhausted`. `unsupported` rows are omitted
+from `.ranking` (that file's contract stays "Claude accounts the selector may
+pick") but still show up in `--json` and the human table, so an operator can
+see *why* a recorded account is absent from the pool instead of it looking
+like ordinary exhaustion. The `--source auto|monitor` path applies the
+equivalent scoping on claude-monitor's `ranking.json` join, so a non-Claude
+account sharing an email with a healthy Claude account can no longer override
+that account's reported status.
 
 **After adding a new account** (via `bootstrap` or `import-from-monitor`), run
 `loom-daemon tokens check --ranking --source probe` once. Under the `auto`
@@ -456,6 +477,51 @@ pick, so adding it cannot perturb which account is chosen. Its consumer is
 feeds the dashboard's per-account reset countdown, its burn-curve segmentation
 and forecasts, and the pool-level "capacity returns at" aggregate.
 
+### Provider selection: `--provider`, runtime manifests, and the fail-open default (issue #5609)
+
+`loom-daemon tokens select --provider <name>` (default `claude`) is parsed
+through `AccountProvider`'s `FromStr`/`Display` implementation
+(`loom-daemon/src/tokens_pool/account_registry.rs`) — the whole provider
+vocabulary (`claude`, `codex`) lives in one place
+(`AccountProvider::ALL`), so `--provider bogus` fails with a message that
+enumerates the valid values, and adding a provider means adding a variant
+there, not editing the CLI parser. `identity_env` (the source of
+`LOOM_ACCOUNT_PROVIDER`, above) uses the same `Display` impl rather than a
+second hand-rolled match.
+
+**Provider is derived from the runtime binding, never configured
+separately.** `spawn-<runtime>.sh` resolves its own account provider from
+its own runtime manifest (`defaults/runtimes/<name>.json`'s
+`"accountProvider"` field — `"claude"` for `claude.json`, `"codex"` for
+`codex.json`) and passes that value to `tokens select --provider`, instead of
+hardcoding it. The full resolved chain is:
+
+```
+role  ──►  runtime                                        ──►  provider            ──►  pool
+       LOOM_RUNTIME_<ROLE> > LOOM_RUNTIME >              runtime manifest        tokens select
+       runtimes.roles.<role> > runtimes.default > claude  "accountProvider"       --provider <p>
+```
+
+A `runtimes.roles.judge = "codex"` binding therefore implies the Codex
+account pool automatically — there is no second `runtimes`-shaped map to keep
+in sync (that would only reproduce the runtime/model mismatch class #5001
+fixed for the model axis). A **missing** `accountProvider` field — an
+un-resynced install whose `.loom/runtimes/<name>.json` predates this issue,
+or the bundled `include_str!` fallback (#5002) for a runtime with no on-disk
+manifest at all — defaults to `"claude"` rather than failing closed, so a
+partially-upgraded fleet keeps dispatching.
+
+**Enforcement in the Claude selector.** `select::select_token` skips any
+`.token` file whose `index.json` row names a provider other than `claude`
+(defense-in-depth: under the storage-layer design in
+`docs/design/token-pool-provider-identity.md` §4 D4, no non-Claude row is
+ever materialized as a `.token` file, so this is the assertion that keeps a
+stale pre-upgrade pool directory from becoming exploitable, not the primary
+mechanism). A `.token` file with **no** manifest row at all — a
+hand-provisioned pool, or one bootstrapped before #5607 — is fail-open,
+treated as `claude`, exactly like every other provider-aware reader in this
+document.
+
 ## Bad-token tracking (`loom-daemon tokens mark-bad`)
 
 When a token returns `TOKEN_EXPIRED`, `TOKEN_EXHAUSTED`, or
@@ -496,6 +562,114 @@ in-session `/loom:sweep` orchestrator, which has no pool to rotate through and
 instead re-dispatches one model rung down (`sweep.md` → "Credit-exhaustion
 fallback").
 
+A **monthly spend-limit kill** ("You've hit your monthly spend limit", issue
+#5631/#6518) classifies as plain `TOKEN_EXHAUSTED` — it is not, and does not
+need to be, its own category here: the pool-rotation remedy on this subprocess
+path is already correct and unchanged. The in-session `/loom:sweep`
+orchestrator has its own reactive text match for this phrase (`sweep.md` →
+"Spend-limit fallback") because, like credit exhaustion, it has no subprocess
+to run this classifier through — but unlike credit exhaustion, its first-line
+remedy is re-dispatching with the `model` param omitted (inheriting the
+session default), not a cost-ladder walk, because a spend cap's scope
+(account-wide vs. per-tier) is not knowable from the signature alone.
+
+### A REVOKED token is fatal on the first occurrence (#6614)
+
+An operator running `/login` on the host revokes the pooled OAuth credential the
+fleet is riding on. Every in-flight child then dies with the JSON-enveloped
+signature quoted above:
+
+```text
+Failed to authenticate. API Error: 401 {"type":"authentication_error","message":"OAuth access token has been revoked."}
+```
+
+That wording used to match **nothing** in the classifier — the
+`401[^a-z]*authentication_error` pattern cannot cross the `{"type":"` envelope
+(the gap excludes letters), and no pattern mentioned "revoked" — so it fell
+through to the generic `RECOVERABLE` catch-all and `claude-wrapper.sh` retried
+the **same revoked token** `LOOM_MAX_RETRIES` (5) times before dying. A revoked
+credential cannot recover, so every one of those retries was pure latency plus a
+duplicated 401 in the logs.
+
+It now classifies as `TOKEN_EXPIRED` on the first occurrence — matched via the
+`"type":"authentication_error"` JSON field and the `token has been revoked` /
+`token was revoked` phrases — so `is_account_auth_dead` marks the account bad
+(`auth`, permanent) and rotates immediately, consuming **no** retry attempt.
+
+## Dispatch pauses when the whole pool is unusable (#6614)
+
+The per-issue dispatch backoff (#4485) bounds how often *one* issue is retried;
+it plateaus at 900s and repeats at that cadence forever. That is the wrong shape
+for a machine-level fault: with an empty pool **every** candidate issue dies
+identically at `spawn-claude.sh`'s token-selection step, so a per-issue brake
+just spreads the same doomed dispatch across the backlog — a quiet ~15-minute
+crash-loop with no signal above per-sweep logs.
+
+The daemon now counts **distinct issues** whose dispatch died at token selection
+inside a trailing window. At/above the threshold this trips the existing
+workspace pre-flight advisory (#4386) and its half-open dispatch gate (#5030):
+new dispatch to that workspace is **held** except one probe per cooldown, and one
+`ERROR` line plus a `daemon.preflight.advisory` event name the cause and the
+remedy. The first dispatch that gets past token selection (with a named account)
+clears it automatically — no operator action.
+
+| Knob | Default | Meaning |
+|---|---|---|
+| `LOOM_EMPTY_POOL_BREAKER_THRESHOLD` | `3` | Distinct issues that must die at token selection before dispatch is paused |
+| `LOOM_EMPTY_POOL_BREAKER_WINDOW_SECS` | `1800` | Trailing window over which those distinct issues are counted |
+
+**Distinct sources, not raw failures**, is load-bearing in both directions: one
+unlucky issue cycling through its own backoff can never pause the fleet, and N
+*different* sources dying at the identical step cannot be explained by any one
+of them — only by the pool.
+
+Since #7607 the counter's key is a `TokenSelectionFailureSource`, not a bare
+issue number, and **role ticks feed it too**: a role tick that skips its spawn
+on an exhausted pool (below) records a `(workspace root, role)` source. The
+over-trigger guarantee is unchanged — one role looping on one workspace
+refreshes a single key forever and can no more trip the brake alone than one
+issue can. Without this feed the advisory depended entirely on which discovery
+path noticed first: on a host whose work finder is idle and whose role loops
+are the only traffic, it would simply never trip.
+
+## Role ticks pre-flight the pool instead of spawning into it (#7607)
+
+The role runner already skipped a tick when the workspace had **no** token pool
+at all (`RoleTickOutcome::NoTokenPool`, #4642). A pool that is *present but
+fully exhausted* — every account bad-marked in `.bad_tokens` or hard-excluded by
+`.ranking` (`exhausted`/`blocked`) — slipped past that check, so every tick still
+spawned `spawn-worker.sh`, burned ~10 s, and exited `78` at token selection:
+570–605 such ticks per host per day (~100 min/host/day) were observed on
+2026-09-13 across four fleet hosts.
+
+Each role tick now reads the pool it would resolve to (repo-local shadow pool if
+it holds `.token` files, else shared — the same precedence `spawn-claude.sh`
+performs) and counts **spawnable** accounts. When that count is zero and the pool
+is non-empty, the tick returns `RoleTickOutcome::PoolExhausted { total,
+next_clear_at }` and **spawns nothing**:
+
+- The skip is logged at `WARN` on the state **edge** for each `(workspace, role)`
+  and downgraded to `DEBUG` on every repeat, so a dry pool costs one line per
+  role per workspace, not one per tick. A dated line also lands in
+  `.loom/logs/role-<role>.log` (#6201), naming the spawnable count, the resolved
+  pool directory, and the remedy.
+- `next_clear_at` is the earliest of every blocking `.bad_tokens` cooldown clear
+  and every hard-excluded `.ranking` row's `limit_reset`, capped at 900 s. It is
+  **diagnostic only** — never a gate. The live pool is re-read on every tick, so a
+  readmission (`loom-daemon tokens unblock`, a rate-limit window rolling over,
+  the `.ranking` refresher observing a reset) resumes ticks on the **next** tick
+  with no daemon restart.
+- The skip feeds the #6614 brake above, and `loom-daemon health` reports it under
+  its own `pool exhausted (N role(s) held)` bucket rather than as N role
+  failures.
+
+The preflight is deliberately conservative in one direction only: it uses the
+same bad-marked/hard-excluded exclusions every selection tier (including the
+fail-safe retry, #5629) enforces, so `usable == 0` guarantees a real selection
+would have failed. It does not model the `index.json` non-Claude exclusion
+(#5609), which can only make the real count *lower* — so this can never block a
+spawn that would have succeeded.
+
 ## Worktree handling
 
 When invoked from a worktree, `spawn-claude.sh` resolves the canonical repo root
@@ -508,7 +682,13 @@ list.
 Token selection resolves the effective pool as: the **per-repo** pool
 `<repo>/.loom/tokens/` when it holds `*.token` files, else the **shared
 machine-level pool** `~/.loom/tokens/` (override `LOOM_SHARED_TOKENS_DIR`; set it
-empty to disable the fallback). This lets a consumer repo the daemon dispatches
+empty to disable the fallback). **This precedence is presence-based, not
+health-based**: a per-repo pool wins by merely *having* `.token` files present,
+regardless of whether any of its accounts are actually usable — so a per-repo
+pool whose every account has since gone bad-marked or `.ranking`-excluded still
+shadows a healthy shared pool rather than falling back to it (issue #6758; the
+empty-pool error names the shared pool and, since #6758, whether it currently
+holds a usable account). This lets a consumer repo the daemon dispatches
 into — which has no pool of its own — spawn against the shared pool instead of
 hard-failing with `EX_CONFIG`. Crucially, the pool **state** files (`.bad_tokens`,
 `.failure_counts`, `.ranking`, `.allowlist`) are read/written in whichever pool was
@@ -783,6 +963,23 @@ The `hard-excluded by .ranking status` line is the #5629 exclusion set above:
 that account is not in `.bad_tokens` at all, so `tokens unblock` will not help —
 the `.ranking` file is what rules it out, and re-probing is the recovery.
 
+**Shadowed shared pool (#6614).** The all-excluded message also says whether a
+*different*, healthy pool exists that was never consulted. `resolve_tokens_dir`
+prefers a repo-local pool merely for **having** `.token` files, regardless of
+their health, so a stale repo-local copy can shadow a healthy machine-level one
+and report "empty pool" while several good accounts sit one directory away:
+
+```
+  SHADOWED POOL: a shared machine-level pool at ~/.loom/tokens also holds .token files and was NOT consulted — a repo-local pool wins on merely HAVING token files, regardless of health. If the pool above is a stale copy, re-bootstrap or remove it (`loom-daemon tokens bootstrap --force`) so the shared pool is used.
+```
+
+When the exhausted pool *is* the shared one, the message says so instead
+(`pool identity: this IS the shared machine-level pool`), so a genuine
+exhaustion is never mistaken for a shadowing artifact. The earlier
+dir-missing / no-`.token`-files errors keep their existing "also checked"
+wording, which is accurate there because those are precisely the cases in which
+the shared pool *is* probed.
+
 `spawn-claude.sh` additionally logs the resolved daemon binary path and its
 `--version` at token-selection time, on every spawn:
 
@@ -854,3 +1051,104 @@ Codex exposes no trustworthy quota-headroom percentage here. Status/capacity
 therefore reports raw, enabled, healthy, cooldown, and reauth-required counts;
 transcript token totals remain observability and are never presented as
 remaining quota. Claude's existing global daemon concurrency cap is unchanged.
+
+## Session-managed Codex accounts: auth-state probe + re-auth runbook (#6927)
+
+A Codex account can be **adopted** by a session container
+(`loom-daemon accounts session start <name>`, issue #6925): from then on the
+container is the single serializing owner of that account's `CODEX_HOME`, and
+no host-side `codex` process may touch the profile directly (ADR-0017
+Decision 1). Adoption is permanent and recorded by a `.session-managed.json`
+marker inside the profile directory.
+
+### How a session-managed account's auth state is learned
+
+The host-direct `codex login status` probe is forbidden on an adopted
+profile, so the daemon asks the container that owns it instead:
+
+```
+docker exec <container> codex login status
+```
+
+This stays *inside* the ownership boundary rather than being an exception to
+it: the host never opens the profile, `codex login status` is read-only (it
+never starts a device-code flow or rewrites the refresh chain, so it cannot
+race a refresh the container is performing), and the probe is non-interactive
+with a bounded timeout, so it can never block on an absent operator.
+
+The result is reported by the ordinary account surfaces — a session-managed
+account reads exactly like a host-direct one, only the transport differs:
+
+```bash
+loom-daemon accounts status codex <name>          # login=LoggedIn | NotLoggedIn | ...
+loom-daemon accounts status codex <name> --json   # "login_state": "logged_in", "session_managed": true
+```
+
+`login_state: session_unavailable` means the probe could not run at all —
+the account's session container is not running (or `docker` is unavailable),
+so **nothing is known** about its auth state. Start the container and re-run.
+
+### How the probe reaches selection
+
+Account selection (`select_account` → `select_healthy_at`) probes every
+enabled, adopted Codex account before choosing one, and feeds each
+**conclusive** result into the same `.loom/account-health.json` state the
+reactive terminal signals use:
+
+| Probe result | Effect on `.loom/account-health.json` |
+|---|---|
+| not logged in | `reason = reauth_required` — excluded from selection *before* a dispatch is attempted |
+| logged in, account held `reauth_required` | hold released (a live probe is the independent verification a release requires) |
+| logged in, otherwise | probe stamp only — never clears an exhaustion cooldown or a transient backoff |
+| container stopped / `docker` or `codex` missing / timeout / unparseable | **nothing recorded** — "could not tell" is never evidence of expiry |
+
+Knobs (all optional):
+
+- `LOOM_CODEX_SESSION_PROBE=0` — disable the probe entirely.
+- `LOOM_CODEX_SESSION_PROBE_TTL_SECS` (default `300`, `0` = every selection) —
+  minimum age of the last conclusive result before an account is re-probed.
+
+The probe costs zero `docker` invocations for a pool with no adopted account,
+and never fails a selection: it is an optimization over discovering a dead
+refresh chain by dispatching into it.
+
+### Re-auth runbook: attach → `codex login` → detach
+
+Run this when an account reports `login=NotLoggedIn`, or when selection
+reports it as `reauth_required`. It is the *only* supported way to
+re-authenticate an adopted profile — a host-direct
+`loom-daemon accounts reauth` refuses one by design.
+
+```bash
+# 0. Confirm the diagnosis, and that the container is up.
+loom-daemon accounts status codex <name>          # expect login=NotLoggedIn
+loom-daemon accounts session status <name>        # expect running
+
+# 1. Start the container if it is stopped (idempotent if already running).
+loom-daemon accounts session start <name>
+
+# 2. Attach to the container's tmux session (interactive, operator-only).
+loom-daemon accounts session attach <name>
+
+# 3. INSIDE the attached session, re-authenticate:
+codex login
+#    ...complete the browser/device flow...
+codex login status                                # expect "Logged in"
+
+# 4. Detach WITHOUT killing the session: press Ctrl-b then d
+#    (tmux's default prefix — the session image's entrypoint does not
+#    rebind it; see docker/session/entrypoint.sh).
+
+# 5. Confirm from the host that the probe now agrees.
+loom-daemon accounts status codex <name>          # expect login=LoggedIn
+```
+
+Step 5 is what releases the `reauth_required` hold: the next selection's
+probe sees a logged-in account and clears it. To force that immediately
+rather than wait out `LOOM_CODEX_SESSION_PROBE_TTL_SECS`, run the next
+selection with `LOOM_CODEX_SESSION_PROBE_TTL_SECS=0`.
+
+**Do not** `exit` the shell inside the tmux pane instead of detaching — that
+ends the pane the entrypoint created. The container survives (it blocks on
+its own `sleep infinity`), but a later `attach` has no session to attach to
+until the container is restarted.
