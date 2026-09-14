@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.10.0
+
+- Reuse Science Cards as durable research nodes with dependency graphs, declared
+  artifacts and immutable content snapshots, including legacy mutation routes.
+- Bind exact node revisions to submitted artifacts before verified banking;
+  preserve historical/stale provenance separately from independent review.
+- Surface nodes in shared join workflows and matching CLI/MCP operations.
+- Add schema 6 with honest adoption baselines and export/import/reset support.
+
 ## 0.9.0
 
 - Execute banking through CLI/MCP with isolated committed-source integration, exact candidate builds, non-forcing publication, renewable ownership and interrupted-publication recovery.

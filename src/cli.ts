@@ -106,6 +106,11 @@ Human CLI usage:
                                Close out a request you claimed
   squad review cancel <id> [reason...]
                                Withdraw (requester) or decline (target)
+  squad node create <question...> | --json '<card fields, dependencies, artifacts>'
+  squad node list | show <id>  Discover the shared research graph and provenance
+  squad node update <id> <expected-revision> '<metadata JSON>'
+  squad node submit <id> <expected-revision> <request-key> <config-revision>
+                               Bind declared artifacts to a pending bank attempt
   squad card create [--title <text>] [--claim-kind empirical|formal] <question...>
                                Open a Science Card in the QUESTION phase
   squad card list [--all]     Show cards (active only; --all also shows
@@ -308,6 +313,55 @@ export async function runCli(argv: string[]): Promise<void> {
   const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
+    case "node": {
+      const [action = "list", ...args] = rest;
+      const integer = (raw: string | undefined) => {
+        if (
+          !raw ||
+          !/^[1-9][0-9]*$/.test(raw) ||
+          !Number.isSafeInteger(Number(raw))
+        )
+          throw new Error("node: expected a positive integer ID/revision");
+        return Number(raw);
+      };
+      let result;
+      if (action === "list" && !args.length) result = squad.nodeList();
+      else if (action === "show" && args.length === 1)
+        result = squad.nodeGet(integer(args[0]));
+      else if (action === "create" && args.length) {
+        if (args[0] === "--json") {
+          if (args.length !== 2)
+            throw new Error("usage: squad node create --json '<fields>'");
+          result = squad.nodeCreate(JSON.parse(args[1]!));
+        } else {
+          if (args.some((arg) => arg.startsWith("--")))
+            throw new Error("node: use --json for named fields");
+          const question = args.join(" ");
+          result = squad.nodeCreate({ title: question, question });
+        }
+      } else if (action === "update" && args.length === 3)
+        result = squad.nodeUpdate(
+          integer(args[0]),
+          integer(args[1]),
+          JSON.parse(args[2]!),
+        );
+      else if (action === "submit" && args.length === 4) {
+        if (!/^(0|[1-9][0-9]*)$/.test(args[3]!))
+          throw new Error("node: invalid configuration revision");
+        result = squad.nodeSubmit(
+          integer(args[0]),
+          integer(args[1]),
+          args[2]!,
+          Number(args[3]),
+        );
+      } else
+        throw new Error(
+          "usage: squad node create|list|show|update|submit (see squad help)",
+        );
+      console.log(JSON.stringify(result, null, 2));
+      break;
+    }
+
     case "bank": {
       if (!rest[0] || rest[0].startsWith("--") || (rest.length !== 1 && (rest.length !== 3 || rest[1] !== "--build-timeout-ms" || !/^[1-9][0-9]*$/.test(rest[2]!))))
         throw new Error("usage: squad bank <attempt-id> [--build-timeout-ms N]");
@@ -331,7 +385,7 @@ export async function runCli(argv: string[]): Promise<void> {
       if (action === "submit" || action === "attempts") {
         const options: Record<string, string> = {};
         const commits: string[] = [], nodes: string[] = [], paths: string[] = [];
-        const allowed = action === "submit" ? ["request-key", "config-revision", "commit", "node", "path", "theorem"] : ["status", "limit"];
+        const allowed = action === "submit" ? ["request-key", "config-revision", "commit", "node", "node-revisions", "path", "theorem"] : ["status", "limit"];
         for (let i = 0; i < args.length; i += 2) {
           const key = args[i]!.replace(/^--/, "");
           const value = args[i + 1];
@@ -343,7 +397,7 @@ export async function runCli(argv: string[]): Promise<void> {
         }
         const numeric = action === "submit" ? "config-revision" : "limit";
         if ((action === "submit" || options[numeric] !== undefined) && !/^(0|[1-9][0-9]*)$/.test(options[numeric] ?? "")) throw new Error(`integration: ${numeric} must be a non-negative integer`);
-        const result = action === "submit" ? squad.integrationSubmit({ request_key: options["request-key"]!, config_revision: Number(options["config-revision"]), commits, node_refs: nodes, ...(paths.length || options.theorem !== undefined ? { selection: { paths, ...(options.theorem === undefined ? {} : { theorem: options.theorem }) } } : {}) })
+        const result = action === "submit" ? squad.integrationSubmit({ request_key: options["request-key"]!, config_revision: Number(options["config-revision"]), commits, node_refs: nodes, ...(options["node-revisions"] ? { node_revisions: JSON.parse(options["node-revisions"]) } : {}), ...(paths.length || options.theorem !== undefined ? { selection: { paths, ...(options.theorem === undefined ? {} : { theorem: options.theorem }) } } : {}) })
           : squad.integrationAttempts({ status: options.status as import("./integration-ledger.js").IntegrationStatus | undefined, limit: options.limit === undefined ? undefined : Number(options.limit) });
         console.log(JSON.stringify(result, null, 2));
         break;
@@ -827,6 +881,7 @@ export function knownCommand(cmd: string | undefined): boolean {
   return (
     cmd !== undefined &&
     [
+      "node",
       "bank",
       "integration",
       "send",

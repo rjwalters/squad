@@ -33,7 +33,138 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.9.0" });
+  const server = new McpServer({ name: "squad", version: "0.10.0" });
+
+  const cardCreateSchema = {
+    title: z.string().min(1).describe("Short card title"),
+    question: z.string().min(1).describe("The question under investigation"),
+    claim_kind: z
+      .enum(["empirical", "formal"])
+      .optional()
+      .describe(
+        "Whether SUPPORTED requires empirical evidence (default 'empirical') or can be " +
+          "reached on formal evidence alone ('formal', for pure math/logic claims)",
+      ),
+    origin_method: z.string().optional().describe("Where this card came from"),
+    origin_contributors: z
+      .array(z.string())
+      .optional()
+      .describe("Personas who contributed"),
+    changed_assumptions: z
+      .array(z.string())
+      .optional()
+      .describe("Assumptions this card revises"),
+    proposed_mechanism: z
+      .string()
+      .optional()
+      .describe("The proposed mechanism"),
+    math_model: z.string().optional().describe("The math model, if any"),
+    standard_prediction: z
+      .string()
+      .optional()
+      .describe("What the standard model predicts"),
+    discriminating_prediction: z
+      .string()
+      .optional()
+      .describe("What this card's mechanism predicts differently"),
+    decisive_falsifier: z
+      .string()
+      .optional()
+      .describe("What observation would falsify this card"),
+    cheapest_test: z
+      .string()
+      .optional()
+      .describe("The cheapest way to test the card"),
+    prior_art_status: z.string().optional().describe("Known prior art, if any"),
+    confidence: z.number().optional().describe("Current confidence, 0-1"),
+    novelty: z.number().optional().describe("Estimated novelty, 0-1"),
+    attempts: z.array(z.string()).optional().describe("Attempts made so far"),
+    attacks: z
+      .array(z.string())
+      .optional()
+      .describe("Attacks/critiques made so far"),
+    insights: z.array(z.string()).optional().describe("Insights gained so far"),
+    post_mortems: z
+      .array(z.string())
+      .optional()
+      .describe("Post-mortems, if any"),
+  };
+  const nodeMetadataSchema = {
+    dependencies: z.array(z.number().int().positive()).optional(),
+    artifacts: z
+      .array(
+        z
+          .object({
+            path: z.string(),
+            commit: z.string(),
+            theorem: z.string().optional(),
+          })
+          .strict(),
+      )
+      .optional(),
+  };
+  server.registerTool(
+    "squad_node_create",
+    {
+      description:
+        "Create a durable research node using the same Science Card identity and fields. Dependencies and declared committed artifacts are optional; unbanked exploration stays visible.",
+      inputSchema: z
+        .object({ ...cardCreateSchema, ...nodeMetadataSchema })
+        .strict(),
+    },
+    async (fields) => json(squad.nodeCreate(fields)),
+  );
+  server.registerTool(
+    "squad_node_get",
+    {
+      description:
+        "Read one research node, immutable content revisions, dependencies, declared artifacts, science evidence and current/stale bank links. Banked and independently reviewed are separate facts. Does not mutate room state.",
+      inputSchema: { id: z.number().int().positive() },
+    },
+    async ({ id }) => json(squad.nodeGet(id)),
+  );
+  server.registerTool(
+    "squad_node_list",
+    {
+      description:
+        "Discover every Science Card as a research node, including exploratory and negative outcomes. Returns graph, artifact and current banking summaries without mutating state.",
+      inputSchema: {},
+    },
+    async () => json(squad.nodeList()),
+  );
+  server.registerTool(
+    "squad_node_update",
+    {
+      description:
+        "Replace declared dependency/artifact lists on the expected node content revision. Rejects dangling dependencies, cycles, path traversal and stale updates. Edit research fields with squad_card_update; both routes revise the same node.",
+      inputSchema: z
+        .object({
+          id: z.number().int().positive(),
+          expected_revision: z.number().int().positive(),
+          ...nodeMetadataSchema,
+        })
+        .strict(),
+    },
+    async ({ id, expected_revision, ...fields }) =>
+      json(squad.nodeUpdate(id, expected_revision, fields)),
+  );
+  server.registerTool(
+    "squad_node_submit",
+    {
+      description:
+        "Submit the node's declared artifacts from one source commit, binding the expected immutable content revision before banking. Returns a pending integration attempt; execute squad_bank separately. Does not review the node.",
+      inputSchema: {
+        id: z.number().int().positive(),
+        expected_revision: z.number().int().positive(),
+        request_key: z.string().min(1),
+        config_revision: z.number().int().nonnegative(),
+      },
+    },
+    async ({ id, expected_revision, request_key, config_revision }) =>
+      json(
+        squad.nodeSubmit(id, expected_revision, request_key, config_revision),
+      ),
+  );
 
   server.registerTool("squad_bank", {
     description: "Execute or resume a submitted integration attempt in an isolated checkout. Builds the exact candidate, then publishes without force to the pinned target. Returns verified only after observed publication; failures retain evidence. Independent node review is separate. Long builds may require a longer MCP client timeout.",
@@ -41,8 +172,8 @@ export async function runMcpServer(): Promise<void> {
   }, async ({ id, build_timeout_ms }, extra) => json(await squad.bank(id, { build_timeout_ms, signal: extra.signal })));
 
   server.registerTool("squad_integration_submit", {
-    description: "Submit full committed Git object IDs for later integration, pinning the current configured revision. An idempotent request key identifies this exact ordered submission. Full-commit mode includes ancestry. Optional selection.paths applies only declared committed regular files from the merge base; requires one commit. selection.theorem explicitly declares a label mapped to those paths, never guesses a symbol. Creates pending evidence only; does not run Git/builds, bank work, or create research nodes/reviews.",
-    inputSchema: z.object({ request_key: z.string(), config_revision: z.number().int().nonnegative(), commits: z.array(z.string()).min(1), node_refs: z.array(z.string()).optional(), selection: z.object({ paths: z.array(z.string()).min(1), theorem: z.string().optional() }).strict().optional() }).strict(),
+    description: "Submit full committed Git object IDs for later integration, pinning the current configured revision. An idempotent request key identifies this exact ordered submission. Full-commit mode includes ancestry. Optional selection.paths applies only declared committed regular files from the merge base; requires one commit. selection.theorem explicitly declares a label mapped to those paths, never guesses a symbol. Numeric-string node_refs require matching node_revisions and declared source artifacts; use squad_node_submit to derive them. Creates pending evidence only; does not run Git/builds, bank work, or create research nodes/reviews.",
+    inputSchema: z.object({ request_key: z.string(), config_revision: z.number().int().nonnegative(), commits: z.array(z.string()).min(1), node_refs: z.array(z.string()).optional(), node_revisions: z.record(z.string(), z.number().int().positive()).optional(), selection: z.object({ paths: z.array(z.string()).min(1), theorem: z.string().optional() }).strict().optional() }).strict(),
   }, async input => json(squad.integrationSubmit(input)));
   server.registerTool("squad_integration_attempt_get", {
     description: "Inspect a durable integration attempt, pinned target, submitted commits, actors, state and complete ordered evidence. No repository access or mutation.",
@@ -284,36 +415,7 @@ export async function runMcpServer(): Promise<void> {
         "Open a Science Card in the QUESTION phase, announced in chat as a system message. Only " +
         "title and question are required; the rest are optional fields filled in as the " +
         "investigation progresses.",
-      inputSchema: {
-        title: z.string().min(1).describe("Short card title"),
-        question: z.string().min(1).describe("The question under investigation"),
-        claim_kind: z
-          .enum(["empirical", "formal"])
-          .optional()
-          .describe(
-            "Whether SUPPORTED requires empirical evidence (default 'empirical') or can be " +
-              "reached on formal evidence alone ('formal', for pure math/logic claims)",
-          ),
-        origin_method: z.string().optional().describe("Where this card came from"),
-        origin_contributors: z.array(z.string()).optional().describe("Personas who contributed"),
-        changed_assumptions: z.array(z.string()).optional().describe("Assumptions this card revises"),
-        proposed_mechanism: z.string().optional().describe("The proposed mechanism"),
-        math_model: z.string().optional().describe("The math model, if any"),
-        standard_prediction: z.string().optional().describe("What the standard model predicts"),
-        discriminating_prediction: z
-          .string()
-          .optional()
-          .describe("What this card's mechanism predicts differently"),
-        decisive_falsifier: z.string().optional().describe("What observation would falsify this card"),
-        cheapest_test: z.string().optional().describe("The cheapest way to test the card"),
-        prior_art_status: z.string().optional().describe("Known prior art, if any"),
-        confidence: z.number().optional().describe("Current confidence, 0-1"),
-        novelty: z.number().optional().describe("Estimated novelty, 0-1"),
-        attempts: z.array(z.string()).optional().describe("Attempts made so far"),
-        attacks: z.array(z.string()).optional().describe("Attacks/critiques made so far"),
-        insights: z.array(z.string()).optional().describe("Insights gained so far"),
-        post_mortems: z.array(z.string()).optional().describe("Post-mortems, if any"),
-      },
+      inputSchema: cardCreateSchema,
     },
     async (fields) => json(squad.cardCreate(fields)),
   );

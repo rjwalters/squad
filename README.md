@@ -497,3 +497,10 @@ Its repository, remote, branch, build command and steward are revisioned in the
 room. Submit committed work, then run `squad bank <attempt-id>` (MCP `squad_bank`)
 to integrate in isolation, build the exact candidate and publish without force.
 Only a verified receipt means banked; configuration and chat claims do not.
+
+### Durable research nodes
+
+Science Cards now share their IDs with [research nodes](docs/nodes.md): discover
+them in `squad_join` or `squad node list`, connect dependencies and declared
+committed artifacts, and inspect revision-bound bank provenance. Old cards and
+evidence remain usable; exploratory work stays visible alongside banked results.

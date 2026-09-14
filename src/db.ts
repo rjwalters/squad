@@ -1,3 +1,4 @@
+import { adoptNodes } from "./nodes.js";
 import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, statSync } from "node:fs";
@@ -20,7 +21,7 @@ import { basename, dirname, join } from "node:path";
  * below -- this version number exists purely as an export/import
  * compatibility check, not a migration-ordering mechanism.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /**
  * Parses an env var as a non-negative minute count, falling back to
@@ -46,6 +47,9 @@ export function envMinutes(name: string, fallback: number): number {
  * matters.
  */
 export const ROOM_TABLES = [
+  "node_metadata",
+  "node_revisions",
+  "node_integrations",
   "integration_configs",
   "integration_attempts",
   "integration_events",
@@ -67,6 +71,28 @@ export const ROOM_TABLES = [
 ] as const;
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS node_metadata (
+  card_id INTEGER PRIMARY KEY,
+  dependencies_json TEXT NOT NULL,
+  artifacts_json TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS node_revisions (
+  card_id INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  content_json TEXT NOT NULL,
+  actor TEXT,
+  session_id TEXT,
+  ts TEXT NOT NULL,
+  origin TEXT NOT NULL,
+  PRIMARY KEY(card_id, revision)
+);
+CREATE TABLE IF NOT EXISTS node_integrations (
+  card_id INTEGER NOT NULL,
+  revision INTEGER NOT NULL,
+  attempt_id TEXT NOT NULL,
+  PRIMARY KEY(card_id, attempt_id)
+);
+
 CREATE TABLE IF NOT EXISTS integration_attempts (
   id TEXT PRIMARY KEY,
   request_key TEXT NOT NULL UNIQUE,
@@ -398,6 +424,7 @@ export function openDb(): DatabaseSync {
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
   ensureMessagesOccurrencesColumn(db);
+  adoptNodes(db);
   // Every open of a db by the current build stamps it current: SCHEMA's
   // migration strategy is additive-only (CREATE TABLE IF NOT EXISTS above,
   // plus the narrow ALTER TABLE ADD COLUMN migrations like

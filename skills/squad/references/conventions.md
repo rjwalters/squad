@@ -87,8 +87,10 @@ IDs with the current `config_revision` and a stable `request_key`. This creates
 pending work; it does not execute banking. Inspect durable status and evidence
 with `squad_integration_attempt_get` or `squad_integration_attempt_list` (CLI
 `squad integration attempt` / `attempts`). Reuse the same key for an identical
-retry; use a new key for changed work. Optional `node_refs` are reserved links,
-not created cards or independent review approval. Chat claims never change the
+retry; use a new key for changed work. Optional `node_refs` must resolve existing
+Science Card IDs with matching `node_revisions` and declared source artifacts;
+prefer `squad_node_submit` to derive them. Historical opaque refs stay unresolved.
+Neither submission nor chat claims establish independent review approval or
 verified integration state.
 
 Execute submitted work with `squad_bank({id})` (CLI `squad bank <id>`), then inspect
@@ -102,3 +104,10 @@ preserves unrelated dirty source work, rebuilds after target races and recovers
 interrupted publication. Configure dependency installation in the build command.
 `squad_check.integration` distinguishes historical verified counts from known
 pending/failed submissions and always reports local work as `unobserved`.
+
+Research nodes are the existing Science Cards, using the same integer IDs.
+Discover them through `squad_node_list`/`squad_node_get`; create with
+`squad_node_create`, replace graph/artifact metadata with `squad_node_update`,
+and bind committed artifacts with `squad_node_submit` before `squad_bank`.
+Nodes expose revision-bound provenance. Banking and independent review remain
+separate; research edits through legacy card tools also revise node content.

@@ -42,7 +42,7 @@ function fixture(t) {
     request_key: "selection-1",
     config_revision: config.revision,
     commits: [commit],
-    node_refs: ["future-node"],
+    node_refs: [],
   };
   const submit = () => squad.integrationSubmit(input);
   return { dir, db, squad, ledger, config, input, submit };

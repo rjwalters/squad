@@ -9,3 +9,7 @@ and follow the installed Squad skill, including its room/identity conventions:
 
 Both expose join, goals, card, fanout, and clear workflows. Claude aliases are
 `/squad:<workflow>`; legacy Codex prompts are `/squad-<workflow>`.
+
+For research work, discover and reuse the durable Science Card node IDs surfaced
+by join/node list; the shared card workflow connects dependencies, committed
+artifacts and revision-bound bank provenance.

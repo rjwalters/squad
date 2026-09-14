@@ -7,8 +7,9 @@ export interface IntegrationSubmission {
   request_key: string;
   config_revision: number;
   commits: string[];
-  /** Reserved stable references; submission does not create cards or reviews. */
+  /** Public submissions resolve existing card IDs; legacy opaque references remain historical. */
   node_refs?: string[];
+  node_revisions?: Record<string, number>;
   /** Exact committed artifact paths; theorem is an explicit declaration, not symbol lookup. */
   selection?: { paths: string[]; theorem?: string };
 }
@@ -59,6 +60,7 @@ export interface IntegrationAttempt {
   config: IntegrationConfig;
   commits: string[];
   node_refs: string[];
+  node_revisions?: Record<string, number>;
   selection?: IntegrationSubmission["selection"];
   submitted_by: string;
   created_ts: string;
@@ -165,7 +167,8 @@ export class IntegrationLedger {
     }
   }
 
-  submit(input: IntegrationSubmission): IntegrationAttempt {
+  /** Trusted node binding hook runs atomically on new submissions, never on key replay. */
+  submit(input: IntegrationSubmission, onCreate?: (attempt: IntegrationAttempt) => void): IntegrationAttempt {
     required(input.request_key, "request key");
     revision(input.config_revision);
     if (!Array.isArray(input.commits) || !input.commits.length)
@@ -212,6 +215,7 @@ export class IntegrationLedger {
       config_revision: input.config_revision,
       commits: input.commits,
       node_refs: [...new Set(nodes)].sort(),
+      ...(input.node_revisions ? { node_revisions: Object.fromEntries(Object.entries(input.node_revisions).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) } : {}),
       ...(input.selection
         ? {
             selection: {
@@ -266,7 +270,9 @@ export class IntegrationLedger {
           ts,
           ts,
         );
-      return this.get(id);
+      const attempt = this.get(id);
+      onCreate?.(attempt);
+      return attempt;
     });
   }
 
@@ -299,6 +305,7 @@ export class IntegrationLedger {
       config: JSON.parse(config_json),
       commits: submission.commits,
       node_refs: submission.node_refs ?? [],
+      ...(submission.node_revisions ? { node_revisions: submission.node_revisions } : {}),
       ...(submission.selection ? { selection: submission.selection } : {}),
       evidence: evidence.map(({ event_json, ...record }) => ({
         ...record,
