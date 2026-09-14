@@ -1,6 +1,13 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  chmodSync,
+  writeFileSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
@@ -12,13 +19,26 @@ const git = (cwd, ...args) =>
     encoding: "utf8",
     stdio: ["ignore", "pipe", "pipe"],
   }).trim();
-function fixture(t, command = "test -f artifact") {
+function fixture(t, command = "test -f artifact", format = "sha1") {
   const root = mkdtempSync(join(tmpdir(), "squad-bank-test-")),
     repo = join(root, "repo"),
     remote = join(root, "remote.git");
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  execFileSync("git", ["init", "--bare", "-q", remote]);
-  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  execFileSync("git", [
+    "init",
+    `--object-format=${format}`,
+    "--bare",
+    "-q",
+    remote,
+  ]);
+  execFileSync("git", [
+    "init",
+    `--object-format=${format}`,
+    "-q",
+    "-b",
+    "main",
+    repo,
+  ]);
   git(repo, "config", "user.name", "test");
   git(repo, "config", "user.email", "test@example.org");
   writeFileSync(join(repo, "base"), "base");
@@ -269,4 +289,119 @@ process.exit(result.status ?? 1);
     result.evidence.at(-1).event.commit,
     git(f.remote, "rev-parse", "main"),
   );
+});
+
+for (const interrupted of [false, true])
+  test(`SHA256 candidate banking and recovery (interrupted=${interrupted})`, async (t) => {
+    const f = fixture(t, "test -f artifact", "sha256"),
+      attempt = f.submit();
+    assert.equal(f.commit.length, 64);
+    const ledger = new IntegrationLedger(f.db, "executor");
+    const verify = ledger.verify.bind(ledger);
+    if (interrupted)
+      ledger.verify = () => {
+        throw new Error("receipt interrupted");
+      };
+    const { executeIntegration } = await import(
+      "../dist/integration-executor.js"
+    );
+    let result = await executeIntegration(
+      ledger,
+      attempt.id,
+      () => f.squad.integrationGet(),
+      () => {},
+    );
+    if (interrupted) {
+      assert.equal(result.status, "pending", JSON.stringify(result));
+      ledger.verify = verify;
+      f.squad.integrationUnset(1);
+      rmSync(f.repo, { recursive: true, force: true });
+      result = await executeIntegration(
+        ledger,
+        attempt.id,
+        () => f.squad.integrationGet(),
+        () => {},
+      );
+    }
+    assert.equal(result.status, "verified", JSON.stringify(result));
+    assert.equal(
+      result.evidence.at(-1).event.commit,
+      git(f.remote, "rev-parse", "main"),
+    );
+    assert.equal(
+      result.evidence.filter((e) => e.event.kind === "candidate").length,
+      1,
+    );
+  });
+test("mixed algorithms and source-format mismatches fail explicitly", async (t) => {
+  const f = fixture(t);
+  assert.throws(
+    () => f.submit({ commits: [f.commit, "a".repeat(64)] }),
+    /mixed Git object algorithms/,
+  );
+  const wrong = f.submit({ commits: ["a".repeat(64)] });
+  const result = await f.squad.bank(wrong.id);
+  assert.equal(result.status, "failed");
+  assert.match(
+    result.evidence.at(-1).event.message,
+    /algorithm differs from source/,
+  );
+  const archived = f.submit({ request_key: "archived" });
+  f.db
+    .prepare("UPDATE integration_attempts SET submission_json = ? WHERE id = ?")
+    .run(JSON.stringify({ commits: [f.commit, "a".repeat(64)] }), archived.id);
+  const recovered = await f.squad.bank(archived.id);
+  assert.equal(recovered.status, "failed");
+  assert.match(recovered.evidence.at(-1).event.message, /mixed or unsupported/);
+});
+for (const flag of ["assume-unchanged", "skip-worktree"]) {
+  test(`build cannot hide changed input with ${flag}`, async (t) => {
+    const f = fixture(
+      t,
+      `git update-index --${flag} artifact; printf altered > artifact; test "$(cat artifact)" = altered`,
+    );
+    const before = git(f.remote, "rev-parse", "main");
+    const result = await f.squad.bank(f.submit().id);
+    assert.equal(result.status, "failed");
+    assert.equal(
+      result.evidence.find((e) => e.event.kind === "build").event.clean,
+      false,
+    );
+    assert.equal(git(f.remote, "rev-parse", "main"), before);
+  });
+  test(`source selection cannot hide uncommitted input with ${flag}`, async (t) => {
+    const f = fixture(t);
+    git(f.repo, "update-index", `--${flag}`, "artifact");
+    writeFileSync(join(f.repo, "artifact"), "hidden edit");
+    const indexPath = git(
+      f.repo,
+      "rev-parse",
+      "--path-format=absolute",
+      "--git-path",
+      "index",
+    );
+    const indexBytes = readFileSync(indexPath);
+    const result = await f.squad.bank(
+      f.submit({ selection: { paths: ["artifact"] } }).id,
+    );
+    assert.equal(result.status, "failed");
+    assert.match(result.evidence.at(-1).event.message, /uncommitted bytes/);
+    assert.deepEqual(readFileSync(indexPath), indexBytes);
+    assert.equal(readFileSync(join(f.repo, "artifact"), "utf8"), "hidden edit");
+  });
+}
+
+test("Git executable mode tolerates restrictive umask and mode 700", async (t) => {
+  const f = fixture(t, "chmod 700 artifact; test -x artifact");
+  chmodSync(join(f.repo, "artifact"), 0o700);
+  git(f.repo, "add", "artifact");
+  git(f.repo, "commit", "-qm", "executable artifact");
+  const commit = git(f.repo, "rev-parse", "HEAD");
+  const oldMask = process.umask(0o077);
+  try {
+    const result = await f.squad.bank(f.submit({ commits: [commit] }).id);
+    assert.equal(result.status, "verified", JSON.stringify(result));
+  } finally {
+    process.umask(oldMask);
+  }
 });

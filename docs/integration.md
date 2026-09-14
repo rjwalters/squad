@@ -162,6 +162,9 @@ This is an explicit caller declaration stored immutably with the request, not a
 Lean symbol lookup or evidence the theorem is proved. A theorem without declared
 paths is rejected. Paths are exact literal repository-relative regular files,
 not globs, directories, symlinks or Git pathspec expressions. Traversal is rejected.
+SHA-1 and SHA-256 repositories are supported; every commit in a submission must
+use the same object algorithm, matching its source repository. Recovery chooses
+the same algorithm from the durable IDs even when the source is unavailable.
 Files must exist at the submitted commit; selected deletions require full-commit
 mode. Selected files must have no staged/unstaged/untracked changes and their
 working contents must match the submitted commit. Unrelated dirty files remain
@@ -182,7 +185,13 @@ and MCP cancellation terminate the subprocess group. Abrupt process death leaves
 a reclaimable lease; it may leave a runner-owned temporary directory.
 
 Each candidate records the fetched base and exact commit/tree. A build must exit
-zero and leave HEAD, tracked files and index unchanged. Untracked build outputs
+zero and leave HEAD, tracked files and index unchanged. Physical tracked bytes,
+executable modes and symlink targets are hashed directly against the committed
+blobs, independently of Git trust flags or stat caching. The same direct check
+rejects hidden selected-source edits without changing the source index. Hashing
+streams asynchronously so cancellation and ownership renewal remain responsive.
+Checkout conversions/filters that change stored blob bytes and Git submodules
+are explicitly unsupported and fail closed. Untracked build outputs
 are allowed; they are never copied from source. Build output and timing are durable
 ledger evidence. Before publication the runner revalidates configuration and its
 lease, records intent, and pushes without force. A competing target advancement

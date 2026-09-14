@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
+import { lstat, readlink } from "node:fs/promises";
 import { spawn } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { createReadStream, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -38,6 +40,36 @@ function environment(): NodeJS.ProcessEnv {
   };
 }
 
+/** Compare physical bytes and executable/symlink modes, independently of Git's
+ * assume-unchanged, skip-worktree, stat cache, filters, and diff settings. */
+async function matchesBlob(
+  cwd: string,
+  path: string,
+  mode: string,
+  oid: string,
+  format: string,
+  signal: AbortSignal,
+) {
+  try {
+    signal.throwIfAborted();
+    const file = join(cwd, path),
+      stat = await lstat(file);
+    const hash = createHash(format);
+    if (mode === "120000" && stat.isSymbolicLink()) {
+      const bytes = await readlink(file, { encoding: "buffer" });
+      hash.update(`blob ${bytes.length}\0`).update(bytes);
+    } else if ((mode === "100644" || mode === "100755") && stat.isFile()) {
+      if ((stat.mode & 0o100) !== (mode === "100755" ? 0o100 : 0)) return false;
+      hash.update(`blob ${stat.size}\0`);
+      for await (const chunk of createReadStream(file, { signal }))
+        hash.update(chunk);
+    } else return false;
+    return hash.digest("hex") === oid;
+  } catch {
+    return false;
+  }
+}
+
 /** Async and bounded so runner/presence renewal continues during builds. */
 async function run(
   cwd: string,
@@ -45,6 +77,7 @@ async function run(
   args: string[],
   signal: AbortSignal,
   timeout: number,
+  outputLimit = 65_536,
 ) {
   signal.throwIfAborted();
   return await new Promise<{
@@ -63,8 +96,8 @@ async function run(
       stopped: string | undefined;
     const capture = (chunk: Buffer) => {
       const text = chunk.toString();
-      truncated ||= output.length + text.length > 65_536;
-      output = (output + text).slice(0, 65_536);
+      truncated ||= output.length + text.length > outputLimit;
+      output = (output + text).slice(0, outputLimit);
     };
     child.stdout.on("data", capture);
     child.stderr.on("data", capture);
@@ -160,6 +193,7 @@ export async function executeIntegration(
       ],
       controller.signal,
       60_000,
+      args[0] === "ls-tree" ? 16_777_216 : 65_536,
     );
     if (result.code !== 0 && !allowFailure)
       throw new Error(`integration: git ${args[0]} failed: ${result.output}`);
@@ -171,8 +205,22 @@ export async function executeIntegration(
     touch();
     // Recovery uses the archived target even if integration has since been disabled.
     // It only observes; no new publication occurs without guard().
+    const lengths = new Set(attempt.commits.map((commit) => commit.length));
+    if (
+      lengths.size !== 1 ||
+      ![40, 64].includes(attempt.commits[0]?.length ?? 0)
+    )
+      throw new Error(
+        "integration: mixed or unsupported Git object algorithms",
+      );
+    const objectFormat = attempt.commits[0]!.length === 64 ? "sha256" : "sha1";
     workspace = mkdtempSync(join(tmpdir(), "squad-bank-"));
-    await git(workspace, ["init", "-q", "."]);
+    await git(workspace, [
+      "init",
+      `--object-format=${objectFormat}`,
+      "-q",
+      ".",
+    ]);
     const ref = `refs/heads/${attempt.config.branch}`;
     await git(workspace, [
       "remote",
@@ -263,6 +311,13 @@ export async function executeIntegration(
       });
     const source = prepared?.repository ?? attempt.config.repository;
     if (
+      (await value(source, ["rev-parse", "--show-object-format"])) !==
+      objectFormat
+    )
+      throw new Error(
+        "integration: submitted Git object algorithm differs from source repository",
+      );
+    if (
       prepared &&
       (prepared.config_revision !== attempt.config_revision ||
         JSON.stringify(prepared.commits) !== JSON.stringify(attempt.commits))
@@ -285,9 +340,28 @@ export async function executeIntegration(
           "--",
           path,
         ]);
-        if (!/^100(?:644|755) blob /.test(entry))
+        const fields = /^(100(?:644|755)) blob ([0-9a-f]+)\t/.exec(entry);
+        if (!fields)
           throw new Error(
             `integration: artifact is not a committed regular file: ${path}`,
+          );
+        if (
+          !(await matchesBlob(
+            source,
+            path,
+            fields[1]!,
+            fields[2]!,
+            objectFormat,
+            controller.signal,
+          ))
+        )
+          throw new Error(
+            `integration: selected artifact contains uncommitted bytes or mode: ${path}`,
+          );
+        const staged = await value(source, ["ls-files", "--stage", "--", path]);
+        if (!staged.startsWith(`${fields[1]} ${fields[2]} 0\t`))
+          throw new Error(
+            `integration: selected artifact index differs from submitted commit: ${path}`,
           );
       }
       if (
@@ -363,6 +437,47 @@ export async function executeIntegration(
       const commit = await value(workspace, ["rev-parse", "HEAD"]),
         tree = await value(workspace, ["rev-parse", "HEAD^{tree}"]);
       append({ kind: "candidate", commit, tree, base });
+      const listing = await git(workspace, [
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        commit,
+      ]);
+      if (listing.truncated)
+        throw new Error(
+          "integration: tracked tree listing exceeds verification limit",
+        );
+      const entries = listing.output
+        .split("\0")
+        .filter(Boolean)
+        .map((entry) => {
+          const match = /^(\d+) (\w+) ([0-9a-f]+)\t([\s\S]*)$/.exec(entry);
+          if (!match || match[2] !== "blob")
+            throw new Error(
+              "integration: submodules and non-blob tracked entries are unsupported",
+            );
+          return { mode: match[1]!, oid: match[3]!, path: match[4]! };
+        });
+      const physicalClean = async () => {
+        for (const entry of entries)
+          if (
+            !(await matchesBlob(
+              workspace!,
+              entry.path,
+              entry.mode,
+              entry.oid,
+              objectFormat,
+              controller.signal,
+            ))
+          )
+            return false;
+        return true;
+      };
+      if (!(await physicalClean()))
+        throw new Error(
+          "integration: checkout bytes or modes differ from committed tree; checkout conversions are unsupported",
+        );
       stage = "build";
       const started_ts = new Date().toISOString();
       const build = await run(
@@ -373,6 +488,7 @@ export async function executeIntegration(
         timeout,
       );
       const clean =
+        (await physicalClean()) &&
         (await value(workspace, [
           "status",
           "--porcelain",

@@ -171,6 +171,10 @@ export class IntegrationLedger {
     if (!Array.isArray(input.commits) || !input.commits.length)
       throw new Error("integration: at least one submitted commit is required");
     input.commits.forEach(oid);
+    if (new Set(input.commits.map((commit) => commit.length)).size !== 1)
+      throw new Error(
+        "integration: mixed Git object algorithms are not supported",
+      );
     if (new Set(input.commits).size !== input.commits.length)
       throw new Error("integration: duplicate submitted commits");
     const nodes = input.node_refs ?? [];
