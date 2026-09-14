@@ -263,7 +263,7 @@ test(
         id: node.id, expected_revision: node.revision, dependencies: [999999],
       } });
       assert.equal(invalidNode.isError, true);
-      const banking = await call(clients[1], "squad_node_submit", {
+      const banking = await call(clients[0], "squad_node_submit", {
         id: node.id, expected_revision: node.revision, request_key: "installed-bank", config_revision: 2,
       });
       assert.deepEqual(JSON.parse(cli(["node", "submit", String(node.id), String(node.revision), "installed-bank", "2"])), banking);
@@ -290,6 +290,47 @@ test(
       assert.equal(bankedNode.review_status, "unreviewed");
       assert.equal(bankedNode.integrations[0].attempt_id, banked.id);
       assert.deepEqual(JSON.parse(cli(["node", "show", String(node.id)])), bankedNode);
+      const nodeClaim = await call(clients[0], "squad_node_claim", {
+        id: node.id,
+        expected_revision: node.revision,
+        target: joined[1].persona,
+      });
+      const cliClaim = JSON.parse(
+        cli([
+          "node",
+          "claim",
+          String(node.id),
+          String(node.revision),
+          joined[1].persona,
+        ]),
+      );
+      assert.equal(cliClaim.review.id, nodeClaim.review.id);
+      await call(clients[1], "squad_review_claim", { id: nodeClaim.review.id });
+      const reviewInput = {
+        request_id: nodeClaim.review.id,
+        request_key: "installed-review",
+        attempt_id: banking.id,
+        verdict: "approve",
+        rationale: "Inspected committed artifact.",
+      };
+      const forged = await clients[1].callTool({
+        name: "squad_node_review",
+        arguments: { ...reviewInput, build: { exit_code: 0 } },
+      });
+      assert.equal(forged.isError, true);
+      const reviewed = await call(clients[1], "squad_node_review", reviewInput);
+      assert.equal(reviewed.status, "approved", JSON.stringify(reviewed));
+      assert.equal(reviewed.build.clean, true);
+      assert.equal(
+        (await call(clients[0], "squad_node_get", { id: node.id })).review_status,
+        "approved",
+      );
+      assert.deepEqual(
+        JSON.parse(cli(["node", "show", String(node.id)])),
+        await call(clients[1], "squad_node_get", { id: node.id }),
+      );
+      await call(clients[0], "squad_release", {path:`node:${node.id}`});
+      cli(["release",`node:${node.id}`]);
       const summary = await call(clients[1], "squad_check");
       assert.equal(summary.integration.known_submissions.verified, 1);
       assert.equal(summary.integration.known_submissions.pending, 2);

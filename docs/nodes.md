@@ -79,7 +79,7 @@ current enabled integration configuration. Links report `config_revision` and
 without presenting them as current banking.
 After a content edit, historical bank evidence remains inspectable but that
 binding becomes stale. Banking does not independently review a research claim;
-`review_status` remains `unreviewed` in this release.
+`review_status` stays `unreviewed` until an independent node review completes.
 
 ## Revisions and compatibility
 
@@ -98,7 +98,9 @@ remain historical unresolved strings in their original attempts; they do not
 create cards or confer node banking status. Explicitly declare the actual node
 and submit its artifacts to establish a new provenance binding.
 
-Current-version export/import includes the graph, snapshots and bindings;
+Schema 7 adds directed node request bindings, review receipts and retained
+independent builds. Current-version export/import includes these alongside the
+graph, snapshots and integration bindings;
 `clear` removes them with the rest of the room. As with earlier schema changes,
 imports require matching export schema versions. Open an older room with the
 current build and re-export it to upgrade its export format.
@@ -113,3 +115,43 @@ artifact map or revision-bound bank provenance. These are observations from the
 workflow and source, not results of an adoption study or claims about users'
 motives. Join now surfaces nodes, directs reuse or creation for research work,
 and points both runtimes to the same discover/edit/bank path.
+
+## Directed independent review
+
+`squad node claim ID REVISION [TARGET]` opens or reuses an active request for
+that content revision. TARGET defaults to the configured steward. Exploration
+can be claimed before banking. A conflicting active target requires explicit
+cancellation by its requester or target; a claim never cancels another ask.
+Ordinary path claims retain their advisory behavior.
+
+The target acknowledges with `squad review claim REQUEST_ID`, then runs:
+
+```sh
+squad node review REQUEST_ID '{"request_key":"review-v1","attempt_id":"BANK_ID","verdict":"approve","rationale":"Checked the argument and assumptions."}'
+```
+
+MCP equivalents are `squad_node_claim` (`id`, `expected_revision`, optional
+`target`) and `squad_node_review` (`request_id` and the JSON fields above,
+optional `build_timeout_ms`; CLI uses `--build-timeout-ms N`). The latter executes the configured build anew in
+an isolated checkout of the exact published bank commit, verifies physical
+tracked bytes, HEAD and index, and retains command, output, result, reviewer,
+session metadata, revision and scientific rationale. It does not publish.
+Build success is required for approval but does not establish scientific
+correctness: the verdict is the reviewer's declaration. Identity metadata is
+reported as available; persona differences are not cryptographic independence.
+Contributing node authors, its bank submitter and request author cannot approve.
+
+Content or configuration changes require a fresh review; historical receipts
+remain visible in `node show` with `current: false`. Unrelated branch advances
+leave the reviewed content revision intact. The latest completed current verdict
+determines status; a later rejection supersedes approval while keeping history.
+Builds that finish after edits,
+configuration changes or cancellation retain evidence without approval.
+Generic prose `review resolve` closes an ask but never grants node approval.
+As with ordinary requests, an already claimed request may be completed after
+expiry; expiry prevents new claims and releases coordination gating.
+
+Completed request keys replay the same receipt only for the same reviewer and
+payload. A process interrupted before durable completion cannot supply proof:
+after its renewable two-minute lease expires, retry records failure and a fresh
+key can rebuild. Failed builds leave the claimed request open for retry.

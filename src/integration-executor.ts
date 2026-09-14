@@ -42,7 +42,7 @@ function environment(): NodeJS.ProcessEnv {
 
 /** Compare physical bytes and executable/symlink modes, independently of Git's
  * assume-unchanged, skip-worktree, stat cache, filters, and diff settings. */
-async function matchesBlob(
+export async function matchesBlob(
   cwd: string,
   path: string,
   mode: string,
@@ -71,7 +71,7 @@ async function matchesBlob(
 }
 
 /** Async and bounded so runner/presence renewal continues during builds. */
-async function run(
+export async function run(
   cwd: string,
   command: string,
   args: string[],

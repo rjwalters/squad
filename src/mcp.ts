@@ -33,7 +33,7 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.10.0" });
+  const server = new McpServer({ name: "squad", version: "0.11.0" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
@@ -148,6 +148,47 @@ export async function runMcpServer(): Promise<void> {
     async ({ id, expected_revision, ...fields }) =>
       json(squad.nodeUpdate(id, expected_revision, fields)),
   );
+  server.registerTool(
+    "squad_node_claim",
+    {
+      description:
+        "Claim a node revision and open/reuse a directed independent review request; named reviewer defaults to configured steward. Works before banking.",
+      inputSchema: z
+        .object({
+          id: z.number().int().positive(),
+          expected_revision: z.number().int().positive(),
+          target: z.string().min(1).optional(),
+        })
+        .strict(),
+    },
+    async ({ id, expected_revision, target }) =>
+      json(squad.nodeClaim(id, expected_revision, target)),
+  );
+  server.registerTool(
+    "squad_node_review",
+    {
+      description:
+        "As claimed independent reviewer, rebuild an exact verified bank in isolation and record scientific verdict/rationale. No publication; stale/cancelled runs retain evidence without approval. Names are declared identities, not cryptographic independence.",
+      inputSchema: z
+        .object({
+          request_id: z.number().int().positive(),
+          request_key: z.string().min(1),
+          attempt_id: z.string().min(1),
+          verdict: z.enum(["approve", "reject"]),
+          rationale: z.string().min(1),
+          build_timeout_ms: z.number().int().min(1000).max(86400000).optional(),
+        })
+        .strict(),
+    },
+    async ({ request_id, build_timeout_ms, ...input }, extra) =>
+      json(
+        await squad.nodeReview(request_id, input, {
+          build_timeout_ms,
+          signal: extra.signal,
+        }),
+      ),
+  );
+
   server.registerTool(
     "squad_node_submit",
     {

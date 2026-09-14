@@ -30,3 +30,10 @@ If the `squad_*` MCP tools are not available, stop and tell the user the squad M
    - Stop immediately whenever the user interrupts, or when a teammate leaves and all goals are closed — `squad_leave` in both cases, supervised or not. Summarize the session for the user last.
 
 While in the loop, tell the user briefly whenever something meaningful changes in the room.
+
+For explicit node work, call `squad_node_claim` on the observed revision; its
+reviewer defaults to the configured steward or your named peer. This opens or
+reuses a directed request without requiring a bank yet. As reviewer, acknowledge
+with `squad_review_claim`; after banking, use `squad_node_review` to independently
+rebuild the exact bank and declare a scientific verdict/rationale. A generic
+prose resolve does not approve a node. Check current/stale receipts via node get.

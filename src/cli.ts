@@ -109,6 +109,8 @@ Human CLI usage:
   squad node create <question...> | --json '<card fields, dependencies, artifacts>'
   squad node list | show <id>  Discover the shared research graph and provenance
   squad node update <id> <expected-revision> '<metadata JSON>'
+  squad node claim <id> <expected-revision> [target]
+  squad node review <request-id> '<request_key, attempt_id, verdict, rationale JSON>'
   squad node submit <id> <expected-revision> <request-key> <config-revision>
                                Bind declared artifacts to a pending bank attempt
   squad card create [--title <text>] [--claim-kind empirical|formal] <question...>
@@ -345,7 +347,34 @@ export async function runCli(argv: string[]): Promise<void> {
           integer(args[1]),
           JSON.parse(args[2]!),
         );
-      else if (action === "submit" && args.length === 4) {
+      else if (action === "claim" && (args.length === 2 || args.length === 3))
+        result = squad.nodeClaim(integer(args[0]), integer(args[1]), args[2]);
+      else if (
+        action === "review" &&
+        (args.length === 2 ||
+          (args.length === 4 &&
+            args[2] === "--build-timeout-ms" &&
+            /^[1-9][0-9]*$/.test(args[3]!)))
+      ) {
+        const controller = new AbortController();
+        const abort = () => controller.abort();
+        process.once("SIGINT", abort);
+        process.once("SIGTERM", abort);
+        try {
+          result = await squad.nodeReview(
+            integer(args[0]),
+            JSON.parse(args[1]!),
+            {
+              build_timeout_ms:
+                args[3] === undefined ? undefined : Number(args[3]),
+              signal: controller.signal,
+            },
+          );
+        } finally {
+          process.removeListener("SIGINT", abort);
+          process.removeListener("SIGTERM", abort);
+        }
+      } else if (action === "submit" && args.length === 4) {
         if (!/^(0|[1-9][0-9]*)$/.test(args[3]!))
           throw new Error("node: invalid configuration revision");
         result = squad.nodeSubmit(
@@ -356,12 +385,11 @@ export async function runCli(argv: string[]): Promise<void> {
         );
       } else
         throw new Error(
-          "usage: squad node create|list|show|update|submit (see squad help)",
+          "usage: squad node create|list|show|update|submit|claim|review (see squad help)",
         );
       console.log(JSON.stringify(result, null, 2));
       break;
     }
-
     case "bank": {
       if (!rest[0] || rest[0].startsWith("--") || (rest.length !== 1 && (rest.length !== 3 || rest[1] !== "--build-timeout-ms" || !/^[1-9][0-9]*$/.test(rest[2]!))))
         throw new Error("usage: squad bank <attempt-id> [--build-timeout-ms N]");

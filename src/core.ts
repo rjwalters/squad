@@ -1,3 +1,4 @@
+import { rebuildNode } from "./node-review-executor.js";
 import { nodeMetadata, nodeRevisions, recordNodeRevision, validateNodeMetadata, writeNodeMetadata, bindNodes, type NodeMetadata } from "./nodes.js";
 import { executeIntegration, type BankOptions } from "./integration-executor.js";
 import { IntegrationLedger, type IntegrationSubmission, type IntegrationFilter } from "./integration-ledger.js";
@@ -839,6 +840,22 @@ export class Squad {
             ?.event ?? null,
       };
     });
+    const reviews = (
+      this.db
+        .prepare(
+          "SELECT receipt_json FROM node_reviews WHERE card_id=? ORDER BY rowid",
+        )
+        .all(id) as { receipt_json: string }[]
+    ).map((row) => {
+      const receipt = JSON.parse(row.receipt_json);
+      return {
+        ...receipt,
+        current:
+          receipt.revision === revision &&
+          receipt.config_revision === configuration.revision &&
+          configuration.config !== null,
+      };
+    });
     return {
       ...rowToCard(row),
       ...nodeMetadata(this.db, id),
@@ -861,7 +878,26 @@ export class Squad {
           link.current_configuration &&
           link.status === "verified",
       ),
-      review_status: "unreviewed" as const,
+      reviews,
+      review_builds: this.db
+        .prepare(
+          "SELECT b.review_id, b.build_json FROM node_review_builds b JOIN node_reviews r ON r.id=b.review_id WHERE r.card_id=? ORDER BY b.rowid",
+        )
+        .all(id)
+        .map((row) => ({
+          review_id: row.review_id,
+          build: JSON.parse(row.build_json as string),
+        })),
+      review_requests: this.db
+        .prepare(
+          "SELECT n.*, r.status, r.target FROM node_review_requests n JOIN review_requests r ON r.id=n.request_id WHERE n.card_id=? ORDER BY n.request_id",
+        )
+        .all(id),
+      review_status:
+        [...reviews]
+          .sort((a, b) => String(b.completed_ts ?? b.created_ts).localeCompare(String(a.completed_ts ?? a.created_ts)))
+          .find((r) => r.current && ["approved", "rejected"].includes(r.status))
+          ?.status ?? "unreviewed",
     };
   }
 
@@ -888,6 +924,278 @@ export class Squad {
     );
   }
 
+  nodeClaim(id: number, expectedRevision: number, target?: string) {
+    return this.nodeTransaction(() => {
+      const node = this.nodeGet(id);
+      if (node.revision !== expectedRevision)
+        throw new Error(
+          "node: content revision changed; open a fresh revision request",
+        );
+      const reviewer = target ?? this.integrationGet().config?.steward;
+      if (typeof reviewer !== "string" || !reviewer.trim())
+        throw new Error("node: named reviewer or configured steward required");
+      const existing = this.db
+        .prepare(
+          `SELECT r.* FROM review_requests r JOIN node_review_requests n ON n.request_id=r.id WHERE n.card_id=? AND n.revision=? AND r.status IN ('pending','claimed') AND (r.expires_ts IS NULL OR r.expires_ts > ?) ORDER BY r.id LIMIT 1`,
+        )
+        .get(id, expectedRevision, now()) as ReviewRow | undefined;
+      if (existing && existing.target !== reviewer)
+        throw new Error(
+          "node: active review targets another reviewer; its requester or target must cancel it explicitly",
+        );
+      const review = existing
+        ? rowToReview(existing)
+        : this.reviewOpen(
+            reviewer,
+            `Independently review node #${id} revision ${expectedRevision}`,
+            { refs: [`node:${id}@${expectedRevision}`] },
+          );
+      if (!existing)
+        this.db
+          .prepare("INSERT INTO node_review_requests VALUES (?, ?, ?)")
+          .run(review.id, id, expectedRevision);
+      return {
+        claim: this.claim(`node:${id}`),
+        review,
+        node_id: id,
+        revision: expectedRevision,
+      };
+    });
+  }
+
+  async nodeReview(
+    requestId: number,
+    input: {
+      request_key: string;
+      attempt_id: string;
+      verdict: "approve" | "reject";
+      rationale: string;
+    },
+    options: BankOptions = {},
+  ) {
+    if (
+      !Number.isSafeInteger(requestId) ||
+      requestId < 1 ||
+      !input ||
+      Object.keys(input).some(
+        (k) =>
+          !["request_key", "attempt_id", "verdict", "rationale"].includes(k),
+      ) ||
+      !["approve", "reject"].includes(input.verdict) ||
+      [input.request_key, input.attempt_id, input.rationale].some(
+        (v) => typeof v !== "string" || !v.trim() || v.includes("\0"),
+      )
+    )
+      throw new Error("node review: invalid input");
+    const timeout = options.build_timeout_ms ?? 1_800_000;
+    if (
+      !Number.isSafeInteger(timeout) ||
+      timeout < 1000 ||
+      timeout > 86_400_000
+    )
+      throw new Error("node review: build_timeout_ms must be 1000..86400000");
+    const reviewer = this.persona;
+    const payload = JSON.stringify({
+      requestId,
+      reviewer,
+      request_key: input.request_key,
+      attempt_id: input.attempt_id,
+      verdict: input.verdict,
+      rationale: input.rationale,
+    });
+    const setup = this.nodeTransaction(() => {
+      const prior = this.db
+        .prepare("SELECT * FROM node_reviews WHERE request_key=?")
+        .get(input.request_key) as
+        | { payload_json: string; receipt_json: string; lease_expires: number }
+        | undefined;
+      if (prior) {
+        if (prior.payload_json !== payload)
+          throw new Error(
+            "node review: request_key already used with different actor or payload",
+          );
+        const receipt = JSON.parse(prior.receipt_json);
+        if (receipt.status !== "running") return { receipt };
+        if (prior.lease_expires > Date.now())
+          throw new Error("node review: verification already running");
+        // An interrupted process has no completed build proof. Retain that fact.
+        receipt.status = "failed";
+        receipt.error =
+          "verification interrupted before durable completion; use a fresh request key";
+        this.db
+          .prepare("UPDATE node_reviews SET receipt_json=? WHERE request_key=?")
+          .run(JSON.stringify(receipt), input.request_key);
+        return { receipt };
+      }
+      const request = this.reviewRow(requestId);
+      if (
+        request.status !== "claimed" ||
+        request.claimed_by !== reviewer ||
+        request.target !== reviewer
+      )
+        throw new Error(
+          "node review: only the claimed request's reviewer may verify",
+        );
+      const binding = this.db
+        .prepare(
+          "SELECT card_id, revision FROM node_review_requests WHERE request_id=?",
+        )
+        .get(requestId) as { card_id: number; revision: number } | undefined;
+      if (!binding)
+        throw new Error("node review: request is not bound to a node");
+      const node = this.nodeGet(binding.card_id);
+      if (node.revision !== binding.revision)
+        throw new Error(
+          "node review: stale content revision; open a fresh request",
+        );
+      const attempt = this.integrationAttempt(input.attempt_id);
+      const linked = node.integrations.find(
+        (link) =>
+          link.attempt_id === attempt.id && link.revision === binding.revision,
+      );
+      const verified = attempt.evidence
+        .map((e) => e.event)
+        .reverse()
+        .find((e) => e.kind === "verified");
+      if (
+        !linked ||
+        !linked.current_configuration ||
+        attempt.status !== "verified" ||
+        verified?.kind !== "verified"
+      )
+        throw new Error(
+          "node review: exact node revision requires a verified bank under current configuration",
+        );
+      if (
+        request.requested_by === reviewer ||
+        attempt.submitted_by === reviewer ||
+        node.created_by === reviewer ||
+        node.revisions.some(
+          (r) =>
+            r.actor === reviewer ||
+            (r.session_id !== null && r.session_id === this.sessionId),
+        )
+      )
+        throw new Error(
+          "node review: contributing author cannot independently review their own node",
+        );
+      this.touch();
+      const receipt = {
+        id: randomUUID(),
+        request_id: requestId,
+        request_created_ts: request.created_ts,
+        node_id: binding.card_id,
+        revision: binding.revision,
+        attempt_id: attempt.id,
+        config_revision: attempt.config_revision,
+        reviewer,
+        session_id: this.sessionId,
+        identity_id: this.identityId,
+        provider: this.automaticIdentity?.provider ?? null,
+        model: this.automaticIdentity?.model ?? null,
+        commit: verified.commit,
+        tree: verified.tree,
+        verdict: input.verdict,
+        rationale: input.rationale,
+        status: "running",
+        created_ts: now(),
+        completed_ts: null as string | null,
+        build: null as Awaited<ReturnType<typeof rebuildNode>> | null,
+      };
+      this.db
+        .prepare("INSERT INTO node_reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .run(
+          receipt.id,
+          input.request_key,
+          requestId,
+          binding.card_id,
+          binding.revision,
+          payload,
+          JSON.stringify(receipt),
+          Date.now() + 120_000,
+        );
+      return { receipt, attempt };
+    });
+    if (!setup.attempt) return setup.receipt;
+    const { receipt, attempt } = setup;
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    options.signal?.addEventListener("abort", abort, { once: true });
+    if (options.signal?.aborted) controller.abort();
+    const timer = setInterval(() => {
+      try {
+        const changed = this.db
+          .prepare(
+            "UPDATE node_reviews SET lease_expires=? WHERE id=? AND lease_expires>? AND json_extract(receipt_json, '$.status')='running'",
+          )
+          .run(Date.now() + 120_000, receipt.id, Date.now());
+        if (!changed.changes) throw new Error("node review: runner lease lost");
+        this.touch();
+      } catch {
+        controller.abort();
+      }
+    }, 10_000);
+    try {
+      receipt.build = await rebuildNode(attempt, receipt.commit, receipt.tree, {
+        ...options,
+        signal: controller.signal,
+      });
+      return this.nodeTransaction(() => {
+        const stored = this.db
+          .prepare(
+            "SELECT receipt_json, lease_expires FROM node_reviews WHERE id=?",
+          )
+          .get(receipt.id) as
+          | { receipt_json: string; lease_expires: number }
+          | undefined;
+        if (!stored) return { ...receipt, status: "cancelled" };
+        this.db
+          .prepare("INSERT OR IGNORE INTO node_review_builds VALUES (?, ?)")
+          .run(receipt.id, JSON.stringify(receipt.build));
+        const prior = JSON.parse(stored.receipt_json);
+        if (prior.status !== "running") return prior;
+        const request = this.reviewRow(requestId),
+          node = this.nodeGet(receipt.node_id);
+        receipt.status =
+          stored.lease_expires <= Date.now() || controller.signal.aborted
+            ? "failed"
+            : request.status === "cancelled"
+              ? "cancelled"
+              : this.persona !== reviewer ||
+                  request.status !== "claimed" ||
+                  request.claimed_by !== reviewer ||
+                  request.target !== reviewer ||
+                  request.created_ts !== receipt.request_created_ts ||
+                  !node.integrations.some(
+                    (link) =>
+                      link.attempt_id === receipt.attempt_id &&
+                      link.revision === receipt.revision &&
+                      link.status === "verified" &&
+                      link.current_configuration,
+                  ) ||
+                  node.revision !== receipt.revision ||
+                  this.integrationGet().revision !== receipt.config_revision
+                ? "stale"
+                : receipt.build!.exit_code !== 0 || !receipt.build!.clean
+                  ? "failed"
+                  : input.verdict === "approve"
+                    ? "approved"
+                    : "rejected";
+        receipt.completed_ts = now();
+        this.db
+          .prepare(
+            "UPDATE node_reviews SET receipt_json=?, lease_expires=0 WHERE id=?",
+          )
+          .run(JSON.stringify(receipt), receipt.id);
+        if (receipt.status === "approved" || receipt.status === "rejected")
+          this.reviewResolve(requestId, input.rationale);
+        return receipt;
+      });
+    } finally {
+      clearInterval(timer);
+      options.signal?.removeEventListener("abort", abort);
+    }
+  }
   nodeSubmit(
     id: number,
     expectedRevision: number,
