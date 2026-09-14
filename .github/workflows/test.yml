@@ -1,0 +1,30 @@
+name: Workflows and collaboration
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Install pinned package manager
+        run: npm install --global "$(node -p 'require("./package.json").packageManager')"
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Check generated workflow adapters
+        run: node scripts/generate-workflow-adapters.mjs --check
+      - name: Test installed workflows and collaboration
+        run: pnpm test

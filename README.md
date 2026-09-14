@@ -27,9 +27,10 @@ its existing global prompts as compatibility entry points. Regenerate checked-in
 aliases with `node scripts/generate-workflow-adapters.mjs`; use `--check` to detect
 stale output. Edit the shared references, never the generated adapters.
 
-Installation lifecycle ownership and comprehensive cross-runtime parity
-verification remain tracked in #26; this layout alone does not establish a
-model-driven Claude/Codex collaboration run.
+See the [CLI/MCP capability matrix and two-agent walkthrough](docs/capabilities.md)
+for every supported operation, intentional interface differences, and verification
+evidence. CI checks generated aliases and tests collaboration through the actual
+installed configurations. These protocol tests do not invoke Claude or Codex models.
 
 ## How it works
 
@@ -303,7 +304,7 @@ park.
   re-entry.
 - **It parks loudly.** On start it tells the room it will self-re-enter; when a
   bound fires (TTL, attempt cap, operator-stop) it posts that the persona will
-  *not* return without an operator. `codex/prompts/squad-join.md` step 6 reads
+  *not* return without an operator. `skills/squad/references/join.md` step 5 reads
   `SQUAD_REENTRY_SUPERVISOR` (exported into every supervised run) so the
   persona's own idle message says the matching thing.
 
@@ -319,18 +320,22 @@ session otherwise.
 cd ~/projects/my-lean-proof
 terminal 1:  claude  →  /squad:goals prove lemma exp_bound; prove lemma sum_split; main theorem
              then    →  /squad:join
-terminal 2:  codex   →  /squad-join
+terminal 2:  codex   →  $squad Join the room and work on the shared goals
              or      →  squad codex-reentry   # same thing, but it re-enters itself
 terminal 3:  squad tail                    # watch the room live
-             squad send "@claude take exp_bound, @codex take sum_split"
+             squad who                     # find the actual joined names
+             squad send "@<joined-name> take exp_bound"
 ```
 
-Commands (`join` and `goals` behave the same in both harnesses):
+All five workflows use the same references in both harnesses. Claude retains
+`/squad:<workflow>`; Codex can use `$squad` with a natural-language request or the
+legacy `/squad-<workflow>` prompts when installed:
 
 - **join** — enter the room, introduce yourself, work the check/respond loop until stopped (agents go idle on their own after ~10 empty checks)
 - **goals** — show the shared board, or add goals from arguments
-- **card** — create, inspect, transition, or attach evidence to a Science Card (Claude only; from Codex or a terminal, use `squad card`)
-- **clear** — wipe the room for a fresh session (Claude only; from Codex or a terminal, use `squad clear`)
+- **card** — create, inspect, transition, or attach evidence to a Science Card
+- **fanout** — coordinate separately identified workers on distinct assignments
+- **clear** — wipe the room for a fresh session when the user explicitly requests a reset
 
 Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
 
@@ -441,7 +446,15 @@ Two things worth calling out: the `SUPPORTED` gate only checks that a qualifying
 
 ```bash
 pnpm test    # builds + runs the node:test suite
+node scripts/generate-workflow-adapters.mjs --check  # fail on stale generated aliases
 ```
+
+CI runs both commands on Node 22 and 24. The installed collaboration test loads
+the real Claude JSON and Codex TOML registrations in an isolated repository,
+exercises both MCP connections and CLI handoffs, and checks the capability matrix
+against the registered tool list. Installer tests verify matching skill references
+and ownership preservation. See [verification limits](docs/capabilities.md#verification-and-its-limits)
+for what these deterministic checks establish.
 
 ### VERSION bumps for consumer-visible changes
 
