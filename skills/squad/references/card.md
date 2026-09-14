@@ -1,10 +1,27 @@
 ---
-description: Create, inspect, transition, or attach evidence to a Science Card
+description: Create and discover research nodes, connect artifacts, or update Science Cards
 ---
 
 Manage Science Cards — squad's structured tracker for a scientific claim moving through `QUESTION` → `DIVERGE` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` (with a `LEARN`/`PIVOT` reflection loop reachable from most active phases). The user’s request describes what to do.
 
 If the `squad_*` MCP tools are not available, stop and tell the user the squad MCP server is not configured for this project.
+
+Research nodes reuse these same card IDs. For research discovery call
+`squad_node_list`, then `squad_node_get` to inspect dependencies, declared
+artifacts, immutable content revisions and current/stale bank links. Create a
+node with `squad_node_create` (`title`, `question`, optional dependencies/artifacts).
+Update metadata with `squad_node_update` (`id`, `expected_revision`, replacement
+`dependencies` and/or `artifacts` lists). Each artifact declares `path`, full
+source `commit`, and optional `theorem`; this is an explicit mapping, not symbol
+lookup. Dependencies must resolve and cannot form cycles. All artifacts for a
+node submission must share one source commit.
+
+Call `squad_node_submit` with `id`, `expected_revision`, `request_key`, and
+`config_revision` to create a pending attempt from those declarations. Follow
+with `squad_bank` to integrate/build/publish; inspect the exact receipt separately
+from independent review. Historical bank links become stale after material
+content changes. The card operations below update the same node and revision
+history. Existing cards are already nodes; do not duplicate them.
 
 - **No arguments, or "list"/"show the cards":** call `squad_card_list` (active phases only by default; pass `include_done: true` to also show `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` cards) and show a compact list (id, phase, title).
 - **"create <question>" or similar:** call `squad_card_create` with at least `title` and `question` (default the title to a short version of the question if the user didn't give one explicitly). Creation is auto-announced in chat.

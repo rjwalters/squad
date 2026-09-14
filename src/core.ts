@@ -1,3 +1,4 @@
+import { nodeMetadata, nodeRevisions, recordNodeRevision, validateNodeMetadata, writeNodeMetadata, bindNodes, type NodeMetadata } from "./nodes.js";
 import { executeIntegration, type BankOptions } from "./integration-executor.js";
 import { IntegrationLedger, type IntegrationSubmission, type IntegrationFilter } from "./integration-ledger.js";
 import { resolveIntegration, validateIntegration, type IntegrationInput, type IntegrationState } from "./integration.js";
@@ -145,6 +146,7 @@ export interface JoinResult {
   /** Everyone present, including the caller, with derived presence. */
   members: Member[];
   goals: Goal[];
+  nodes: ReturnType<Squad["nodeList"]>;
   claims: ClaimView[];
   /**
    * Directed review requests still gating the caller (see `pendingReviews`):
@@ -731,8 +733,193 @@ export class Squad {
     return this._sessionId;
   }
 
+  /** SAVEPOINTs preserve a read snapshot without writes and nest inside callers. */
+  private nodeTransaction<T>(fn: () => T): T {
+    const savepoint = `node_${randomUUID().replaceAll("-", "")}`;
+    this.db.exec(`SAVEPOINT ${savepoint}`);
+    try {
+      const result = fn();
+      this.db.exec(`RELEASE ${savepoint}`);
+      return result;
+    } catch (error) {
+      this.db.exec(`ROLLBACK TO ${savepoint}; RELEASE ${savepoint}`);
+      throw error;
+    }
+  }
+
+  nodeCreate(fields: CardCreateFields & Partial<NodeMetadata>) {
+    return this.nodeTransaction(() => {
+      const metadata = validateNodeMetadata(this.db, null, {
+        dependencies: fields.dependencies ?? [],
+        artifacts: fields.artifacts ?? [],
+      });
+      const card = this.cardCreateRaw(fields);
+      writeNodeMetadata(this.db, card.id, metadata);
+      recordNodeRevision(
+        this.db,
+        card.id,
+        this.persona,
+        this.sessionId,
+        "created",
+      );
+      return this.nodeGet(card.id);
+    });
+  }
+
+  nodeUpdate(
+    id: number,
+    expectedRevision: number,
+    fields: Partial<NodeMetadata>,
+  ) {
+    return this.nodeTransaction(() => {
+      const node = this.nodeGet(id);
+      if (node.revision !== expectedRevision)
+        throw new Error("node: content revision changed; read node again");
+      if (
+        Object.keys(fields).some(
+          (key) => key !== "dependencies" && key !== "artifacts",
+        ) ||
+        !Object.keys(fields).length
+      )
+        throw new Error(
+          "node: update requires dependencies or artifacts; use card edit for research fields",
+        );
+      const metadata = validateNodeMetadata(this.db, id, {
+        ...nodeMetadata(this.db, id),
+        ...fields,
+      });
+      this.touch();
+      writeNodeMetadata(this.db, id, metadata);
+      recordNodeRevision(this.db, id, this.persona, this.sessionId, "edited");
+      const updated = this.nodeGet(id);
+      if (updated.revision !== node.revision)
+        this.send(
+          `${this.persona} updated research node #${id}: ${Object.keys(fields).join(", ")}`,
+          "system",
+        );
+      return updated;
+    });
+  }
+
+  /** Pure read: presence, leases, cursor and node history are never changed. */
+  nodeGet(id: number) {
+    return this.nodeTransaction(() => this.nodeGetSnapshot(id));
+  }
+
+  private nodeGetSnapshot(id: number) {
+    if (!Number.isSafeInteger(id) || id < 1)
+      throw new Error("node: invalid node ID");
+    const row = this.db
+      .prepare("SELECT * FROM science_cards WHERE id = ?")
+      .get(id) as CardRow | undefined;
+    if (!row) throw new Error(`node: no science card with id ${id}`);
+    const revisions = nodeRevisions(this.db, id),
+      revision = revisions.at(-1)?.revision ?? null;
+    const configuration = this.integrationGet();
+    const links = (
+      this.db
+        .prepare(
+          "SELECT revision, attempt_id FROM node_integrations WHERE card_id = ? ORDER BY attempt_id",
+        )
+        .all(id) as { revision: number; attempt_id: string }[]
+    ).map((link) => {
+      const attempt = this.integrationAttempt(link.attempt_id);
+      return {
+        ...link,
+        current: link.revision === revision,
+        status: attempt.status,
+        config_revision: attempt.config_revision,
+        current_configuration:
+          configuration.config !== null &&
+          configuration.revision === attempt.config_revision,
+        source_commits: attempt.commits,
+        selection: attempt.selection,
+        integrated:
+          attempt.evidence.filter((e) => e.event.kind === "verified").at(-1)
+            ?.event ?? null,
+      };
+    });
+    return {
+      ...rowToCard(row),
+      ...nodeMetadata(this.db, id),
+      revision,
+      revisions,
+      evidence: this.db
+        .prepare(
+          "SELECT * FROM science_card_evidence WHERE card_id = ? ORDER BY id",
+        )
+        .all(id),
+      transitions: this.db
+        .prepare(
+          "SELECT * FROM science_card_transitions WHERE card_id = ? ORDER BY id",
+        )
+        .all(id),
+      integrations: links,
+      banked: links.some(
+        (link) =>
+          link.current &&
+          link.current_configuration &&
+          link.status === "verified",
+      ),
+      review_status: "unreviewed" as const,
+    };
+  }
+
+  nodeList() {
+    return this.nodeTransaction(() =>
+      (
+        this.db.prepare("SELECT id FROM science_cards ORDER BY id").all() as {
+          id: number;
+        }[]
+      ).map(({ id }) => {
+        const node = this.nodeGetSnapshot(id);
+        return {
+          id,
+          title: node.title,
+          question: node.question,
+          phase: node.phase,
+          revision: node.revision,
+          dependencies: node.dependencies,
+          artifacts: node.artifacts,
+          banked: node.banked,
+          review_status: node.review_status,
+        };
+      }),
+    );
+  }
+
+  nodeSubmit(
+    id: number,
+    expectedRevision: number,
+    requestKey: string,
+    configRevision: number,
+  ) {
+    const node = this.nodeGet(id);
+    if (node.revision !== expectedRevision)
+      throw new Error("node: content revision changed; read node again");
+    const commits = [...new Set(node.artifacts.map((a) => a.commit))];
+    if (commits.length !== 1)
+      throw new Error(
+        "node: submission requires artifacts from one source commit",
+      );
+    const theorems = [...new Set(node.artifacts.map((a) => a.theorem))];
+    return this.integrationSubmit({
+      request_key: requestKey,
+      config_revision: configRevision,
+      commits,
+      node_refs: [String(id)],
+      node_revisions: { [id]: expectedRevision },
+      selection: {
+        paths: node.artifacts.map((a) => a.path),
+        ...(theorems.length === 1 && theorems[0] !== undefined
+          ? { theorem: theorems[0] }
+          : {}),
+      },
+    });
+  }
+
   integrationSubmit(input: IntegrationSubmission) {
-    const result = new IntegrationLedger(this.db, this.persona).submit(input);
+    const result = new IntegrationLedger(this.db, this.persona).submit(input, attempt => bindNodes(this.db, attempt, input.node_revisions));
     this.touch();
     return result;
   }
@@ -1322,6 +1509,7 @@ export class Squad {
       lease_expires_at: session.lease_expires_at,
       members: this.members(),
       goals: this.goals(),
+      nodes: this.nodeList(),
       claims: this.claims(),
       pending_reviews: this.pendingReviews(),
       recent,
@@ -1369,6 +1557,14 @@ export class Squad {
    * system message.
    */
   cardCreate(fields: CardCreateFields): Card {
+    return this.nodeTransaction(() => {
+      const result = this.cardCreateRaw(fields);
+      recordNodeRevision(this.db, result.id, this.persona, this.sessionId, "created");
+      return result;
+    });
+  }
+
+  private cardCreateRaw(fields: CardCreateFields): Card {
     this.touch();
     if (!fields.title?.trim()) throw new Error("card title is required");
     if (!fields.question?.trim()) throw new Error("card question is required");
@@ -1455,6 +1651,14 @@ export class Squad {
    * keep their current value. Requires at least one recognized field.
    */
   cardUpdate(id: number, fields: CardUpdateFields): Card {
+    return this.nodeTransaction(() => {
+      const result = this.cardUpdateRaw(id, fields);
+      recordNodeRevision(this.db, id, this.persona, this.sessionId, "edited");
+      return result;
+    });
+  }
+
+  private cardUpdateRaw(id: number, fields: CardUpdateFields): Card {
     this.touch();
     const row = this.db.prepare("SELECT * FROM science_cards WHERE id = ?").get(id) as
       | CardRow
@@ -1609,6 +1813,14 @@ export class Squad {
    * transitions are announced in chat as a system message.
    */
   cardTransition(id: number, toPhase: CardPhase, note?: string): Card {
+    return this.nodeTransaction(() => {
+      const result = this.cardTransitionRaw(id, toPhase, note);
+      recordNodeRevision(this.db, id, this.persona, this.sessionId, "edited");
+      return result;
+    });
+  }
+
+  private cardTransitionRaw(id: number, toPhase: CardPhase, note?: string): Card {
     this.touch();
     const row = this.db.prepare("SELECT * FROM science_cards WHERE id = ?").get(id) as
       | CardRow
@@ -1660,7 +1872,15 @@ export class Squad {
    * message. Requires a `type` from the fixed enum and non-empty
    * `provenance`; rejects otherwise.
    */
-  cardEvidenceAdd(
+  cardEvidenceAdd(cardId: number, type: EvidenceType, provenance: string, body?: string | null): CardEvidence {
+    return this.nodeTransaction(() => {
+      const result = this.cardEvidenceAddRaw(cardId, type, provenance, body);
+      recordNodeRevision(this.db, cardId, this.persona, this.sessionId, "edited");
+      return result;
+    });
+  }
+
+  private cardEvidenceAddRaw(
     cardId: number,
     type: EvidenceType,
     provenance: string,

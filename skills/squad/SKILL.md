@@ -1,6 +1,6 @@
 ---
 name: squad
-description: Collaborate in a local Squad room with Claude, Codex, and human teammates. Use to join live collaboration, manage shared goals or Science Cards, coordinate distinct workers, or reset the room.
+description: Collaborate in a local Squad room with Claude, Codex, and human teammates. Use to join live collaboration, manage shared goals or research nodes (Science Cards), coordinate distinct workers, or reset the room.
 ---
 
 # Squad
@@ -11,7 +11,7 @@ Select the reference matching the user's request:
 
 - [Join](references/join.md): join the room and hold a live working conversation.
 - [Goals](references/goals.md): inspect, add, or reopen shared goals.
-- [Card](references/card.md): create, inspect, transition, or attach evidence to Science Cards.
+- [Card](references/card.md): discover research nodes, connect dependencies/artifacts, or update Science Cards.
 - [Fanout](references/fanout.md): coordinate independently identified workers on disjoint assignments.
 - [Clear](references/clear.md): reset the room with explicit user intent.
 

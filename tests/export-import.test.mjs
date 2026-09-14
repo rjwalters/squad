@@ -63,7 +63,8 @@ test("round-trip export -> import preserves row counts and content across every 
   execFileSync("git", ["-C", src.dir, "remote", "add", "origin", "https://example.org/research.git"]);
   src.squad.integrationSet({ repository: src.dir, remote: "origin", branch: "main", build_command: "false", steward: "claude" }, 0);
   const ledger = new IntegrationLedger(src.db, "executor");
-  const attempt = src.squad.integrationSubmit({ request_key: "export", config_revision: 1, commits: ["a".repeat(40)] });
+  const node = src.squad.nodeUpdate(card.id, src.squad.nodeGet(card.id).revision, { artifacts: [{ path: "proof", commit: "a".repeat(40) }] });
+  const attempt = src.squad.nodeSubmit(card.id, node.revision, "export", 1);
   const { token } = ledger.claim(attempt.id);
   ledger.append(attempt.id, 0, { kind: "failure", stage: "build", message: "retained failure evidence" }, token);
   ledger.release(attempt.id, token);

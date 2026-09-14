@@ -74,25 +74,27 @@ integration order, against the current configured revision:
 
 ```sh
 squad integration submit --request-key lemma-17-v1 --config-revision 1 \
-  --commit <full-commit-id> --node lemma-17
+  --commit <full-commit-id>
 squad integration attempt <attempt-id>
 squad integration attempts --status pending --limit 50
 ```
 
-Repeat `--commit` for multiple commits and `--node` for optional stable research
-node references. Node references are reserved links, not evidence that a node,
-Science Card or independent review exists. Submission validates ID syntax only;
-the banking executor must prove the commits exist in the configured repository.
+Repeat `--commit` for multiple commits. For research node provenance, prefer
+`squad node submit` to derive paths and revision bindings from declared artifacts.
+Advanced submissions may use numeric-string `--node` IDs plus `--node-revisions`
+JSON and matching selected paths. These resolve existing Science Cards and bind
+their expected content revisions; historical opaque references remain unresolved.
+The banking executor must prove the commits exist in the configured repository.
 Submission never runs Git, executes the build, publishes work or marks it banked.
 Queries report known submissions, not unobserved local edits.
 
 MCP equivalents are `squad_integration_submit` (`request_key`, `config_revision`,
-`commits`, optional `node_refs`), `squad_integration_attempt_get` (`id`), and
+`commits`, optional `node_refs`/`node_revisions`/`selection`), `squad_integration_attempt_get` (`id`), and
 `squad_integration_attempt_list` (optional `status`, `limit`). Status is `pending`,
 `failed` or `verified`; list limits are 1–1000, default 50, newest first.
 
 A room-wide request key identifies one ordered commit selection, node-reference
-set and configuration revision. Identical retries return the same attempt even
+set, pinned node content revisions and configuration revision. Identical retries return the same attempt even
 after configuration changes; conflicting reuse fails. Each attempt pins its full
 configuration snapshot, stable ID, submitting actor and timestamps. Configuration
 changes never retarget it. Queries remain available when its repository is missing.
@@ -221,3 +223,8 @@ isolated source repository. Its config revision and ordered commits must match t
 immutable submission. This source override is not a CLI/MCP parameter; public
 banking always resolves the configured source. Producers must retain or recreate
 prepared objects for retries and pass the same executor rather than assert success.
+
+Research nodes now provide a declared artifact map and immutable content-revision
+bindings for submissions. New `node_refs` must resolve to actual Science Card
+IDs and include matching `node_revisions`; old opaque references remain unresolved
+historical data. See [research nodes](nodes.md). Current exports use schema 6.

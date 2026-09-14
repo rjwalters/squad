@@ -183,14 +183,14 @@ test(
       assert.deepEqual(await call(clients[1], "squad_integration_get"), integration);
       assert.deepEqual(JSON.parse(cli(["integration", "check"])), integration);
       assert.deepEqual(await call(clients[1], "squad_integration_check"), integration);
-      const submission = { request_key: "installed-parity", config_revision: 1, commits: ["a".repeat(40)], node_refs: ["future-node"] };
+      const submission = { request_key: "installed-parity", config_revision: 1, commits: ["a".repeat(40)], node_refs: [] };
       const attempt = await call(clients[0], "squad_integration_submit", submission);
       assert.equal(attempt.status, "pending");
       assert.equal(attempt.submitted_by, joined[0].persona);
       assert.deepEqual(await call(clients[1], "squad_integration_attempt_get", { id: attempt.id }), attempt);
       assert.deepEqual(JSON.parse(cli(["integration", "attempt", attempt.id])), attempt);
       assert.deepEqual(JSON.parse(cli(["integration", "submit", "--request-key", submission.request_key,
-        "--config-revision", "1", "--commit", submission.commits[0], "--node", "future-node"])), attempt);
+        "--config-revision", "1", "--commit", submission.commits[0]])), attempt);
       assert.deepEqual(await call(clients[1], "squad_integration_attempt_list", { status: "pending" }), [attempt]);
       assert.deepEqual(JSON.parse(cli(["integration", "attempts", "--status", "verified"])), []);
       const secondAttempt = JSON.parse(cli(["integration", "submit", "--request-key", "cli-submission",
@@ -215,6 +215,10 @@ test(
           spawnSync("git", ["-C", repo, "config", key, value]).status,
           0,
         );
+      writeFileSync(join(repo, "bank-base"), "baseline");
+      assert.equal(spawnSync("git", ["-C", repo, "add", "bank-base"]).status, 0);
+      assert.equal(spawnSync("git", ["-C", repo, "commit", "-qm", "baseline"]).status, 0);
+      assert.equal(spawnSync("git", ["-C", repo, "push", "origin", "HEAD:research/integration"]).status, 0);
       writeFileSync(join(repo, "bank-artifact"), "committed artifact");
       assert.equal(
         spawnSync("git", ["-C", repo, "add", "bank-artifact"]).status,
@@ -235,11 +239,34 @@ test(
         steward: joined[0].persona,
         expected_revision: 1,
       });
-      const banking = await call(clients[1], "squad_integration_submit", {
-        request_key: "installed-bank",
-        config_revision: 2,
-        commits: [committed],
+      const node = await call(clients[0], "squad_node_create", {
+        title: "Shared durable claim", question: "Is the committed artifact correct?",
+        artifacts: [{ path: "bank-artifact", commit: committed, theorem: "declared_claim" }],
       });
+      assert.deepEqual(await call(clients[1], "squad_node_get", { id: node.id }), node);
+      assert.deepEqual(JSON.parse(cli(["node", "show", String(node.id)])), node);
+      const worktree = join(scratch, "peer-worktree");
+      assert.equal(spawnSync("git", ["-C", repo, "worktree", "add", "--detach", worktree, committed]).status, 0);
+      const fromWorktree = spawnSync(process.execPath, [cliPath, "node", "show", String(node.id)], {
+        cwd: worktree, env: baseEnv, encoding: "utf8",
+      });
+      assert.equal(fromWorktree.status, 0, fromWorktree.stderr);
+      assert.deepEqual(JSON.parse(fromWorktree.stdout), node);
+      assert.ok((await call(clients[1], "squad_join")).nodes.some(n => n.id === node.id));
+      const cliNode = JSON.parse(cli(["node", "create", "A second exploratory question"]));
+      const editedNode = await call(clients[1], "squad_node_update", {
+        id: cliNode.id, expected_revision: cliNode.revision, dependencies: [node.id],
+      });
+      assert.deepEqual(JSON.parse(cli(["node", "show", String(cliNode.id)])), editedNode);
+      assert.deepEqual(JSON.parse(cli(["node", "list"])), await call(clients[0], "squad_node_list"));
+      const invalidNode = await clients[0].callTool({ name: "squad_node_update", arguments: {
+        id: node.id, expected_revision: node.revision, dependencies: [999999],
+      } });
+      assert.equal(invalidNode.isError, true);
+      const banking = await call(clients[1], "squad_node_submit", {
+        id: node.id, expected_revision: node.revision, request_key: "installed-bank", config_revision: 2,
+      });
+      assert.deepEqual(JSON.parse(cli(["node", "submit", String(node.id), String(node.revision), "installed-bank", "2"])), banking);
       const unknownSelection = await clients[0].callTool({
         name: "squad_bank",
         arguments: { id: banking.id, theorem: "unknown" },
@@ -258,6 +285,11 @@ test(
       const banked = await call(clients[0], "squad_bank", { id: banking.id });
       assert.equal(banked.status, "verified", JSON.stringify(banked));
       assert.deepEqual(JSON.parse(cli(["bank", banking.id])), banked);
+      const bankedNode = await call(clients[1], "squad_node_get", { id: node.id });
+      assert.equal(bankedNode.banked, true);
+      assert.equal(bankedNode.review_status, "unreviewed");
+      assert.equal(bankedNode.integrations[0].attempt_id, banked.id);
+      assert.deepEqual(JSON.parse(cli(["node", "show", String(node.id)])), bankedNode);
       const summary = await call(clients[1], "squad_check");
       assert.equal(summary.integration.known_submissions.verified, 1);
       assert.equal(summary.integration.known_submissions.pending, 2);
