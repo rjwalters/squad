@@ -1,3 +1,4 @@
+import { automaticPersona, type AgentIdentity } from "./identity.js";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, backup } from "node:sqlite";
 import { existsSync } from "node:fs";
@@ -668,7 +669,7 @@ const SESSION_RETENTION_HOURS = 24;
  *
  * `-` only, deliberately. Issue #50 also floated `codex/sol3`, but `/` is
  * outside the charset the MCP `persona` argument validates against
- * (`^[a-z0-9][a-z0-9_-]{0,31}$`), so such a request is rejected by input
+ * (`^[a-z0-9][a-z0-9_-]{0,127}$`), so such a request is rejected by input
  * validation before any refinement logic sees it — and a persona string is
  * interpolated into chat announcements, claim listings, and CLI output, where
  * a path-like separator reads as a path. `_` is left out for the same reason
@@ -700,8 +701,22 @@ export class Squad {
 
   constructor(
     private db: DatabaseSync,
-    private _persona: string,
-  ) {}
+    persona?: string,
+    identity: AgentIdentity = {},
+  ) {
+    this.automaticIdentity = persona === undefined
+      ? { ...identity, sessionId: identity.sessionId ?? randomUUID() }
+      : null;
+    this._persona = persona ?? automaticPersona(db, this.automaticIdentity!);
+  }
+
+  private _persona: string;
+  private automaticIdentity: AgentIdentity | null;
+
+  /** Automatic resume token; explicit personas must resume through SQUAD_PERSONA. */
+  get identityId(): string | null {
+    return this.automaticIdentity?.sessionId ?? null;
+  }
 
   get persona(): string {
     return this._persona;
@@ -714,6 +729,7 @@ export class Squad {
 
   /** Rename this connection's identity (used by persona autofill on join). */
   setPersona(persona: string): void {
+    this.automaticIdentity = null;
     this._persona = persona;
   }
 
@@ -753,6 +769,13 @@ export class Squad {
    * is never resurrected — the next operation opens a fresh one.
    */
   touch(): void {
+    // A room clear removes reservations. Restore this still-connected agent
+    // before publishing again; any collision is resolved under the same lock.
+    if (this.automaticIdentity && !this.db.prepare(
+      "SELECT 1 FROM agent_identities WHERE identity_id = ?",
+    ).get(this.identityId!.toLowerCase())) {
+      this._persona = automaticPersona(this.db, this.automaticIdentity);
+    }
     const ts = now();
     this.db
       .prepare(

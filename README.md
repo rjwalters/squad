@@ -22,7 +22,53 @@ you         ──run─────► squad CLI ──────────
 
 **Moving a room between repos:** because the room is per-repo local state (created fresh, empty, by `install.sh`), a long-running collaboration that outgrows its host repo needs an explicit move, not a copy of `squad.db` — a plain `cp` can tear a live WAL-mode database mid-write, and stale `-wal`/`-shm` sidecars left behind in a destination directory can shadow whatever you restore over them. `squad export <path>` writes every room table (messages, goals, claims, cursors, members, presence sessions, divergence rounds, review requests, and Science Cards with their evidence/transition history) to a single portable SQLite file at `<path>`, using SQLite's Online Backup API so it reads correctly through any pending WAL writes even while an MCP server is still holding the room open. `squad import <path>` loads that file into the *current* room — refusing cleanly, with no partial writes, if the export was produced by a schema-incompatible squad build, or if the destination room isn't empty (run `squad clear` first). Export is non-destructive: the source room is left exactly as it was, so a deliberate `squad clear` or `squad nuke` on the old side is a separate, explicit step once you've confirmed the new room looks right.
 
-**Identity** is stamped server-side, never taken from message content. It autofills from the host harness (Claude Code → `claude`, Codex → `codex`); if detection fails, `squad_join` accepts a `persona` argument. A `SQUAD_PERSONA` in the config **pins** it — but as a namespace rather than a fixed name: a rename that *refines* the pin (`<pinned>-<suffix>`, e.g. `codex` → `codex-2`) is honored, so N sessions of one agent can hold distinct identities, while an unrelated name is still refused. That matters because `squad_check` excludes your own sender: co-named sessions are mutually invisible, so `squad_join` also warns (`identity_collision`) when the identity you joined under already has another live session. See `/squad:fanout` for running several workers of one agent — including why subagents must reach the room through the CLI (`SQUAD_PERSONA=codex-1 squad send …`) rather than the inherited MCP connection, which resolves its persona once per connection. The threat model is preventing accidents on a machine you own, not defending against a malicious local process.
+**Identity** is stamped server-side. Unpinned MCP connections automatically get
+`<provider>-<model>-<short-session-id>` names, so two sessions see each other's
+messages. Configure trusted launcher metadata with `SQUAD_PROVIDER` and
+`SQUAD_MODEL`; absent/empty metadata becomes `unknown` independently (for example,
+`unknown-unknown-a1b2c3d4`). Squad never infers a provider or model from a harness:
+Codex and Claude Code are harnesses and can use different backends. No runtime
+model file is scraped. Launchers must supply the actual selected metadata.
+
+A non-null `identity_id` in `squad_join` is the durable automatic identity token
+(save it as `SQUAD_SESSION_ID`). Explicit personas, including after a rename,
+return null and must use the returned persona as `SQUAD_PERSONA` instead; `session_id` is only the presence lease ID.
+Each connection creates a random UUID unless its launcher supplies
+`SQUAD_SESSION_ID=<uuid>` for a logical session. The first eight hexadecimal
+characters form the suffix. SQLite serializes name reservations, extending a
+colliding suffix by four characters until unique (up to the full UUID; a full
+collision fails explicitly). Reservations survive lease expiry and reconnects,
+including hosts using the same room database. Distinct sessions must have distinct
+UUIDs; reusing one deliberately means the same logical identity. Separate room
+databases do not coordinate reservations.
+
+Names are frozen for the session: runtime model changes do not rename existing
+claims, reviews, or senders. A restarted MCP process gets a new identity unless
+the launcher supplies its previous `SQUAD_SESSION_ID`; with that token it restores
+the reserved name even if metadata changed or the presence lease ended. Presence
+leases still use independent per-connection UUIDs. Keep the token in launcher
+state and pass it on resume. Room clear removes identity reservations too; connected agents restore their
+reservation on the next operation (resolving any new collision before sending). Exports
+include them (schema version 3).
+
+Provider/model components are lowercased, non-alphanumerics become hyphens, and
+each is capped at 40 characters. The unique suffix is never truncated. Custom
+join names accept 1–128 ASCII letters, digits, underscores or hyphens, starting
+with a letter or digit. `SQUAD_PERSONA` overrides automatic naming and remains a
+namespace: `codex` accepts `codex-2`, but refuses unrelated names. Explicit join
+renames remain supported; they do not migrate old references, so choose them
+before taking work and retain the returned name as `SQUAD_PERSONA` when resuming.
+Renaming stops exposing the automatic token but preserves its original reservation
+and references: any previously saved token still resumes the original automatic name.
+Custom co-named sessions still receive `identity_collision` warnings.
+
+The human CLI defaults to `human`. To act as an MCP agent, pass its exact returned
+name on every call (`SQUAD_PERSONA=<joined-name> squad send ...`), or share its
+launcher-provided `SQUAD_SESSION_ID`, `SQUAD_PROVIDER`, and `SQUAD_MODEL`. CLI calls
+with a session token restore the same reserved identity across invocations. For
+new CLI workers, generate a UUID once per worker and retain it for all calls.
+Subagents share the parent's MCP connection, so use the CLI with their own token
+or persona; see `/squad:fanout`.
 
 Everything is **pull-only**: nothing ever pushes into an agent's context or wakes it. `squad_check` supports long-polling (`wait_seconds`), so a live conversation is a cheap loop of *check(wait 25s) → respond → check(wait 25s)* with no busy-polling.
 
@@ -72,7 +118,21 @@ Per-repo writes: a `squad` entry merged into `.mcp.json` (room pinned to `<repo>
 
 If you decline the CLI link (or `npm link` can't write npm's global prefix on your machine), the installer's closing output prints the exact `node <path-to-squad>/dist/index.js <cmd>` form to use instead of `squad <cmd>` everywhere below — trust that output over this README if the two ever disagree.
 
-**Claude's persona is per-repo; Codex's is machine-global.** Claude's `SQUAD_PERSONA` lives in that repo's own `.mcp.json`, so each checkout can name its Claude anything without touching any other repo. Codex has only one `[mcp_servers.squad]` block in `~/.codex/config.toml`, shared by every repo on the machine — `SQUAD_CODEX_PERSONA` sets that single global value, it does not scope to the repo you ran `./install.sh` from. Running `./install.sh` again in a second repo with a different `SQUAD_CODEX_PERSONA` silently overwrites the first repo's choice; there is currently no way to give Codex a different persona per room.
+**Installation and migration:** fresh installs omit `SQUAD_PERSONA` for both
+harnesses. Reinstall preserves existing environment values and custom names.
+Older installs pinned `claude` in the repo's `.mcp.json` and `codex` in the global
+`~/.codex/config.toml` squad block. These values are ambiguous (they may be
+intentional), so the installer never silently removes them. To migrate, remove
+only `SQUAD_PERSONA` from those squad environment entries and restart the MCP
+connections; keep room settings and custom metadata. Existing work references
+keep the old name: finish/reassign that work before starting with new identities.
+`SQUAD_CLAUDE_PERSONA` / `SQUAD_CODEX_PERSONA` request explicit installer pins.
+An existing Codex server block (including command/args) is preserved verbatim;
+update those paths manually if moving the source checkout. This includes table-form TOML
+environments; edit its pin directly to change it.
+Codex's config is machine-global; its pin applies across repos. The optional
+`--reentry` Stop hook requires an explicit unique `SQUAD_CLAUDE_PERSONA`, because
+its separate process cannot discover a UUID generated inside MCP.
 
 ### Re-entry (opt-in)
 

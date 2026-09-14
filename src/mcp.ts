@@ -1,3 +1,4 @@
+import { identityFromEnv, PERSONA_PATTERN } from "./identity.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
@@ -27,43 +28,28 @@ function json(data: unknown) {
   return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
 }
 
-/**
- * Best-effort harness detection so the persona autofills when SQUAD_PERSONA
- * isn't configured. Claude Code sets CLAUDECODE in child processes; Codex
- * exports CODEX_*-prefixed variables.
- */
-function detectPersona(): string | null {
-  const env = process.env;
-  if (env.CLAUDECODE || Object.keys(env).some((k) => k.startsWith("CLAUDE_CODE"))) {
-    return "claude";
-  }
-  if (Object.keys(env).some((k) => k.startsWith("CODEX"))) return "codex";
-  return null;
-}
-
 export async function runMcpServer(): Promise<void> {
-  // An explicit SQUAD_PERSONA is pinned: it wins and cannot be renamed by the
-  // agent (identity stays server-stamped). Otherwise autofill from the host
-  // harness, with "agent" as the last resort — renameable via squad_join.
-  const pinned = process.env.SQUAD_PERSONA;
-  const persona = pinned ?? detectPersona() ?? "agent";
+  const pinned = process.env.SQUAD_PERSONA || undefined;
   const db = openDb();
-  const squad = new Squad(db, persona);
+  const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.3.0" });
+  const server = new McpServer({ name: "squad", version: "0.4.0" });
 
   server.registerTool(
     "squad_join",
     {
       description:
-        "Join the squad room: opens a presence lease (returning your session_id and " +
+        "Join the squad room: returns identity_id (when non-null, save as SQUAD_SESSION_ID " +
+        "for CLI/resume; explicit or renamed personas return null, so use the returned " +
+        "persona as SQUAD_PERSONA instead), " +
+        "and opens a presence lease (returning your session_id and " +
         "lease_expires_at) and returns who else is here — each member annotated active/idle/" +
         "stale — plus the current open goals, the advisory file claims, any directed review " +
         "requests still gating you (pending_reviews, most urgent first), and recent chat " +
         "history. Your lease renews on every squad_* call, so nothing extra is needed to stay " +
         "active; call squad_leave when you are done. Advances your read cursor past the " +
         "returned history, so squad_check afterwards yields only new messages. Idempotent — " +
-        "call again anytime to re-sync. Your identity autofills from the host harness; the " +
+        "call again anytime to re-sync. Your identity defaults to provider-model-session suffix; the " +
         "optional persona argument renames this connection. A pinned identity (SQUAD_PERSONA " +
         "config) is a namespace, not a fixed name: a rename that refines it — '<pinned>-<suffix>', " +
         "e.g. 'codex-2' — is honored, which is how several sessions of one agent stay visible to " +
@@ -75,7 +61,7 @@ export async function runMcpServer(): Promise<void> {
       inputSchema: {
         persona: z
           .string()
-          .regex(/^[a-z0-9][a-z0-9_-]{0,31}$/i)
+          .regex(PERSONA_PATTERN)
           .optional()
           .describe(
             "Preferred identity for this connection. When pinned via config, only a " +
@@ -92,10 +78,15 @@ export async function runMcpServer(): Promise<void> {
       // join() reports an identity collision — another live session already
       // holding this name — which is only actionable if the agent sees it, so
       // it rides in the same `note` field as the rename decision.
+      if (!squad.identityId) notes.push(
+        "Explicit persona: identity_id is null. Use the returned persona as SQUAD_PERSONA " +
+        "for CLI calls and reconnects; any previous automatic token still identifies the old name.",
+      );
       const joined = squad.join();
       if (joined.identity_collision) notes.push(joined.identity_collision.note);
       return json({
         persona: squad.persona,
+        identity_id: squad.identityId,
         ...(notes.length ? { note: notes.join(" ") } : {}),
         db: dbPath(),
         ...joined,

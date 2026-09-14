@@ -32,6 +32,9 @@ test.after(() => {
 test("round-trip export -> import preserves row counts and content across every table", async () => {
   const src = freshRoom("claude");
   const codex = new Squad(src.db, "codex");
+  // Durable automatic identity reservations must travel with the room.
+  const automatic = new Squad(src.db);
+  automatic.join();
 
   // messages, members, sessions (via send/touch)
   src.squad.send("hello from claude");

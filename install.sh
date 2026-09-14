@@ -11,8 +11,8 @@ CODEX=1
 LINK=1
 DRY=0
 REENTRY=0
-CLAUDE_PERSONA="${SQUAD_CLAUDE_PERSONA:-claude}"
-CODEX_PERSONA="${SQUAD_CODEX_PERSONA:-codex}"
+CLAUDE_PERSONA="${SQUAD_CLAUDE_PERSONA:-}"
+CODEX_PERSONA="${SQUAD_CODEX_PERSONA:-}"
 
 usage() {
   cat <<EOF
@@ -83,6 +83,12 @@ while [[ $# -gt 0 ]]; do
   esac
   shift
 done
+
+# The optional Stop hook runs separately from MCP and must share an explicit identity.
+if [[ $REENTRY -eq 1 && -z "$CLAUDE_PERSONA" ]]; then
+  echo "--reentry requires SQUAD_CLAUDE_PERSONA=<unique-name> so the hook and MCP share an identity" >&2
+  exit 1
+fi
 
 TARGET="$(cd "$TARGET" && pwd)"
 echo "squad source: $SRC"
@@ -232,10 +238,12 @@ const [file, serverPath, persona, squadDir] = process.argv.slice(2);
 let cfg = {};
 if (fs.existsSync(file)) cfg = JSON.parse(fs.readFileSync(file, "utf8"));
 cfg.mcpServers ??= {};
+const env = { ...cfg.mcpServers.squad?.env, SQUAD_DIR: squadDir };
+if (persona) env.SQUAD_PERSONA = persona;
 cfg.mcpServers.squad = {
   command: "node",
   args: [serverPath],
-  env: { SQUAD_PERSONA: persona, SQUAD_DIR: squadDir },
+  env,
 };
 fs.writeFileSync(file, JSON.stringify(cfg, null, 2) + "\n");
 console.log(`merged squad server into ${file}`);
@@ -320,7 +328,8 @@ the loop: check(wait 25s) → respond/work → repeat. Claude also gets
 \`/squad:card\` for Science Card operations and \`/squad:fanout\` for running
 several workers of one agent on disjoint fronts.
 
-Identity: a pinned persona is a namespace, not a fixed name — to run more than
+Identity: unpinned MCP sessions automatically use provider-model-session names.
+A pinned persona is a namespace, not a fixed name — to run more than
 one session as this agent, re-join with a refined \`persona\` (\`<pinned>-<n>\`,
 e.g. \`codex-2\`); same-named sessions are filtered out of each other's messages
 and \`squad_join\` warns when it detects one. Subagents must reach the room
@@ -374,16 +383,14 @@ if [[ $CODEX -eq 1 ]] && confirm "Register squad with Codex (~/.codex/prompts + 
 
   CODEX_TOML="$HOME/.codex/config.toml"
   touch "$CODEX_TOML"
-  if grep -qF "# BEGIN SQUAD MCP" "$CODEX_TOML"; then
-    tmp="$(mktemp)"
-    awk '
-      /# BEGIN SQUAD MCP/ { skip = 1 }
-      !skip { print }
-      /# END SQUAD MCP/ { skip = 0 }
-    ' "$CODEX_TOML" > "$tmp"
-    mv "$tmp" "$CODEX_TOML"
-  fi
+  # TOML can express env as inline, multiline, or a separate table. Preserve
+  # an existing server block verbatim rather than guessing at its structure.
+  if grep -qE '^\[mcp_servers\.squad\][[:space:]]*' "$CODEX_TOML"; then
+    echo "preserved existing Codex squad configuration (edit its environment directly to change a pin)"
+  else
   cp "$CODEX_TOML" "$CODEX_TOML.squad-backup"
+  # shellcheck disable=SC2016 # JavaScript template interpolation, not shell expansion.
+  CODEX_ENV="$(node -e 'console.log(process.argv[1] ? `{ SQUAD_PERSONA = ${JSON.stringify(process.argv[1])} }` : "{}")' "$CODEX_PERSONA")"
   cat >> "$CODEX_TOML" <<EOF
 
 # BEGIN SQUAD MCP
@@ -395,10 +402,11 @@ if [[ $CODEX -eq 1 ]] && confirm "Register squad with Codex (~/.codex/prompts + 
 [mcp_servers.squad]
 command = "node"
 args = ["$SRC/dist/index.js"]
-env = { SQUAD_PERSONA = "$CODEX_PERSONA" }
+env = $CODEX_ENV
 # END SQUAD MCP
 EOF
   echo "merged [mcp_servers.squad] into $CODEX_TOML (backup: $CODEX_TOML.squad-backup)"
+  fi
 else
   echo "skipped Codex global setup"
 fi

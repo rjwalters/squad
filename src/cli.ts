@@ -1,3 +1,4 @@
+import { identityFromEnv } from "./identity.js";
 import { openDb, dbPath, squadDir } from "./db.js";
 import {
   Squad,
@@ -161,7 +162,10 @@ from the current directory (falling back to ~/.squad outside any repo). Inside
 a git worktree the room is the primary clone's, so every worktree shares one.
 
 Environment:
-  SQUAD_PERSONA   Identity stamped on messages (default: human)
+  SQUAD_PERSONA   Explicit identity override (default: human without a session token)
+  SQUAD_SESSION_ID Logical agent UUID; reuse across CLI calls and MCP reconnects
+  SQUAD_PROVIDER Provider metadata for automatic agent identity (default: unknown)
+  SQUAD_MODEL    Model metadata for automatic agent identity (default: unknown)
   SQUAD_DIR       Override the data directory (skips repo-root resolution)
   SQUAD_STALE_MINUTES  Presence lease length: minutes of absence after which a
                   member (and its claims) list as stale (default 30)
@@ -241,8 +245,8 @@ function checkPersona(): DoctorCheck {
     name: "persona",
     ok: true,
     detail:
-      "not pinned -- the MCP server autodetects from the host harness (Claude Code -> claude, " +
-      "Codex -> codex, else 'agent'); this CLI defaults to 'human'",
+      "not pinned -- MCP uses provider-model-session identities (unknown metadata stays unknown); " +
+      "this CLI defaults to 'human', or resumes SQUAD_SESSION_ID when supplied",
   };
 }
 
@@ -296,9 +300,10 @@ export async function runCli(argv: string[]): Promise<void> {
     return;
   }
 
-  const persona = process.env.SQUAD_PERSONA ?? "human";
+  const persona = process.env.SQUAD_PERSONA || (process.env.SQUAD_SESSION_ID ? undefined : "human");
   const db = openDb();
-  const squad = new Squad(db, persona);
+  // Import must inspect an untouched destination before any identity reservation.
+  const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
     case "send": {
@@ -710,8 +715,11 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     case "leave": {
       const left = squad.leave();
-      if (left.sessions_ended.length === 0) console.log(`${persona} is not in the room`);
-      else console.log(`${persona} left the room (${left.sessions_ended.length} session(s) ended)`);
+      if (left.sessions_ended.length === 0) console.log(`${squad.persona} is not in the room`);
+      else
+        console.log(
+          `${squad.persona} left the room (${left.sessions_ended.length} session(s) ended)`,
+        );
       break;
     }
     case "clear": {
