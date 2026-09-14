@@ -39,7 +39,9 @@ export async function runMcpServer(): Promise<void> {
     "squad_join",
     {
       description:
-        "Join the squad room: returns identity_id (save as SQUAD_SESSION_ID for CLI/resume), " +
+        "Join the squad room: returns identity_id (when non-null, save as SQUAD_SESSION_ID " +
+        "for CLI/resume; explicit or renamed personas return null, so use the returned " +
+        "persona as SQUAD_PERSONA instead), " +
         "and opens a presence lease (returning your session_id and " +
         "lease_expires_at) and returns who else is here — each member annotated active/idle/" +
         "stale — plus the current open goals, the advisory file claims, any directed review " +
@@ -76,6 +78,10 @@ export async function runMcpServer(): Promise<void> {
       // join() reports an identity collision — another live session already
       // holding this name — which is only actionable if the agent sees it, so
       // it rides in the same `note` field as the rename decision.
+      if (!squad.identityId) notes.push(
+        "Explicit persona: identity_id is null. Use the returned persona as SQUAD_PERSONA " +
+        "for CLI calls and reconnects; any previous automatic token still identifies the old name.",
+      );
       const joined = squad.join();
       if (joined.identity_collision) notes.push(joined.identity_collision.note);
       return json({

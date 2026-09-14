@@ -30,8 +30,9 @@ messages. Configure trusted launcher metadata with `SQUAD_PROVIDER` and
 Codex and Claude Code are harnesses and can use different backends. No runtime
 model file is scraped. Launchers must supply the actual selected metadata.
 
-The `identity_id` in `squad_join` is the durable identity token (save it as
-`SQUAD_SESSION_ID`); `session_id` is only the presence lease ID.
+A non-null `identity_id` in `squad_join` is the durable automatic identity token
+(save it as `SQUAD_SESSION_ID`). Explicit personas, including after a rename,
+return null and must use the returned persona as `SQUAD_PERSONA` instead; `session_id` is only the presence lease ID.
 Each connection creates a random UUID unless its launcher supplies
 `SQUAD_SESSION_ID=<uuid>` for a logical session. The first eight hexadecimal
 characters form the suffix. SQLite serializes name reservations, extending a
@@ -57,6 +58,8 @@ with a letter or digit. `SQUAD_PERSONA` overrides automatic naming and remains a
 namespace: `codex` accepts `codex-2`, but refuses unrelated names. Explicit join
 renames remain supported; they do not migrate old references, so choose them
 before taking work and retain the returned name as `SQUAD_PERSONA` when resuming.
+Renaming stops exposing the automatic token but preserves its original reservation
+and references: any previously saved token still resumes the original automatic name.
 Custom co-named sessions still receive `identity_collision` warnings.
 
 The human CLI defaults to `human`. To act as an MCP agent, pass its exact returned

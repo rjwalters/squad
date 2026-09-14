@@ -704,16 +704,19 @@ export class Squad {
     persona?: string,
     identity: AgentIdentity = {},
   ) {
-    this.identityId = persona === undefined ? (identity.sessionId ?? randomUUID()) : null;
-    this.automaticIdentity = persona === undefined ? { ...identity, sessionId: this.identityId! } : null;
+    this.automaticIdentity = persona === undefined
+      ? { ...identity, sessionId: identity.sessionId ?? randomUUID() }
+      : null;
     this._persona = persona ?? automaticPersona(db, this.automaticIdentity!);
   }
 
   private _persona: string;
   private automaticIdentity: AgentIdentity | null;
 
-  /** Durable logical identity token; distinct from this connection's presence sessionId. */
-  readonly identityId: string | null;
+  /** Automatic resume token; explicit personas must resume through SQUAD_PERSONA. */
+  get identityId(): string | null {
+    return this.automaticIdentity?.sessionId ?? null;
+  }
 
   get persona(): string {
     return this._persona;

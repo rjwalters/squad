@@ -87,6 +87,27 @@ test("real MCP sessions and CLI calls retain server-stamped identities", async (
     });
     assert.equal(invalid.isError, true);
     assert.equal((await call(b, "squad_join", { persona: "a".repeat(128) })).persona.length, 128);
+    const renamed = await call(b, "squad_join", { persona: "custom-worker" });
+    assert.equal(
+      renamed.identity_id,
+      null,
+      "a custom name must not advertise the old automatic token",
+    );
+    assert.match(renamed.note, /SQUAD_PERSONA/);
+    await call(b, "squad_claim", { path: "renamed-work.ts" });
+    const handoff = spawnSync(process.execPath, [resolve("dist/index.js"), "send", "renamed CLI"], {
+      env: { ...process.env, SQUAD_DIR: room, SQUAD_PERSONA: renamed.persona },
+      encoding: "utf8",
+    });
+    assert.equal(handoff.status, 0, handoff.stderr);
+    const joined = await call(b, "squad_join");
+    assert.equal(joined.claims.find((c) => c.path === "renamed-work.ts").persona, renamed.persona);
+    assert.equal(joined.recent.find((m) => m.body === "renamed CLI").sender, renamed.persona);
+    assert.equal(
+      joined.identity_id,
+      null,
+      "repeated joins must retain explicit-persona handoff semantics",
+    );
   } finally {
     await Promise.all(clients.map((client) => client.close()));
     rmSync(room, { recursive: true, force: true });
