@@ -5,7 +5,7 @@ set -euo pipefail
 TARGET="${1:-.}"
 TARGET="$(cd "$TARGET" && pwd)"
 
-rm -rf "$TARGET/.claude/commands/squad" "$TARGET/.claude/skills/squad"
+rm -rf "$TARGET/.claude/commands/squad" "$TARGET/.claude/skills/squad" "$TARGET/.agents/skills/squad"
 echo "removed .claude/commands/squad and .claude/skills/squad"
 
 if [[ -f "$TARGET/.mcp.json" ]]; then

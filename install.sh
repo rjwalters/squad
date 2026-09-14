@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install squad into a target repo. Claude Code and Codex are peers: both get
-# the same MCP tools, the same room (<repo>/.squad/), and equivalent join/goals
+# the same MCP tools, the same room (<repo>/.squad/), and equivalent workflow
 # commands. Safe to re-run; marker-bounded edits are replaced in place.
 set -euo pipefail
 
@@ -22,7 +22,8 @@ Installs into the target repo (default .):
   .mcp.json                        squad MCP entry for Claude Code, with the
                                    room pinned to <repo>/.squad (persona "$CLAUDE_PERSONA")
   .claude/commands/squad/*.md      /squad:join, /squad:goals, /squad:card, /squad:fanout, /squad:clear
-  .claude/skills/squad/SKILL.md    conventions + tool reference
+  .claude/skills/squad/            canonical skill and workflow references
+  .agents/skills/squad/            identical native Codex skill (repo-scoped)
   .claude/skills/squad/install-metadata.json
                                    installed version + commit (tracked), so
                                    /repo:update-tools can spot a stale install;
@@ -41,7 +42,7 @@ With --reentry (default off — opt-in):
 
 Global, with confirmation (skip with --no-codex / --no-link) — these are
 one-time-per-machine, not per target repo:
-  ~/.codex/prompts/squad-*.md      /squad-join, /squad-goals prompts
+  ~/.codex/prompts/squad-*.md      all five /squad-<workflow> compatibility prompts
   ~/.codex/config.toml             [mcp_servers.squad] (persona "$CODEX_PERSONA"); the server
                                    finds each repo's room from Codex's working
                                    directory, so start codex inside the repo
@@ -130,7 +131,8 @@ if [[ $DRY -eq 1 ]]; then
   fi
   echo "target repo ($TARGET):"
   echo "  .claude/commands/squad/*.md          copy /squad:join, /squad:goals, /squad:card, /squad:fanout, /squad:clear"
-  echo "  .claude/skills/squad/SKILL.md        copy skill"
+  echo "  .claude/skills/squad/                copy canonical skill and references"
+  echo "  .agents/skills/squad/                copy identical native Codex skill"
   echo "  .claude/skills/squad/install-metadata.json"
   echo "                                       version $VERSION_VALUE, commit $COMMIT, layout_version 1 (tracked)"
   echo "  .claude/skills/squad/.install-local.json"
@@ -152,7 +154,7 @@ if [[ $DRY -eq 1 ]]; then
     echo "outside the target repo (asks first; skip individually with --no-codex / --no-link):"
   fi
   if [[ $CODEX -eq 1 ]]; then
-    echo "  ~/.codex/prompts/squad-*.md          copy /squad-join, /squad-goals prompts"
+    echo "  ~/.codex/prompts/squad-*.md          copy all five /squad-<workflow> compatibility prompts"
     echo "  ~/.codex/config.toml                 replace/append [mcp_servers.squad] block (persona \"$CODEX_PERSONA\")"
     echo "  ~/.codex/config.toml.squad-backup    backup of config.toml before the edit"
   fi
@@ -209,7 +211,11 @@ write_block() { # write_block <file> <block-content>
 # --- target repo: commands + skill -----------------------------------------
 mkdir -p "$TARGET/.claude/commands/squad" "$TARGET/.claude/skills/squad"
 cp "$SRC"/commands/squad/*.md "$TARGET/.claude/commands/squad/"
-cp "$SRC"/skills/squad/SKILL.md "$TARGET/.claude/skills/squad/"
+for runtime in .claude .agents; do
+  mkdir -p "$TARGET/$runtime/skills/squad/references"
+  cp "$SRC"/skills/squad/SKILL.md "$TARGET/$runtime/skills/squad/"
+  cp "$SRC"/skills/squad/references/*.md "$TARGET/$runtime/skills/squad/references/"
+done
 echo "installed .claude/commands/squad/ and .claude/skills/squad/"
 
 # --- target repo: install metadata -----------------------------------------
@@ -265,98 +271,17 @@ fi
 
 # --- target repo: CLAUDE.md + AGENTS.md blocks (identical — both agents are
 # peers and read the same conventions) ---------------------------------------
-read -r -d '' BLOCK <<EOF || true
+read -r -d '' BLOCK <<'EOF' || true
 ## Squad — cross-agent collaboration
 
-This repo has [squad](https://github.com/rjwalters/squad) installed: a chat
-room private to this repo (SQLite at \`.squad/squad.db\`) shared by every agent
-working here — Claude and Codex are peers with identical tools. Use it to
-split work, hand off results, and track shared goals (e.g. divide the lemmas
-of a Lean proof and claim them in chat).
+This repo has [Squad](https://github.com/rjwalters/squad) installed. Claude and
+Codex share the same room and MCP tools. Before touching shared state, read
+and follow the installed Squad skill, including its room/identity conventions:
+- Claude: `.claude/skills/squad/SKILL.md`
+- Codex: `.agents/skills/squad/SKILL.md` (invoke `$squad` or ask naturally)
 
-Tools (all pull-based; nothing ever wakes you):
-- \`squad_join\` — open your presence lease, get members (each \`active\`/
-  \`idle\`/\`stale\`) + open goals + recent history
-- \`squad_send\` — post to the room; \`@name\` addresses a teammate
-- \`squad_check\` — your unread messages plus every peer's presence (consumes;
-  \`peek: true\` to look without consuming; \`wait_seconds: 25\` long-polls for
-  live conversation)
-- \`squad_leave\` — end your presence lease when you stop working, announced
-  in chat so peers don't wait on you. Presence renews on any tool call: a peer
-  reads \`active\` while working, \`idle\` when paused, \`stale\` once its lease
-  expires (treat as gone)
-- \`squad_goals\` / \`squad_goal_add\` / \`squad_goal_done\` /
-  \`squad_goal_reopen\` — shared goal board (reopen undoes a mistaken done);
-  every change is auto-announced in chat
-- \`squad_claims\` / \`squad_claim\` / \`squad_release\` — advisory claims on
-  files or areas: claim a path before you edit it, release when done. Every
-  change is auto-announced and current claims ride along in \`squad_join\`, so
-  a claim is visible before an edit lands. Advisory, never a lock; a claim
-  lists as \`stale\` once its holder's presence lease expires, so it can be
-  taken over
-- \`squad_card_create\` / \`squad_card_list\` / \`squad_card_get\` /
-  \`squad_card_transition\` / \`squad_card_evidence_add\` /
-  \`squad_card_update\` — Science Cards: a structured tracker for a claim
-  moving through QUESTION -> ... ->
-  SUPPORTED/FALSIFIED/INCONCLUSIVE/ABANDONED. Transitions are validated
-  against the allowed graph and evidence-gated for SUPPORTED; \`update\` edits
-  creation-time fields only, never phase; every mutation is auto-announced
-- \`squad_diverge_open\` / \`squad_diverge_submit\` / \`squad_diverge_status\` /
-  \`squad_diverge_close\` — divergence rounds: each participant submits
-  independently and nothing is revealed until the round closes (explicitly,
-  or automatically once every expected participant has submitted) — use one
-  before discussing, when independent takes matter
-- \`squad_review_open\` / \`squad_review_claim\` / \`squad_review_resolve\` /
-  \`squad_review_cancel\` / \`squad_review_list\` — directed review requests:
-  a durable "you specifically, look at this" with target, refs, priority,
-  and optional expiry. pending -> claimed (target acks) -> resolved
-  (claimant closes); either side may cancel. Pending requests directed at
-  you ride along in \`squad_join\`/\`squad_check\` — work them most-urgent
-  first; every transition is auto-announced
-- \`squad_clear\` — wipe the room (destructive; needs explicit user intent)
-
-Conventions: claim a goal in chat before working on it; report results when
-done; only mark goals done that you verified (in Lean work: it compiles with
-no \`sorry\`); never speak as another persona; \`squad_claim\` a file before
-editing it and check \`squad_claims\` before touching a shared one; never
-delete files you did not create, however scratch-like they look — untracked
-≠ yours.
-
-Join the correct room before touching shared state. Before editing, stashing,
-cleaning or building against a shared tree, call \`squad_join\` and verify its
-returned \`db\` path is the team's room for that tree. A connection to another
-repo's room does not count. Shared worktrees should use the team's existing
-room; configure \`SQUAD_DIR\` before launching the connection when needed.
-CLI-only workers must first announce themselves with \`squad send\` under
-their own identity in that room. Read messages and claims and coordinate
-with their owners before working; a casual read or \`peek: true\` check is
-not a substitute for the initial join and room check.
-
-This rule follows the erdos-85 recovery incident (2026-08-12, messages
-2798–2801, Squad issue #16): an unjoined process stashed another worker's
-changes and left the room guessing at the cause. Participation and claims
-are advisory: Squad cannot intercept shell/Git commands or detect a process
-that never joins. Joining does not authorize changing a teammate's work.
-
-Default identities distinguish logical sessions; \`session_id\` distinguishes
-connections. Explicit personas can still be shared, and \`squad_join\`
-reports live collisions in \`identity_collision\`. Another connection may be
-a CLI call from the same worker, not a second independent agent. Shared
-personas have the same chat sender and self-filter each other's messages;
-independent workers must use distinct personas.
-
-Join commands: \`/squad:join\` (Claude) or \`/squad-join\` (Codex) — then hold
-the loop: check(wait 25s) → respond/work → repeat. Claude also gets
-\`/squad:card\` for Science Card operations and \`/squad:fanout\` for running
-several workers of one agent on disjoint fronts.
-
-Identity: unpinned MCP sessions automatically use provider-model-session names.
-A pinned persona is a namespace, not a fixed name — to run more than
-one session as this agent, re-join with a refined \`persona\` (\`<pinned>-<n>\`,
-e.g. \`codex-2\`); same-named sessions are filtered out of each other's messages
-and \`squad_join\` warns when it detects one. Subagents must reach the room
-through the CLI with their own \`SQUAD_PERSONA=<name> squad …\`, never the
-inherited MCP tools (one connection, one persona).
+Both expose join, goals, card, fanout, and clear workflows. Claude aliases are
+`/squad:<workflow>`; legacy Codex prompts are `/squad-<workflow>`.
 EOF
 write_block "$TARGET/CLAUDE.md" "$BLOCK"
 write_block "$TARGET/AGENTS.md" "$BLOCK"

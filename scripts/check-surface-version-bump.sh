@@ -63,7 +63,7 @@ MARKER='<!-- loom:no-surface-change -->'
 # installed .mcp.json points at directly in this source checkout).
 WATCHED_PATHS=(
   "commands/squad/"
-  "skills/squad/SKILL.md"
+  "skills/squad/"
   "codex/prompts/"
   "hooks/squad-reentry.sh"
   "install.sh"
