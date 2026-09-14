@@ -705,10 +705,12 @@ export class Squad {
     identity: AgentIdentity = {},
   ) {
     this.identityId = persona === undefined ? (identity.sessionId ?? randomUUID()) : null;
-    this._persona = persona ?? automaticPersona(db, { ...identity, sessionId: this.identityId! });
+    this.automaticIdentity = persona === undefined ? { ...identity, sessionId: this.identityId! } : null;
+    this._persona = persona ?? automaticPersona(db, this.automaticIdentity!);
   }
 
   private _persona: string;
+  private automaticIdentity: AgentIdentity | null;
 
   /** Durable logical identity token; distinct from this connection's presence sessionId. */
   readonly identityId: string | null;
@@ -724,6 +726,7 @@ export class Squad {
 
   /** Rename this connection's identity (used by persona autofill on join). */
   setPersona(persona: string): void {
+    this.automaticIdentity = null;
     this._persona = persona;
   }
 
@@ -763,6 +766,13 @@ export class Squad {
    * is never resurrected — the next operation opens a fresh one.
    */
   touch(): void {
+    // A room clear removes reservations. Restore this still-connected agent
+    // before publishing again; any collision is resolved under the same lock.
+    if (this.automaticIdentity && !this.db.prepare(
+      "SELECT 1 FROM agent_identities WHERE identity_id = ?",
+    ).get(this.identityId!.toLowerCase())) {
+      this._persona = automaticPersona(this.db, this.automaticIdentity);
+    }
     const ts = now();
     this.db
       .prepare(

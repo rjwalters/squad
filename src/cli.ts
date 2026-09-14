@@ -302,7 +302,8 @@ export async function runCli(argv: string[]): Promise<void> {
 
   const persona = process.env.SQUAD_PERSONA || (process.env.SQUAD_SESSION_ID ? undefined : "human");
   const db = openDb();
-  const squad = new Squad(db, persona, identityFromEnv());
+  // Import must inspect an untouched destination before any identity reservation.
+  const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
     case "send": {

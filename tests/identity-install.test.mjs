@@ -51,3 +51,31 @@ test("reinstall preserves custom and ambiguous legacy pins in all TOML forms", (
     assert.equal(installed.claude.SQUAD_MODEL, "custom-model");
   }
 });
+
+test("agent CLI import does not pre-populate an empty destination", () => {
+  const source = join(root, "export-source");
+  const destination = join(root, "import-destination");
+  const dump = join(root, "room.db");
+  const env = { ...process.env, SQUAD_DIR: source };
+  delete env.SQUAD_PERSONA;
+  delete env.SQUAD_SESSION_ID;
+  for (const args of [
+    ["send", "exported message"],
+    ["export", dump],
+  ]) {
+    const result = spawnSync(process.execPath, ["dist/index.js", ...args], {
+      env,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stderr);
+  }
+  const result = spawnSync(process.execPath, ["dist/index.js", "import", dump], {
+    env: {
+      ...env,
+      SQUAD_DIR: destination,
+      SQUAD_SESSION_ID: "aaaaaaaa-1111-4111-8111-111111111111",
+    },
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr);
+});

@@ -102,3 +102,20 @@ test("only explicit metadata is used and invalid session tokens fail clearly", a
   assert.equal(PERSONA_PATTERN.test("a".repeat(129)), false);
   assert.throws(() => new Squad(db, undefined, { sessionId: "bad" }), /must be a UUID/);
 });
+
+test("clear followed by reuse restores an automatic reservation", () => {
+  const a = new Squad(db, undefined, { provider: "openai", model: "gpt-6" });
+  const name = a.persona;
+  a.join();
+  a.clear();
+  a.send("after clear");
+  assert.equal(
+    db.prepare("SELECT persona FROM agent_identities WHERE identity_id = ?").get(a.identityId)
+      ?.persona,
+    name,
+  );
+  assert.equal(
+    new Squad(db, undefined, { sessionId: a.identityId, model: "changed" }).persona,
+    name,
+  );
+});

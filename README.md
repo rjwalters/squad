@@ -46,7 +46,8 @@ claims, reviews, or senders. A restarted MCP process gets a new identity unless
 the launcher supplies its previous `SQUAD_SESSION_ID`; with that token it restores
 the reserved name even if metadata changed or the presence lease ended. Presence
 leases still use independent per-connection UUIDs. Keep the token in launcher
-state and pass it on resume. Room clear removes identity reservations too; exports
+state and pass it on resume. Room clear removes identity reservations too; connected agents restore their
+reservation on the next operation (resolving any new collision before sending). Exports
 include them (schema version 3).
 
 Provider/model components are lowercased, non-alphanumerics become hyphens, and
