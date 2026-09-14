@@ -2,8 +2,8 @@
 
 Research integration is opt-in. Existing rooms need no configuration. All
 participants using the same room database read the same configuration, independent
-of their current working directory. This release provides configuration only;
-banking execution is a subsequent capability.
+of their current working directory. Banking executes integration, an exact candidate
+build and publication through this shared target.
 
 Read the current configuration and its revision:
 
@@ -127,3 +127,88 @@ reset. Opening an older room adds empty ledger tables without changing existing
 room state. Exported active claims retain their expiry; a restored room can reclaim
 them after expiry. Do not run two restored copies as concurrent executors against
 the same target. Attempts do not contain or fabricate independent-review evidence.
+
+## Execute banking
+
+`squad bank <attempt-id>` and MCP `squad_bank` (`id`) execute or resume an attempt.
+They return the same durable attempt JSON. CLI exits nonzero for failed/pending
+results. MCP callers must inspect `status`; only `verified` is banked.
+The default build timeout is 30 minutes, configurable per call with
+`--build-timeout-ms` / `build_timeout_ms` (1,000–86,400,000 ms). Git operations
+have a separate 60 second timeout. Configure dependency setup explicitly, for
+example `pnpm install --frozen-lockfile && pnpm test`; source `node_modules`,
+untracked inputs and local configuration are not copied. No Loom installation
+is required in consumer repositories.
+
+Without `selection`, every submitted commit and its ancestry is merged in listed
+order with `--no-ff` into the fetched target. This can include unrelated ancestor
+changes: use artifact selection when only particular files should be integrated.
+An absent target branch starts from the first submitted commit. Full IDs must be
+commit objects available in the pinned source repository; no HEAD, branch-name,
+caller-directory, path or theorem guessing occurs. Dirty source files are excluded
+from full-commit execution and remain untouched.
+
+For only declared committed artifacts, submit exactly one commit with repeated
+`--path` flags. Optional `--theorem` declares the label's artifact mapping:
+
+```sh
+squad integration submit --request-key lemma-17-artifacts --config-revision 1 \
+  --commit <full-commit-id> --path Proofs/Lemma17.lean --theorem lemma17
+squad bank <returned-attempt-id>
+```
+
+MCP submission uses `selection: {paths: ["Proofs/Lemma17.lean"], theorem: "lemma17"}`.
+This is an explicit caller declaration stored immutably with the request, not a
+Lean symbol lookup or evidence the theorem is proved. A theorem without declared
+paths is rejected. Paths are exact literal repository-relative regular files,
+not globs, directories, symlinks or Git pathspec expressions. Traversal is rejected.
+Files must exist at the submitted commit; selected deletions require full-commit
+mode. Selected files must have no staged/unstaged/untracked changes and their
+working contents must match the submitted commit. Unrelated dirty files remain
+untouched. The target must exist and share a merge base with the submitted commit.
+Only selected changes from that merge base to the submitted commit are applied
+using Git's three-way indexed patch application, then committed in isolation.
+Conflicts fail; unrelated changes in the same source commit are excluded.
+Normalized artifact paths and theorem declaration participate in retry identity.
+
+The runner creates its own temporary repository and fetches committed objects
+without altering source refs, index, config or files. It disables inherited Git
+environment overrides and hooks for owned Git operations, and suppresses optional
+source index refreshes. Global/system credential helpers and SSH settings remain
+available; source-local transport settings are not copied. Effective isolated
+fetch/push URLs must still match the pinned destination after URL rewriting. It
+renews ownership and presence while asynchronous builds run. Timeout, CLI signals
+and MCP cancellation terminate the subprocess group. Abrupt process death leaves
+a reclaimable lease; it may leave a runner-owned temporary directory.
+
+Each candidate records the fetched base and exact commit/tree. A build must exit
+zero and leave HEAD, tracked files and index unchanged. Untracked build outputs
+are allowed; they are never copied from source. Build output and timing are durable
+ledger evidence. Before publication the runner revalidates configuration and its
+lease, records intent, and pushes without force. A competing target advancement
+requires a new integrated candidate and fresh build, bounded to three candidates.
+A changed/disabled configuration blocks new publication and requires a new request. Cancellation or configuration changes cannot retract an
+already accepted in-flight remote update; recovery records the observed historical
+publication.
+
+After a failed or interrupted push, the executor fetches the remote and checks
+whether the exact candidate is present or an ancestor of the observed target.
+An uncertain outcome stays pending with diagnostics. Calling bank again recovers
+matching durable build/intent evidence without integrating twice, including when
+configuration was subsequently disabled. Recovery only observes that historical
+target; it cannot publish under stale configuration. If no publication is found,
+an explicit retry rebuilds. Build failures and conflicts remain failed with useful
+diagnostics. Failed, pending and verified records all remain queryable offline.
+
+`squad_check` returns `integration.configuration`, total `known_submissions`
+counts (`pending`, `failed`, `verified`) across historical configurations, and
+`local_work_visibility: "unobserved"`. Historical verified counts do not assert
+that commits remain on a remotely rewritten target. An empty ledger never certifies
+that local work is absent. Banking never confers independent node review.
+
+Internal artifact producers can reuse `executeIntegration` with a
+`PreparedIntegrationSource` after establishing ownership/provenance for their
+isolated source repository. Its config revision and ordered commits must match the
+immutable submission. This source override is not a CLI/MCP parameter; public
+banking always resolves the configured source. Producers must retain or recreate
+prepared objects for retries and pass the same executor rather than assert success.

@@ -494,4 +494,6 @@ MIT
 
 Research rooms can opt into a [shared integration target](docs/integration.md).
 Its repository, remote, branch, build command and steward are revisioned in the
-room; setting the target does not yet integrate or build work.
+room. Submit committed work, then run `squad bank <attempt-id>` (MCP `squad_bank`)
+to integrate in isolation, build the exact candidate and publish without force.
+Only a verified receipt means banked; configuration and chat claims do not.

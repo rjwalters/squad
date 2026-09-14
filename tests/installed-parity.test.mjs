@@ -6,6 +6,7 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -198,13 +199,98 @@ test(
       assert.equal((await call(clients[1], "squad_integration_attempt_list", { limit: 1 })).length, 1);
       const unsupportedVerify = await clients[0].callTool({ name: "squad_integration_verify", arguments: { id: attempt.id } });
       assert.equal(unsupportedVerify.isError, true);
-      const disabled = JSON.parse(cli(["integration", "unset", "--expected-revision", "1"]));
-      assert.deepEqual(await call(clients[0], "squad_integration_get"), disabled);
-      const reset = JSON.parse(cli(["integration", "set", "--expected-revision", "2",
-        "--repository", repo, "--remote", "origin", "--branch", "research/integration",
-        "--build-command", "false", "--steward", joined[1].persona]));
+      // Exercise the installed MCP executor against a real remote, including CLI receipt parity.
+      const bare = join(scratch, "integration.git");
+      assert.equal(spawnSync("git", ["init", "--bare", "-q", bare]).status, 0);
+      assert.equal(
+        spawnSync("git", ["-C", repo, "remote", "set-url", "origin", bare])
+          .status,
+        0,
+      );
+      for (const [key, value] of [
+        ["user.name", "test"],
+        ["user.email", "test@example.org"],
+      ])
+        assert.equal(
+          spawnSync("git", ["-C", repo, "config", key, value]).status,
+          0,
+        );
+      writeFileSync(join(repo, "bank-artifact"), "committed artifact");
+      assert.equal(
+        spawnSync("git", ["-C", repo, "add", "bank-artifact"]).status,
+        0,
+      );
+      assert.equal(
+        spawnSync("git", ["-C", repo, "commit", "-qm", "artifact"]).status,
+        0,
+      );
+      const committed = spawnSync("git", ["-C", repo, "rev-parse", "HEAD"], {
+        encoding: "utf8",
+      }).stdout.trim();
+      await call(clients[0], "squad_integration_set", {
+        repository: repo,
+        remote: "origin",
+        branch: "research/integration",
+        build_command: "test -f bank-artifact",
+        steward: joined[0].persona,
+        expected_revision: 1,
+      });
+      const banking = await call(clients[1], "squad_integration_submit", {
+        request_key: "installed-bank",
+        config_revision: 2,
+        commits: [committed],
+      });
+      const unknownSelection = await clients[0].callTool({
+        name: "squad_bank",
+        arguments: { id: banking.id, theorem: "unknown" },
+      });
+      assert.equal(unknownSelection.isError, true);
+      const unknownSubmission = await clients[0].callTool({
+        name: "squad_integration_submit",
+        arguments: {
+          request_key: "ignored-theorem",
+          config_revision: 2,
+          commits: [committed],
+          theorem: "unknown",
+        },
+      });
+      assert.equal(unknownSubmission.isError, true);
+      const banked = await call(clients[0], "squad_bank", { id: banking.id });
+      assert.equal(banked.status, "verified", JSON.stringify(banked));
+      assert.deepEqual(JSON.parse(cli(["bank", banking.id])), banked);
+      const summary = await call(clients[1], "squad_check");
+      assert.equal(summary.integration.known_submissions.verified, 1);
+      assert.equal(summary.integration.known_submissions.pending, 2);
+      assert.equal(summary.integration.local_work_visibility, "unobserved");
+      const disabled = JSON.parse(
+        cli(["integration", "unset", "--expected-revision", "2"]),
+      );
+      assert.deepEqual(
+        await call(clients[0], "squad_integration_get"),
+        disabled,
+      );
+      const reset = JSON.parse(
+        cli([
+          "integration",
+          "set",
+          "--expected-revision",
+          "3",
+          "--repository",
+          repo,
+          "--remote",
+          "origin",
+          "--branch",
+          "research/integration",
+          "--build-command",
+          "false",
+          "--steward",
+          joined[1].persona,
+        ]),
+      );
       assert.deepEqual(await call(clients[1], "squad_integration_get"), reset);
-      await call(clients[1], "squad_integration_unset", { expected_revision: 3 });
+      await call(clients[1], "squad_integration_unset", {
+        expected_revision: 4,
+      });
 
       const goal = await call(clients[0], "squad_goal_add", {
         body: "verify installed collaboration",

@@ -71,6 +71,7 @@ const HELP = `squad — local cross-agent chat room with shared goals
 With no subcommand (and stdin not a TTY) squad runs as a stdio MCP server.
 
 Human CLI usage:
+  squad bank <attempt-id> [--build-timeout-ms N]  Integrate, build and publish committed work
   squad integration show|check|set|unset|submit|attempt|attempts (see docs/integration.md)
   squad send <text...>        Post a message to the room
   squad read [-n N]           Show the last N messages (default 30; stateless)
@@ -307,6 +308,19 @@ export async function runCli(argv: string[]): Promise<void> {
   const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
+    case "bank": {
+      if (!rest[0] || rest[0].startsWith("--") || (rest.length !== 1 && (rest.length !== 3 || rest[1] !== "--build-timeout-ms" || !/^[1-9][0-9]*$/.test(rest[2]!))))
+        throw new Error("usage: squad bank <attempt-id> [--build-timeout-ms N]");
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      process.once("SIGINT", abort); process.once("SIGTERM", abort);
+      try {
+        const result = await squad.bank(rest[0], { build_timeout_ms: rest[2] === undefined ? undefined : Number(rest[2]), signal: controller.signal });
+        console.log(JSON.stringify(result, null, 2));
+        if (result.status !== "verified") process.exitCode = 1;
+      } finally { process.removeListener("SIGINT", abort); process.removeListener("SIGTERM", abort); }
+      break;
+    }
     case "integration": {
       const [action = "show", ...args] = rest;
       if (action === "attempt") {
@@ -316,19 +330,20 @@ export async function runCli(argv: string[]): Promise<void> {
       }
       if (action === "submit" || action === "attempts") {
         const options: Record<string, string> = {};
-        const commits: string[] = [], nodes: string[] = [];
-        const allowed = action === "submit" ? ["request-key", "config-revision", "commit", "node"] : ["status", "limit"];
+        const commits: string[] = [], nodes: string[] = [], paths: string[] = [];
+        const allowed = action === "submit" ? ["request-key", "config-revision", "commit", "node", "path", "theorem"] : ["status", "limit"];
         for (let i = 0; i < args.length; i += 2) {
           const key = args[i]!.replace(/^--/, "");
           const value = args[i + 1];
           if (!args[i]!.startsWith("--") || !allowed.includes(key) || value === undefined || key in options) throw new Error(`integration: invalid or duplicate flag ${args[i]}`);
           if (key === "commit") commits.push(value);
           else if (key === "node") nodes.push(value);
+          else if (key === "path") paths.push(value);
           else options[key] = value;
         }
         const numeric = action === "submit" ? "config-revision" : "limit";
         if ((action === "submit" || options[numeric] !== undefined) && !/^(0|[1-9][0-9]*)$/.test(options[numeric] ?? "")) throw new Error(`integration: ${numeric} must be a non-negative integer`);
-        const result = action === "submit" ? squad.integrationSubmit({ request_key: options["request-key"]!, config_revision: Number(options["config-revision"]), commits, node_refs: nodes })
+        const result = action === "submit" ? squad.integrationSubmit({ request_key: options["request-key"]!, config_revision: Number(options["config-revision"]), commits, node_refs: nodes, ...(paths.length || options.theorem !== undefined ? { selection: { paths, ...(options.theorem === undefined ? {} : { theorem: options.theorem }) } } : {}) })
           : squad.integrationAttempts({ status: options.status as import("./integration-ledger.js").IntegrationStatus | undefined, limit: options.limit === undefined ? undefined : Number(options.limit) });
         console.log(JSON.stringify(result, null, 2));
         break;
@@ -812,6 +827,7 @@ export function knownCommand(cmd: string | undefined): boolean {
   return (
     cmd !== undefined &&
     [
+      "bank",
       "integration",
       "send",
       "read",

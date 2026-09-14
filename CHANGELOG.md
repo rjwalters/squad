@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.9.0
+
+- Execute banking through CLI/MCP with isolated committed-source integration, exact candidate builds, non-forcing publication, renewable ownership and interrupted-publication recovery.
+- Add explicit committed artifact/theorem declarations and report known integration state without claiming visibility of local work.
+- Preserve schema 5 and existing configuration/ledger history.
+
 ## [Unreleased]
 
 ### Added

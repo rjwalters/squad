@@ -33,11 +33,16 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.8.0" });
+  const server = new McpServer({ name: "squad", version: "0.9.0" });
+
+  server.registerTool("squad_bank", {
+    description: "Execute or resume a submitted integration attempt in an isolated checkout. Builds the exact candidate, then publishes without force to the pinned target. Returns verified only after observed publication; failures retain evidence. Independent node review is separate. Long builds may require a longer MCP client timeout.",
+    inputSchema: z.object({ id: z.string().min(1), build_timeout_ms: z.number().int().min(1000).max(86400000).optional() }).strict(),
+  }, async ({ id, build_timeout_ms }, extra) => json(await squad.bank(id, { build_timeout_ms, signal: extra.signal })));
 
   server.registerTool("squad_integration_submit", {
-    description: "Submit full committed Git object IDs for later integration, pinning the current configured revision. An idempotent request key identifies this exact ordered submission. Creates pending evidence only; does not run Git/builds, bank work, or create research nodes/reviews.",
-    inputSchema: { request_key: z.string(), config_revision: z.number().int().nonnegative(), commits: z.array(z.string()).min(1), node_refs: z.array(z.string()).optional() },
+    description: "Submit full committed Git object IDs for later integration, pinning the current configured revision. An idempotent request key identifies this exact ordered submission. Full-commit mode includes ancestry. Optional selection.paths applies only declared committed regular files from the merge base; requires one commit. selection.theorem explicitly declares a label mapped to those paths, never guesses a symbol. Creates pending evidence only; does not run Git/builds, bank work, or create research nodes/reviews.",
+    inputSchema: z.object({ request_key: z.string(), config_revision: z.number().int().nonnegative(), commits: z.array(z.string()).min(1), node_refs: z.array(z.string()).optional(), selection: z.object({ paths: z.array(z.string()).min(1), theorem: z.string().optional() }).strict().optional() }).strict(),
   }, async input => json(squad.integrationSubmit(input)));
   server.registerTool("squad_integration_attempt_get", {
     description: "Inspect a durable integration attempt, pinned target, submitted commits, actors, state and complete ordered evidence. No repository access or mutation.",
@@ -146,7 +151,7 @@ export async function runMcpServer(): Promise<void> {
         "consume them. Also returns your peers with their presence — active (mid-turn), idle " +
         "(paused but lease still good), or stale (lease expired; treat as gone) — so you can " +
         "tell a pause from a dead session without re-joining, plus your own renewed lease. " +
-        "Also returns pending_review_count/pending_reviews: the directed review requests still " +
+        "Also returns integration configuration, known pending/failed/verified submission counts, and local_work_visibility=unobserved. Also returns pending_review_count/pending_reviews: the directed review requests still " +
         "gating you, most urgent first, so you can work by priority instead of by chat order. " +
         "Pass wait_seconds to long-poll: the call blocks until a new message " +
         "arrives or the wait expires, which is how to hold a live conversation without busy-" +
