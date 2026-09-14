@@ -9,6 +9,8 @@ export interface IntegrationSubmission {
   commits: string[];
   /** Reserved stable references; submission does not create cards or reviews. */
   node_refs?: string[];
+  /** Exact committed artifact paths; theorem is an explicit declaration, not symbol lookup. */
+  selection?: { paths: string[]; theorem?: string };
 }
 export type IntegrationEvent =
   | { kind: "candidate"; commit: string; tree: string; base: string | null }
@@ -57,6 +59,7 @@ export interface IntegrationAttempt {
   config: IntegrationConfig;
   commits: string[];
   node_refs: string[];
+  selection?: IntegrationSubmission["selection"];
   submitted_by: string;
   created_ts: string;
   updated_ts: string;
@@ -168,16 +171,57 @@ export class IntegrationLedger {
     if (!Array.isArray(input.commits) || !input.commits.length)
       throw new Error("integration: at least one submitted commit is required");
     input.commits.forEach(oid);
+    if (new Set(input.commits.map((commit) => commit.length)).size !== 1)
+      throw new Error(
+        "integration: mixed Git object algorithms are not supported",
+      );
     if (new Set(input.commits).size !== input.commits.length)
       throw new Error("integration: duplicate submitted commits");
     const nodes = input.node_refs ?? [];
     if (!Array.isArray(nodes))
       throw new Error("integration: node_refs must be an array");
     nodes.forEach((node) => required(node, "node reference"));
+    if (input.selection !== undefined) {
+      const selection = input.selection;
+      if (
+        input.commits.length !== 1 ||
+        !Array.isArray(selection.paths) ||
+        !selection.paths.length
+      )
+        throw new Error(
+          "integration: artifact selection requires one commit and explicit paths",
+        );
+      for (const path of selection.paths) {
+        if (
+          typeof path !== "string" ||
+          !path ||
+          /[\\\0\r\n]/.test(path) ||
+          path.startsWith("/") ||
+          path.split("/").some((part) => !part || part === "." || part === "..")
+        )
+          throw new Error(
+            "integration: artifact paths must be exact repository-relative files without traversal",
+          );
+      }
+      if (new Set(selection.paths).size !== selection.paths.length)
+        throw new Error("integration: duplicate artifact paths");
+      if (selection.theorem !== undefined)
+        required(selection.theorem, "theorem declaration");
+    }
     const normalized = {
       config_revision: input.config_revision,
       commits: input.commits,
       node_refs: [...new Set(nodes)].sort(),
+      ...(input.selection
+        ? {
+            selection: {
+              paths: [...input.selection.paths].sort(),
+              ...(input.selection.theorem === undefined
+                ? {}
+                : { theorem: input.selection.theorem }),
+            },
+          }
+        : {}),
     };
     const payload = JSON.stringify(normalized);
     return this.transaction(() => {
@@ -255,6 +299,7 @@ export class IntegrationLedger {
       config: JSON.parse(config_json),
       commits: submission.commits,
       node_refs: submission.node_refs ?? [],
+      ...(submission.selection ? { selection: submission.selection } : {}),
       evidence: evidence.map(({ event_json, ...record }) => ({
         ...record,
         event: JSON.parse(event_json),

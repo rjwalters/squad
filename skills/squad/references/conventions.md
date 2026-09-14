@@ -90,3 +90,15 @@ with `squad_integration_attempt_get` or `squad_integration_attempt_list` (CLI
 retry; use a new key for changed work. Optional `node_refs` are reserved links,
 not created cards or independent review approval. Chat claims never change the
 verified integration state.
+
+Execute submitted work with `squad_bank({id})` (CLI `squad bank <id>`), then inspect
+`status` and evidence. Only `verified` means integrated, exact-build-verified and
+published; failed/pending returns need action. Full-commit mode includes ancestry.
+For selected files use immutable `selection.paths` (CLI repeated `--path`) with
+one full commit; an optional `selection.theorem` / `--theorem` declares a label's
+artifact mapping and requires explicit paths. Selected files must be committed
+and clean. No theorem parsing or implicit HEAD selection occurs. The executor
+preserves unrelated dirty source work, rebuilds after target races and recovers
+interrupted publication. Configure dependency installation in the build command.
+`squad_check.integration` distinguishes historical verified counts from known
+pending/failed submissions and always reports local work as `unobserved`.

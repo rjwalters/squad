@@ -1,3 +1,4 @@
+import { executeIntegration, type BankOptions } from "./integration-executor.js";
 import { IntegrationLedger, type IntegrationSubmission, type IntegrationFilter } from "./integration-ledger.js";
 import { resolveIntegration, validateIntegration, type IntegrationInput, type IntegrationState } from "./integration.js";
 import { automaticPersona, type AgentIdentity } from "./identity.js";
@@ -165,6 +166,7 @@ export interface JoinResult {
  * the pending-directed review counts — are directly testable.
  */
 export interface CheckSummary {
+  integration: ReturnType<Squad["integrationSummary"]>;
   peers: Member[];
   session_id: string | null;
   lease_expires_at: string | null;
@@ -733,6 +735,14 @@ export class Squad {
     const result = new IntegrationLedger(this.db, this.persona).submit(input);
     this.touch();
     return result;
+  }
+  async bank(id: string, options: BankOptions = {}) {
+    return executeIntegration(new IntegrationLedger(this.db, this.persona), id, () => this.integrationGet(), () => this.touch(), options);
+  }
+  integrationSummary() {
+    const counts = { pending: 0, failed: 0, verified: 0 };
+    for (const row of this.db.prepare("SELECT status, COUNT(*) AS count FROM integration_attempts GROUP BY status").all() as {status: keyof typeof counts; count: number}[]) counts[row.status] = row.count;
+    return { configuration: this.integrationGet(), known_submissions: counts, counts_scope: "all_configuration_revisions" as const, local_work_visibility: "unobserved" as const };
   }
   integrationAttempt(id: string) { return new IntegrationLedger(this.db, this.persona).get(id); }
   integrationAttempts(filter: IntegrationFilter = {}) { return new IntegrationLedger(this.db, this.persona).list(filter); }
@@ -1346,6 +1356,7 @@ export class Squad {
       peers: this.peers(),
       session_id: session?.session_id ?? null,
       lease_expires_at: session?.lease_expires_at ?? null,
+      integration: this.integrationSummary(),
       open_goals: this.goals().length,
       active_claims: this.claims().length,
       pending_review_count: pending.length,
