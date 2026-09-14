@@ -15,7 +15,7 @@ The canonical Squad skill is `skills/squad/SKILL.md`, with shared procedures in
 `.claude/skills/squad/` and `.agents/skills/squad/` in each target repository.
 Codex can discover `$squad` or select it from a natural-language request; Claude
 retains `/squad:join`, `/squad:goals`, `/squad:card`, `/squad:clear`, and
-`/squad:fanout`. All five legacy Codex `/squad-<workflow>` prompts remain available
+`/squad:fanout` and `/squad:steward`. All six legacy Codex `/squad-<workflow>` prompts remain available
 when global Codex installation is enabled. `--no-codex` skips global wiring,
 while still installing the repository-scoped Codex skill; MCP configuration is
 required to run the MCP workflows.
@@ -147,7 +147,7 @@ unrelated settings remain intact. `SQUAD_CLAUDE_PERSONA` and
 `SQUAD_CODEX_PERSONA` explicitly supply pins for fresh configuration.
 
 Global setup is separate: with confirmation (or `-y`), installation writes all
-five compatibility prompts and an MCP registration under `$CODEX_HOME`, defaulting
+six compatibility prompts and an MCP registration under `$CODEX_HOME`, defaulting
 to `~/.codex`, and optionally runs `npm link`. `--no-codex` skips all global
 setup; `--no-link` skips only linking. Repo-scoped Codex skills always install.
 Global wiring is shared by every consumer repository on the machine.
@@ -334,13 +334,14 @@ terminal 3:  squad tail                    # watch the room live
              squad send "@<joined-name> take exp_bound"
 ```
 
-All five workflows use the same references in both harnesses. Claude retains
+All six workflows use the same references in both harnesses. Claude retains
 `/squad:<workflow>`; Codex can use `$squad` with a natural-language request or the
 legacy `/squad-<workflow>` prompts when installed:
 
 - **join** — enter the room, introduce yourself, work the check/respond loop until stopped (agents go idle on their own after ~10 empty checks)
 - **goals** — show the shared board, or add goals from arguments
 - **card** — create, inspect, transition, or attach evidence to a Science Card
+- **steward** — inspect durable bank/review/map state and send bounded reminders as the configured steward
 - **fanout** — coordinate separately identified workers on distinct assignments
 - **clear** — wipe the room for a fresh session when the user explicitly requests a reset
 
@@ -541,3 +542,23 @@ A node edit during the build leaves an honest historical publication with
 `fresh: false`. Query its `attempt` for build/publication evidence and diagnostics.
 Publication records survive room export/import and are removed by room reset;
 reset does not delete remote files or preserve their ownership records.
+
+### Shared steward
+
+`/squad:steward` and the canonical `$squad` steward workflow use the same room
+records in Claude and Codex. `squad steward status` (MCP `squad_steward_status`)
+answers what is banked, what is independently reviewed, and whether the default
+outline matches the latest verified publication. It includes failed/pending
+attempts, exact build evidence, declared unbanked artifacts, advisory claim
+hygiene, and reminder history. Any peer may read it while the steward is offline.
+Unobserved local work and remote visibility remain explicitly unknown.
+
+`squad steward tick` (`squad_steward_tick`) requires the configured integration
+steward identity. It atomically commits at most five chat reminders and their
+ledger entries per pass; each condition/object/revision key can send at most
+three times, separated by at least 24 hours. Repeated or restarted invocations
+reuse that ledger. A new material/configuration revision can create new keys.
+No process scheduler, bank, review approval or claim cleanup runs automatically.
+Follow [the shared steward workflow](skills/squad/references/steward.md) to resume
+existing bank attempts, review request keys and outline publications explicitly.
+Schema 9 exports/imports/resets include the reminder ledger.

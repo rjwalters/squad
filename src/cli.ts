@@ -106,6 +106,7 @@ Human CLI usage:
                                Close out a request you claimed
   squad review cancel <id> [reason...]
                                Withdraw (requester) or decline (target)
+  squad steward status|tick       Inspect durable steward state or send bounded reminders
   squad outline render | status [path]  Deterministic shared outline / freshness
   squad outline publish <request-key> [path] [--build-timeout-ms N]
   squad node create <question...> | --json '<card fields, dependencies, artifacts>'
@@ -317,6 +318,18 @@ export async function runCli(argv: string[]): Promise<void> {
   const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
+    case "steward": {
+      if (rest.length !== 1 || !["status", "tick"].includes(rest[0]!))
+        throw new Error("usage: squad steward <status|tick>");
+      console.log(
+        JSON.stringify(
+          rest[0] === "status" ? squad.stewardStatus() : squad.stewardTick(),
+          null,
+          2,
+        ),
+      );
+      break;
+    }
     case "outline": {
       const [action, ...args] = rest;
       if (action === "render" && !args.length)
@@ -959,6 +972,7 @@ export function knownCommand(cmd: string | undefined): boolean {
   return (
     cmd !== undefined &&
     [
+      "steward",
       "outline",
       "node",
       "bank",

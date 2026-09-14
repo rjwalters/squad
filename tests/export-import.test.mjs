@@ -117,6 +117,7 @@ test("round-trip export -> import preserves row counts and content across every 
       "b".repeat(40),
       outlineAttempt.id,
     );
+  src.squad.stewardTick();
   src.squad.integrationUnset(1);
   const beforeAttempts = src.squad.integrationAttempts();
   const beforeIntegration = src.squad.integrationGet();

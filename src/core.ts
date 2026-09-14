@@ -850,13 +850,14 @@ export class Squad {
     const reviews = (
       this.db
         .prepare(
-          "SELECT receipt_json FROM node_reviews WHERE card_id=? ORDER BY rowid",
+          "SELECT request_key, receipt_json FROM node_reviews WHERE card_id=? ORDER BY rowid",
         )
-        .all(id) as { receipt_json: string }[]
+        .all(id) as { request_key: string; receipt_json: string }[]
     ).map((row) => {
       const receipt = JSON.parse(row.receipt_json);
       return {
         ...receipt,
+        request_key: row.request_key,
         current:
           receipt.revision === revision &&
           receipt.config_revision === configuration.revision &&
@@ -897,7 +898,7 @@ export class Squad {
         })),
       review_requests: this.db
         .prepare(
-          "SELECT n.*, r.status, r.target FROM node_review_requests n JOIN review_requests r ON r.id=n.request_id WHERE n.card_id=? ORDER BY n.request_id",
+          "SELECT n.*, r.status, r.target, r.expires_ts FROM node_review_requests n JOIN review_requests r ON r.id=n.request_id WHERE n.card_id=? ORDER BY n.request_id",
         )
         .all(id),
       review_status:
@@ -1231,6 +1232,219 @@ export class Squad {
           : {}),
       },
     });
+  }
+
+  /** Durable authoritative state, available to every identity without touching presence. */
+  stewardStatus() {
+    return this.nodeTransaction(() => {
+      const configuration = this.integrationGet();
+      const observedMs = Date.now();
+      const nodes = this.nodeList().map((node) =>
+        this.nodeGetSnapshot(node.id),
+      );
+      const attempts = (
+        this.db
+          .prepare(
+            "SELECT id FROM integration_attempts ORDER BY created_ts, id",
+          )
+          .all() as { id: string }[]
+      ).map(({ id }) => this.integrationAttempt(id));
+      const claims = (
+        this.db
+          .prepare("SELECT * FROM claims ORDER BY id")
+          .all() as unknown as {
+          id: number;
+          path: string;
+          persona: string;
+          created_ts: string;
+        }[]
+      ).map((claim, _, all) => ({
+        ...claim,
+        stale_advisory: observedMs - Date.parse(claim.created_ts) >= 86400000,
+        conflicting_claim_ids: all
+          .filter(
+            (other) =>
+              other.id !== claim.id &&
+              other.persona !== claim.persona &&
+              (other.path === claim.path ||
+                other.path.startsWith(claim.path.replace(/\/$/, "") + "/") ||
+                claim.path.startsWith(other.path.replace(/\/$/, "") + "/")),
+          )
+          .map((other) => other.id),
+      }));
+      return {
+        configuration,
+        steward: configuration.config?.steward ?? null,
+        nodes,
+        attempts,
+        pending_attempt_ids: attempts
+          .filter((a) => a.status === "pending")
+          .map((a) => a.id),
+        failed_attempt_ids: attempts
+          .filter((a) => a.status === "failed")
+          .map((a) => a.id),
+        unbanked_declared_node_ids: nodes
+          .filter((n) => !n.banked && n.artifacts.length > 0)
+          .map((n) => n.id),
+        outline: this.outlineStatus(),
+        claims,
+        claim_policy:
+          "advisory only; claims older than 24 hours may still be intentional" as const,
+        local_work_visibility: "unobserved" as const,
+        reminders: this.db
+          .prepare("SELECT * FROM steward_reminders ORDER BY condition_key")
+          .all(),
+        reminder_policy: {
+          cadence_ms: 86400000,
+          max_per_condition_revision: 3,
+          max_per_tick: 5,
+        },
+      };
+    });
+  }
+
+  /** One explicitly invoked pass. No scheduler, automatic banking or science approval. */
+  stewardTick() {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const status = this.stewardStatus();
+      if (!status.steward || status.steward !== this.persona)
+        throw new Error(
+          "steward: tick requires the configured steward identity",
+        );
+      const now = Date.now();
+      const conditions: {
+        condition: string;
+        object_id: string;
+        revision: string;
+        body: string;
+      }[] = [];
+      const add = (
+        condition: string,
+        object: string | number,
+        revision: string | number,
+        body: string,
+      ) =>
+        conditions.push({
+          condition,
+          object_id: String(object),
+          revision: `${status.configuration.revision}:${revision}`,
+          body,
+        });
+      for (const attempt of status.attempts) {
+        if (attempt.status !== "verified")
+          add(
+            `integration_${attempt.status}`,
+            attempt.id,
+            attempt.revision,
+            attempt.config_revision === status.configuration.revision
+              ? `@${attempt.submitted_by} integration ${attempt.id} is ${attempt.status}; inspect its durable evidence and resume this attempt with squad bank ${attempt.id}. Chat acknowledgment does not change integration state.`
+              : `@${attempt.submitted_by} integration ${attempt.id} belongs to retired configuration ${attempt.config_revision} and is ${attempt.status}. Preserve its evidence; inspect current configuration and explicitly submit still-needed work under the selected target. This old attempt cannot bank under the current configuration.`,
+          );
+      }
+      for (const node of status.nodes) {
+        if (
+          !node.banked &&
+          node.artifacts.length &&
+          !node.integrations.some(
+            (a) =>
+              a.current && a.current_configuration && a.status !== "verified",
+          )
+        )
+          add(
+            "unbanked_declared_work",
+            node.id,
+            node.revision ?? 0,
+            `Node ${node.id} revision ${node.revision} has declared unbanked artifacts. Use squad node submit ${node.id} ${node.revision} <request-key> ${status.configuration.revision}, then bank the returned attempt. Local work outside durable declarations is unobserved.`,
+          );
+        const open = node.review_requests.filter(
+          (r) =>
+            r.revision === node.revision &&
+            ["pending", "claimed"].includes(String(r.status)) &&
+            (r.expires_ts === null || Date.parse(String(r.expires_ts)) > now),
+        );
+        for (const request of open)
+          add(
+            "pending_review",
+            request.request_id as number,
+            node.revision ?? 0,
+            `@${request.target} review request ${request.request_id} for node ${node.id} revision ${node.revision} is ${request.status}. Inspect node history and inspect any recorded review request_key before resuming the existing request; an acknowledgment is not an independent review.`,
+          );
+        if (
+          node.review_status === "unreviewed" &&
+          !open.length &&
+          (node.banked || node.artifacts.length)
+        )
+          add(
+            "missing_review",
+            node.id,
+            node.revision ?? 0,
+            `Node ${node.id} revision ${node.revision} needs independent review. Use squad node claim ${node.id} ${node.revision} <independent-reviewer>; banking does not approve science.`,
+          );
+      }
+      if (!status.outline.fresh)
+        add(
+          "stale_outline",
+          status.outline.path,
+          status.outline.version,
+          "Shared outline differs from the latest recorded verified publication. Inspect squad outline status, resume a pending publication with its existing request key, or explicitly publish a new snapshot. Remote visibility is unobserved.",
+        );
+      for (const claim of status.claims)
+        if (claim.stale_advisory || claim.conflicting_claim_ids.length)
+          add(
+            "claim_hygiene",
+            claim.id,
+            claim.created_ts,
+            `@${claim.persona} claim ${claim.id} (${claim.path}) needs an advisory check: ${claim.stale_advisory ? "older than 24 hours" : "overlapping peer claim"}. Confirm ownership; only explicitly release claims that should end. No claim was removed.`,
+          );
+      const sent: { condition_key: string; message_id: number }[] = [];
+      for (const condition of conditions) {
+        if (sent.length >= status.reminder_policy.max_per_tick) break;
+        const key = JSON.stringify([
+          condition.condition,
+          condition.object_id,
+          condition.revision,
+        ]);
+        const prior = this.db
+          .prepare(
+            "SELECT sends, last_sent_ms FROM steward_reminders WHERE condition_key=?",
+          )
+          .get(key) as { sends: number; last_sent_ms: number } | undefined;
+        if (
+          prior &&
+          (prior.sends >= status.reminder_policy.max_per_condition_revision ||
+            now - prior.last_sent_ms < status.reminder_policy.cadence_ms)
+        )
+          continue;
+        const message = this.db
+          .prepare(
+            "INSERT INTO messages(sender, kind, body, ts) VALUES (?, 'chat', ?, ?)",
+          )
+          .run(this.persona, condition.body, new Date(now).toISOString());
+        const message_id = Number(message.lastInsertRowid);
+        this.db
+          .prepare(
+            `INSERT INTO steward_reminders(condition_key, condition, object_id, revision, sends, last_sent_ms, message_id, actor)
+          VALUES (?, ?, ?, ?, 1, ?, ?, ?) ON CONFLICT(condition_key) DO UPDATE SET sends=sends+1, last_sent_ms=excluded.last_sent_ms, message_id=excluded.message_id, actor=excluded.actor`,
+          )
+          .run(
+            key,
+            condition.condition,
+            condition.object_id,
+            condition.revision,
+            now,
+            message_id,
+            this.persona,
+          );
+        sent.push({ condition_key: key, message_id });
+      }
+      const result = { sent, status: this.stewardStatus() };
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   outlineRender() {

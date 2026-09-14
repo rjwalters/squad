@@ -10,7 +10,7 @@ const source = fileURLToPath(new URL("../", import.meta.url)).replace(
   /\/$/,
   "",
 );
-const workflows = ["join", "goals", "card", "clear", "fanout"];
+const workflows = ["join", "goals", "card", "clear", "fanout", "steward"];
 const localReceipt = ".claude/skills/squad/.install-local.json";
 const globalReceipt = ".squad-install.json";
 const metaPaths = [".claude", ".agents"].map(
