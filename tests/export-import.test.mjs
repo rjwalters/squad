@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { IntegrationLedger } from "../dist/integration-ledger.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -57,7 +59,16 @@ test("round-trip export -> import preserves row counts and content across every 
   src.squad.cardTransition(card.id, "DIVERGE", "moving forward");
   src.squad.cardEvidenceAdd(card.id, "literature", "some-paper", "supports it");
 
-  src.squad.integrationUnset(0); // Explicit disabled revision also travels with room history.
+  execFileSync("git", ["init", "-q", src.dir]);
+  execFileSync("git", ["-C", src.dir, "remote", "add", "origin", "https://example.org/research.git"]);
+  src.squad.integrationSet({ repository: src.dir, remote: "origin", branch: "main", build_command: "false", steward: "claude" }, 0);
+  const ledger = new IntegrationLedger(src.db, "executor");
+  const attempt = src.squad.integrationSubmit({ request_key: "export", config_revision: 1, commits: ["a".repeat(40)] });
+  const { token } = ledger.claim(attempt.id);
+  ledger.append(attempt.id, 0, { kind: "failure", stage: "build", message: "retained failure evidence" }, token);
+  ledger.release(attempt.id, token);
+  src.squad.integrationUnset(1);
+  const beforeAttempts = src.squad.integrationAttempts();
   const beforeIntegration = src.squad.integrationGet();
 
   const beforeCounts = {};
@@ -88,6 +99,7 @@ test("round-trip export -> import preserves row counts and content across every 
     assert.equal(n, beforeCounts[t], `${t} row count preserved after import`);
   }
   assert.deepEqual(dest.squad.integrationGet(), beforeIntegration);
+  assert.deepEqual(dest.squad.integrationAttempts(), beforeAttempts);
   const afterMessages = dest.db.prepare("SELECT * FROM messages ORDER BY id").all();
   assert.deepEqual(afterMessages, beforeMessages, "message content (including ids) preserved verbatim");
   const afterCards = dest.db.prepare("SELECT * FROM science_cards ORDER BY id").all();

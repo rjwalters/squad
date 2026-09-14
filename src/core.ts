@@ -1,3 +1,4 @@
+import { IntegrationLedger, type IntegrationSubmission, type IntegrationFilter } from "./integration-ledger.js";
 import { resolveIntegration, validateIntegration, type IntegrationInput, type IntegrationState } from "./integration.js";
 import { automaticPersona, type AgentIdentity } from "./identity.js";
 import { randomUUID } from "node:crypto";
@@ -727,6 +728,14 @@ export class Squad {
   get sessionId(): string | null {
     return this._sessionId;
   }
+
+  integrationSubmit(input: IntegrationSubmission) {
+    const result = new IntegrationLedger(this.db, this.persona).submit(input);
+    this.touch();
+    return result;
+  }
+  integrationAttempt(id: string) { return new IntegrationLedger(this.db, this.persona).get(id); }
+  integrationAttempts(filter: IntegrationFilter = {}) { return new IntegrationLedger(this.db, this.persona).list(filter); }
 
   integrationGet(): IntegrationState {
     const row = this.db.prepare("SELECT * FROM integration_configs ORDER BY revision DESC LIMIT 1").get() as

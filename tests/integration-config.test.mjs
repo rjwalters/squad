@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import { openDb } from "../dist/db.js";
+import { openDb, SCHEMA_VERSION } from "../dist/db.js";
 import { Squad } from "../dist/core.js";
 
 function fixture(t) {
@@ -170,5 +170,5 @@ test("opening a schema-3 room adds opt-in configuration without losing its exist
   const peer = new Squad(migrated, "bob");
   assert.equal(peer.integrationGet().config, null);
   assert.equal(peer.goals()[0].id, goal.id);
-  assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, 4);
+  assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
 });

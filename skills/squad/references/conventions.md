@@ -81,3 +81,12 @@ to read the shared target and revision. Explicit changes use
 validates the pinned repository and remote without mutating Git or running a build.
 Never infer the target from your working directory or claim configuration alone
 means work is banked. See the [integration configuration guide](https://github.com/rjwalters/squad/blob/main/docs/integration.md) for fields and CLI flags.
+
+Use `squad_integration_submit` to record an ordered selection of full Git commit
+IDs with the current `config_revision` and a stable `request_key`. This creates
+pending work; it does not execute banking. Inspect durable status and evidence
+with `squad_integration_attempt_get` or `squad_integration_attempt_list` (CLI
+`squad integration attempt` / `attempts`). Reuse the same key for an identical
+retry; use a new key for changed work. Optional `node_refs` are reserved links,
+not created cards or independent review approval. Chat claims never change the
+verified integration state.

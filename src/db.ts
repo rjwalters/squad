@@ -20,7 +20,7 @@ import { basename, dirname, join } from "node:path";
  * below -- this version number exists purely as an export/import
  * compatibility check, not a migration-ordering mechanism.
  */
-export const SCHEMA_VERSION = 4;
+export const SCHEMA_VERSION = 5;
 
 /**
  * Parses an env var as a non-negative minute count, falling back to
@@ -47,6 +47,9 @@ export function envMinutes(name: string, fallback: number): number {
  */
 export const ROOM_TABLES = [
   "integration_configs",
+  "integration_attempts",
+  "integration_events",
+  "integration_runners",
   "agent_identities",
   "messages",
   "goals",
@@ -64,6 +67,33 @@ export const ROOM_TABLES = [
 ] as const;
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS integration_attempts (
+  id TEXT PRIMARY KEY,
+  request_key TEXT NOT NULL UNIQUE,
+  submission_json TEXT NOT NULL,
+  config_revision INTEGER NOT NULL,
+  config_json TEXT NOT NULL,
+  submitted_by TEXT NOT NULL,
+  created_ts TEXT NOT NULL,
+  updated_ts TEXT NOT NULL,
+  revision INTEGER NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'failed', 'verified'))
+);
+CREATE TABLE IF NOT EXISTS integration_events (
+  attempt_id TEXT NOT NULL,
+  sequence INTEGER NOT NULL,
+  run_id TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  event_json TEXT NOT NULL,
+  PRIMARY KEY (attempt_id, sequence)
+);
+CREATE TABLE IF NOT EXISTS integration_runners (
+  attempt_id TEXT PRIMARY KEY,
+  token TEXT NOT NULL,
+  run_id TEXT NOT NULL,
+  expires_ms INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS integration_configs (
   revision INTEGER PRIMARY KEY AUTOINCREMENT,
   config_json TEXT,
