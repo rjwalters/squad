@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
-test("both installed skill bundles resolve all five workflow adapters across reinstalls", () => {
+test("both installed skill bundles resolve all six workflow adapters across reinstalls", () => {
   const scratch = mkdtempSync(join(tmpdir(), "squad-workflows-"));
   const repo = join(scratch, "repo");
   mkdirSync(repo);
@@ -17,7 +17,7 @@ test("both installed skill bundles resolve all five workflow adapters across rei
       for (const runtime of [".claude", ".agents"]) {
         const bundle = join(repo, runtime, "skills/squad");
         assert.equal(readFileSync(join(bundle, "SKILL.md"), "utf8"), readFileSync("skills/squad/SKILL.md", "utf8"));
-        for (const workflow of ["join", "goals", "card", "clear", "fanout"]) {
+        for (const workflow of ["join", "goals", "card", "clear", "fanout", "steward"]) {
           const reference = `references/${workflow}.md`;
           assert.equal(readFileSync(join(bundle, reference), "utf8"), readFileSync(`skills/squad/${reference}`, "utf8"));
           const adapter = runtime === ".claude" ? join(repo, ".claude/commands/squad", `${workflow}.md`) : join(scratch, ".codex/prompts", `squad-${workflow}.md`);

@@ -99,6 +99,7 @@ test(
         "card",
         "clear",
         "fanout",
+        "steward",
         "conventions",
       ]) {
         const canonical = readFileSync(
@@ -328,6 +329,27 @@ test(
       assert.deepEqual(
         JSON.parse(cli(["node", "show", String(node.id)])),
         await call(clients[1], "squad_node_get", { id: node.id }),
+      );
+      assert.deepEqual(
+        JSON.parse(cli(["steward", "status"])),
+        await call(clients[0], "squad_steward_status", {}),
+      );
+      for (const name of ["squad_steward_status", "squad_steward_tick"]) {
+        const bad = await clients[0].callTool({ name, arguments: { force: true } });
+        assert.equal(bad.isError, true);
+      }
+      const unauthorizedTick = await clients[1].callTool({
+        name: "squad_steward_tick", arguments: {},
+      });
+      assert.equal(unauthorizedTick.isError, true);
+      await call(clients[0], "squad_steward_tick", {});
+      const repeatedTick = JSON.parse(cli(["steward", "tick"], {
+        SQUAD_PERSONA: joined[0].persona,
+      }));
+      assert.equal(repeatedTick.sent.length, 0);
+      assert.deepEqual(
+        repeatedTick.status,
+        await call(clients[1], "squad_steward_status", {}),
       );
       const outline = await call(clients[0], "squad_outline_render", {});
       assert.deepEqual(JSON.parse(cli(["outline", "render"])), outline);

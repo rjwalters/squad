@@ -104,7 +104,7 @@ for (const format of ["sha1", "sha256"])
     const backup = join(root, "backup.db");
     const counts = await squad.exportRoom(backup);
     assert.equal(counts.outline_publications, 1);
-    assert.equal(SCHEMA_VERSION, 8);
+    assert.equal(SCHEMA_VERSION, 9);
     squad.clear();
     assert.equal(
       squad.outlineStatus("generated/outline.md").publications.length,

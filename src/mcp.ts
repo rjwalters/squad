@@ -33,7 +33,7 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.13.0" });
+  const server = new McpServer({ name: "squad", version: "0.14.0" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
@@ -103,6 +103,25 @@ export async function runMcpServer(): Promise<void> {
       )
       .optional(),
   };
+  server.registerTool(
+    "squad_steward_status",
+    {
+      description:
+        "Read authoritative bank/build evidence, independent reviews, outline freshness, pending and failed queues, claim hygiene and reminder history. Any identity; no room mutation. Local work and remote visibility remain unobserved.",
+      inputSchema: z.object({}).strict(),
+    },
+    async () => json(squad.stewardStatus()),
+  );
+  server.registerTool(
+    "squad_steward_tick",
+    {
+      description:
+        "Configured steward only: explicitly run one transactional reminder pass, at most five messages, 24-hour cadence and three sends per condition/object/revision. No automatic banking, review approval or claim deletion. Durable dedup survives restart.",
+      inputSchema: z.object({}).strict(),
+    },
+    async () => json(squad.stewardTick()),
+  );
+
   server.registerTool(
     "squad_outline_render",
     {

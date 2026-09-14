@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 
 const root = new URL("../", import.meta.url);
 const check = process.argv.includes("--check");
-for (const workflow of ["join", "goals", "card", "clear", "fanout"]) {
+for (const workflow of ["join", "goals", "card", "clear", "fanout", "steward"]) {
   const body = readFileSync(new URL(`skills/squad/references/${workflow}.md`, root), "utf8");
   const description = body.match(/^description: (.+)$/m)?.[1];
   if (!description) throw new Error(`Missing description for ${workflow}`);
