@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -132,4 +132,34 @@ test("a newly held claim never postpones an imminent idle heartbeat", () => {
   const due = decide({ ...base(), state, nowMs: now + 10, hasHeldClaims: true });
   assert.equal(due.sleepMs, 0);
   assert.equal(due.nextState.totalFired, 1);
+});
+
+
+test("real Claude hook latches operator stop before opening an unavailable room", (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-wake-unavailable-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const env = { ...process.env, SQUAD_DIR: dir, SQUAD_PERSONA: "worker" };
+  delete env.SQUAD_REENTRY_STOP;
+  writeFileSync(join(dir, "squad.db"), "not a sqlite database");
+  const invoke = (extra = {}) => spawnSync(process.execPath, [resolve("dist/reentry-hook.js")], {
+    input: "{}", encoding: "utf8", timeout: 3000, env: { ...env, ...extra },
+  });
+  const stopped = invoke({ SQUAD_REENTRY_STOP: "1" });
+  assert.equal(stopped.status, 0, stopped.stderr);
+  assert.equal(stopped.stdout, "");
+  const state = loadState(dir, "worker", "");
+  assert.equal(state.stoppedReason, "operator stop requested");
+  assert.equal(state.stopAnnounced, true);
+
+  rmSync(join(dir, "squad.db"));
+  const restored = spawnSync(process.execPath, ["--input-type=module", "-e",
+    'import { openDb } from "./dist/db.js"; import { Squad } from "./dist/core.js"; ' +
+    'const db = openDb(); new Squad(db, "peer").send("@worker please resume"); db.close();'],
+    { encoding: "utf8", env });
+  assert.equal(restored.status, 0, restored.stderr);
+  const retry = invoke();
+  assert.equal(retry.status, 0, retry.stderr);
+  assert.equal(retry.stdout, "", "recovering the room must not re-arm the stopped cycle");
+  assert.equal(loadState(dir, "worker", "").firstArmedAt, state.firstArmedAt);
+  assert.equal(loadState(dir, "worker", "").totalFired, 0);
 });

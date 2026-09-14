@@ -140,11 +140,13 @@ async function main(): Promise<void> {
     try {
       const { openDb } = await import("./db.js");
       const { Squad } = await import("./core.js");
-      const db = openDb();
-      try {
-        announceStopOnce(result.nextState, (s) => saveState(dir, persona, s),
-          (message) => { new Squad(db, persona).send(message, "system"); }, body, result.reason);
-      } finally { db.close(); }
+      announceStopOnce(result.nextState, (s) => saveState(dir, persona, s),
+        (message) => {
+          // The permanent-stop latch must survive even when opening the room fails.
+          const db = openDb();
+          try { new Squad(db, persona).send(message, "system"); }
+          finally { db.close(); }
+        }, body, result.reason);
     } catch { /* terminal stop reason above remains available */ }
   }
 
