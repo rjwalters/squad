@@ -33,7 +33,27 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.6.0" });
+  const server = new McpServer({ name: "squad", version: "0.7.0" });
+
+  server.registerTool("squad_integration_get", {
+    description: "Read the shared room integration target and revision; null means integration is not configured.",
+    inputSchema: {},
+  }, async () => { squad.touch(); return json(squad.integrationGet()); });
+  server.registerTool("squad_integration_set", {
+    description: "Explicitly configure the shared integration target. Requires the current revision (0 initially), validates local Git identity without mutation, and announces the change to peers. Does not run the build or bank work.",
+    inputSchema: {
+      repository: z.string(), remote: z.string(), branch: z.string(), build_command: z.string(), steward: z.string(),
+      expected_revision: z.number().int().nonnegative(),
+    },
+  }, async ({ expected_revision, ...config }) => json(squad.integrationSet(config, expected_revision)));
+  server.registerTool("squad_integration_unset", {
+    description: "Explicitly disable room integration, preserving configuration history and announcing the change. Requires the current revision.",
+    inputSchema: { expected_revision: z.number().int().nonnegative() },
+  }, async ({ expected_revision }) => json(squad.integrationUnset(expected_revision)));
+  server.registerTool("squad_integration_check", {
+    description: "Validate the configured local repository and pinned remote identity, without Git mutation, fetching, or executing a build. Fails explicitly if unconfigured or changed.",
+    inputSchema: {},
+  }, async () => { squad.touch(); return json(squad.integrationValidate()); });
 
   server.registerTool(
     "squad_join",

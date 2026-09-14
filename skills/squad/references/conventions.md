@@ -71,3 +71,13 @@ operator runs instead of `codex`, bounded by the same TTL/operator-stop and by
 an extra `SQUAD_REENTRY_MAX_ATTEMPTS` cap. It announces in the room when it
 gives up, so a Codex persona going quiet is not automatically a crash: check
 the chat log before assuming a teammate died.
+
+## Research integration configuration
+
+Integration is opt-in. Use `squad_integration_get` (CLI `squad integration show`)
+to read the shared target and revision. Explicit changes use
+`squad_integration_set` / `squad_integration_unset` with the current
+`expected_revision`; every change is announced. `squad_integration_check`
+validates the pinned repository and remote without mutating Git or running a build.
+Never infer the target from your working directory or claim configuration alone
+means work is banked. See `docs/integration.md` for fields and CLI flags.

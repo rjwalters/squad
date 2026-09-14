@@ -20,7 +20,7 @@ import { basename, dirname, join } from "node:path";
  * below -- this version number exists purely as an export/import
  * compatibility check, not a migration-ordering mechanism.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 4;
 
 /**
  * Parses an env var as a non-negative minute count, falling back to
@@ -46,6 +46,7 @@ export function envMinutes(name: string, fallback: number): number {
  * matters.
  */
 export const ROOM_TABLES = [
+  "integration_configs",
   "agent_identities",
   "messages",
   "goals",
@@ -63,6 +64,12 @@ export const ROOM_TABLES = [
 ] as const;
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS integration_configs (
+  revision INTEGER PRIMARY KEY AUTOINCREMENT,
+  config_json TEXT,
+  updated_by TEXT NOT NULL,
+  updated_ts TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS agent_identities (
   identity_id TEXT PRIMARY KEY,
   persona TEXT NOT NULL UNIQUE
