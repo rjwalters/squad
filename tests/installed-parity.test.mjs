@@ -174,6 +174,22 @@ test(
         "capability matrix must describe every registered MCP tool",
       );
 
+      assert.equal(spawnSync("git", ["-C", repo, "remote", "add", "origin", "https://example.org/research.git"]).status, 0);
+      const integration = await call(clients[0], "squad_integration_set", {
+        repository: repo, remote: "origin", branch: "research/integration",
+        build_command: "false", steward: joined[0].persona, expected_revision: 0,
+      });
+      assert.deepEqual(await call(clients[1], "squad_integration_get"), integration);
+      assert.deepEqual(JSON.parse(cli(["integration", "check"])), integration);
+      assert.deepEqual(await call(clients[1], "squad_integration_check"), integration);
+      const disabled = JSON.parse(cli(["integration", "unset", "--expected-revision", "1"]));
+      assert.deepEqual(await call(clients[0], "squad_integration_get"), disabled);
+      const reset = JSON.parse(cli(["integration", "set", "--expected-revision", "2",
+        "--repository", repo, "--remote", "origin", "--branch", "research/integration",
+        "--build-command", "false", "--steward", joined[1].persona]));
+      assert.deepEqual(await call(clients[1], "squad_integration_get"), reset);
+      await call(clients[1], "squad_integration_unset", { expected_revision: 3 });
+
       const goal = await call(clients[0], "squad_goal_add", {
         body: "verify installed collaboration",
       });

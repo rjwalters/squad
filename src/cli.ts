@@ -71,6 +71,7 @@ const HELP = `squad — local cross-agent chat room with shared goals
 With no subcommand (and stdin not a TTY) squad runs as a stdio MCP server.
 
 Human CLI usage:
+  squad integration show|check|set|unset (see docs/integration.md)
   squad send <text...>        Post a message to the room
   squad read [-n N]           Show the last N messages (default 30; stateless)
   squad tail                  Follow the room live (Ctrl-C to stop)
@@ -306,6 +307,34 @@ export async function runCli(argv: string[]): Promise<void> {
   const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
+    case "integration": {
+      const [action = "show", ...args] = rest;
+      if (action === "show" || action === "check") {
+        if (args.length) throw new Error("usage: squad integration show|check");
+        console.log(JSON.stringify(action === "show" ? squad.integrationGet() : squad.integrationValidate(), null, 2));
+        break;
+      }
+      const flags: Record<string, string> = {};
+      const allowed = action === "set" ? ["repository", "remote", "branch", "build-command", "steward", "expected-revision"] : ["expected-revision"];
+      if (!["set", "unset"].includes(action)) throw new Error("usage: squad integration show|check|set|unset");
+      for (let i = 0; i < args.length; i += 2) {
+        const key = args[i]!.replace(/^--/, "");
+        if (!args[i]!.startsWith("--") || !allowed.includes(key) || key in flags || args[i + 1] === undefined) {
+          throw new Error(`integration: invalid or duplicate flag ${args[i]}`);
+        }
+        flags[key] = args[i + 1]!;
+      }
+      if (allowed.some(key => !(key in flags)) || !/^(0|[1-9][0-9]*)$/.test(flags["expected-revision"]!)) {
+        throw new Error(`integration: required flags: ${allowed.map(key => "--" + key).join(" ")}; expected-revision must be a non-negative integer`);
+      }
+      const revision = Number(flags["expected-revision"]);
+      const state = action === "unset" ? squad.integrationUnset(revision) : squad.integrationSet({
+        repository: flags.repository!, remote: flags.remote!, branch: flags.branch!,
+        build_command: flags["build-command"]!, steward: flags.steward!,
+      }, revision);
+      console.log(JSON.stringify(state, null, 2));
+      break;
+    }
     case "send": {
       const body = rest.join(" ").trim();
       if (!body) throw new Error("usage: squad send <text...>");
@@ -759,6 +788,7 @@ export function knownCommand(cmd: string | undefined): boolean {
   return (
     cmd !== undefined &&
     [
+      "integration",
       "send",
       "read",
       "tail",

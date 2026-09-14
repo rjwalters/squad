@@ -1,3 +1,4 @@
+import { resolveIntegration, validateIntegration, type IntegrationInput, type IntegrationState } from "./integration.js";
 import { automaticPersona, type AgentIdentity } from "./identity.js";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, backup } from "node:sqlite";
@@ -725,6 +726,51 @@ export class Squad {
   /** This connection's session id, or null before its first operation. */
   get sessionId(): string | null {
     return this._sessionId;
+  }
+
+  integrationGet(): IntegrationState {
+    const row = this.db.prepare("SELECT * FROM integration_configs ORDER BY revision DESC LIMIT 1").get() as
+      { revision: number; config_json: string | null; updated_by: string; updated_ts: string } | undefined;
+    return row ? { revision: row.revision, config: row.config_json === null ? null : JSON.parse(row.config_json),
+      updated_by: row.updated_by, updated_ts: row.updated_ts }
+      : { revision: 0, config: null, updated_by: null, updated_ts: null };
+  }
+
+  integrationSet(input: IntegrationInput, expectedRevision: number): IntegrationState {
+    return this.writeIntegration(resolveIntegration(input), expectedRevision);
+  }
+
+  integrationUnset(expectedRevision: number): IntegrationState {
+    return this.writeIntegration(null, expectedRevision);
+  }
+
+  integrationValidate(): IntegrationState {
+    const state = this.integrationGet();
+    if (!state.config) throw new Error("integration: room is not configured");
+    validateIntegration(state.config);
+    return state;
+  }
+
+  private writeIntegration(config: IntegrationState["config"], expectedRevision: number): IntegrationState {
+    if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) {
+      throw new Error("integration: expected_revision must be a non-negative integer");
+    }
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const current = this.integrationGet();
+      if (current.revision !== expectedRevision) throw new Error(`integration: revision changed (expected ${expectedRevision}, current ${current.revision}); read configuration again`);
+      this.db.prepare("INSERT INTO integration_configs (config_json, updated_by, updated_ts) VALUES (?, ?, ?)")
+        .run(config === null ? null : JSON.stringify(config), this.persona, new Date().toISOString());
+      const state = this.integrationGet();
+      this.send(`${this.persona} changed integration configuration to revision ${state.revision}: ${config
+        ? `repository=${config.repository}, remote=${config.remote}, branch=${config.branch}, steward=${config.steward}; full configuration available via integration show`
+        : "disabled"}`, "system");
+      this.db.exec("COMMIT");
+      return state;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** Rename this connection's identity (used by persona autofill on join). */

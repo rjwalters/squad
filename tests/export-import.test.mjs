@@ -57,6 +57,9 @@ test("round-trip export -> import preserves row counts and content across every 
   src.squad.cardTransition(card.id, "DIVERGE", "moving forward");
   src.squad.cardEvidenceAdd(card.id, "literature", "some-paper", "supports it");
 
+  src.squad.integrationUnset(0); // Explicit disabled revision also travels with room history.
+  const beforeIntegration = src.squad.integrationGet();
+
   const beforeCounts = {};
   for (const t of ROOM_TABLES) {
     beforeCounts[t] = src.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
@@ -84,6 +87,7 @@ test("round-trip export -> import preserves row counts and content across every 
     const n = dest.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n;
     assert.equal(n, beforeCounts[t], `${t} row count preserved after import`);
   }
+  assert.deepEqual(dest.squad.integrationGet(), beforeIntegration);
   const afterMessages = dest.db.prepare("SELECT * FROM messages ORDER BY id").all();
   assert.deepEqual(afterMessages, beforeMessages, "message content (including ids) preserved verbatim");
   const afterCards = dest.db.prepare("SELECT * FROM science_cards ORDER BY id").all();

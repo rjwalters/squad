@@ -491,3 +491,7 @@ watched surface changed without either a `VERSION` bump or the marker.
 ## License
 
 MIT
+
+Research rooms can opt into a [shared integration target](docs/integration.md).
+Its repository, remote, branch, build command and steward are revisioned in the
+room; setting the target does not yet integrate or build work.
