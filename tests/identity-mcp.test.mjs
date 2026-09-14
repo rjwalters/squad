@@ -57,7 +57,10 @@ test("real MCP sessions and CLI calls retain server-stamped identities", async (
       assert.equal(result.status, 0, result.stderr);
     }
     const history = (await call(b, "squad_check")).messages;
-    assert.deepEqual(history.filter(m => m.body.startsWith("cli ")).map(m => m.body), ["cli one", "cli two"]);
+    assert.deepEqual(
+      history.filter((m) => m.body.startsWith("cli ")).map((m) => m.body),
+      ["cli one", "cli two"],
+    );
     assert.equal(
       history.filter((m) => m.body.startsWith("cli ")).every((m) => m.sender === first.persona),
       true,
