@@ -1,3 +1,4 @@
+import { automaticPersona, type AgentIdentity } from "./identity.js";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, backup } from "node:sqlite";
 import { existsSync } from "node:fs";
@@ -668,7 +669,7 @@ const SESSION_RETENTION_HOURS = 24;
  *
  * `-` only, deliberately. Issue #50 also floated `codex/sol3`, but `/` is
  * outside the charset the MCP `persona` argument validates against
- * (`^[a-z0-9][a-z0-9_-]{0,31}$`), so such a request is rejected by input
+ * (`^[a-z0-9][a-z0-9_-]{0,127}$`), so such a request is rejected by input
  * validation before any refinement logic sees it — and a persona string is
  * interpolated into chat announcements, claim listings, and CLI output, where
  * a path-like separator reads as a path. `_` is left out for the same reason
@@ -700,8 +701,17 @@ export class Squad {
 
   constructor(
     private db: DatabaseSync,
-    private _persona: string,
-  ) {}
+    persona?: string,
+    identity: AgentIdentity = {},
+  ) {
+    this.identityId = persona === undefined ? (identity.sessionId ?? randomUUID()) : null;
+    this._persona = persona ?? automaticPersona(db, { ...identity, sessionId: this.identityId! });
+  }
+
+  private _persona: string;
+
+  /** Durable logical identity token; distinct from this connection's presence sessionId. */
+  readonly identityId: string | null;
 
   get persona(): string {
     return this._persona;

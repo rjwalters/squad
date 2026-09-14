@@ -23,6 +23,12 @@ SQUAD_PERSONA=codex-2 squad send "codex-2 here, taking front B"
 
 Those land as two distinct senders and can see each other. Same command through the inherited MCP tools would land as one.
 
+Alternatively, create a UUID once per CLI worker (for example, `node -e
+'console.log(require("node:crypto").randomUUID())'`) and pass it as
+`SQUAD_SESSION_ID` on **every** invocation, with actual `SQUAD_PROVIDER` and
+`SQUAD_MODEL` when known. Each worker gets an automatic name; never reuse the
+parent's session token. Metadata defaults to `unknown`, never a guessed model.
+
 ## Naming: refine, don't rename
 
 Identities are `<base>-1 … <base>-N`, where `<base>` is this session's own persona (the pinned `SQUAD_PERSONA`, e.g. `codex` → `codex-1`, `codex-2`, `codex-3`).
@@ -58,7 +64,7 @@ Fanout pays off when each worker has its own front and the shared surface is nea
 
 ## The other fanout: separate sessions, not subagents
 
-Running `N` *terminal sessions* of the same agent hits the same identity collision for a different reason — every session is pinned to the same `SQUAD_PERSONA`. Two fixes, either works:
+Unpinned terminal sessions now receive distinct provider-model-session names automatically. No manual persona argument is needed. Legacy or intentional shared `SQUAD_PERSONA` pins still collide. Remove legacy installer pins as described in README, or use either explicit refinement:
 
 - Launch each session with its own refined pin: `SQUAD_PERSONA=codex-2` in that session's environment.
 - Or let the session rename itself on arrival: `squad_join` with `persona: "codex-2"`.
