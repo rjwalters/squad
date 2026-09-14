@@ -30,8 +30,8 @@ import {
 import {
   DEFAULT_REENTRY_MAX_ATTEMPTS,
   DEFAULT_REENTRY_TTL_MINUTES,
-  mentionsPersona,
 } from "./reentry.js";
+import { observeWakeWork } from "./reentry-room.js";
 import { loadState, operatorStopped, saveState } from "./reentry-state.js";
 
 export const CODEX_REENTRY_USAGE =
@@ -307,14 +307,8 @@ export async function runCodexReentry(rest: string[]): Promise<SuperviseSummary>
       }
     },
     operatorStopped: () => operatorStopped(dir, persona),
-    hasDirectedWork: async () => {
-      // Peek, never consume: these messages must still be there for the
-      // persona's own squad_check once it re-enters. Same v1 heuristic as
-      // the Claude Code Stop hook.
-      return openRoom()
-        .check({ peek: true })
-        .some((m) => mentionsPersona(m.body, persona));
-    },
+    hasDirectedWork: async () => observeWakeWork(openRoom(), persona).directed,
+    hasHeldClaims: async () => observeWakeWork(openRoom(), persona).held,
     announce: (body) => {
       try {
         openRoom().send(body, "system");

@@ -50,7 +50,7 @@ export function loadState(squadDir: string, persona: string, nowIso: string): Re
       (parsed.nextFireAt === null || typeof parsed.nextFireAt === "string") &&
       (parsed.lastFiredAt === null || typeof parsed.lastFiredAt === "string")
     ) {
-      return parsed as ReentryState;
+      return { ...parsed, totalFired: parsed.totalFired ?? parsed.attempt } as ReentryState;
     }
   } catch {
     // Missing or corrupt — start a fresh arm cycle below.
@@ -61,4 +61,16 @@ export function loadState(squadDir: string, persona: string, nowIso: string): Re
 export function saveState(squadDir: string, persona: string, state: ReentryState): void {
   mkdirSync(join(squadDir, "reentry"), { recursive: true });
   writeFileSync(stateFile(squadDir, persona), JSON.stringify(state, null, 2) + "\n");
+}
+
+/** Persist before publishing: at most one attempt per arm cycle, including retries.
+ * If the room write fails, the adapter's terminal remains the stop signal.
+ */
+export function announceStopOnce(state: ReentryState, save: (s: ReentryState) => void,
+  announce: (body: string) => void, body: string, reason = body): ReentryState {
+  if (state.stopAnnounced) return state;
+  const next = { ...state, stopAnnounced: true, stoppedReason: reason };
+  save(next);
+  announce(body);
+  return next;
 }
