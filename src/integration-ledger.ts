@@ -184,6 +184,13 @@ export class IntegrationLedger {
     if (!Array.isArray(nodes))
       throw new Error("integration: node_refs must be an array");
     nodes.forEach((node) => required(node, "node reference"));
+    if (input.node_revisions !== undefined) {
+      const bindings = input.node_revisions;
+      if (!bindings || typeof bindings !== "object" || Array.isArray(bindings)
+        || JSON.stringify(Object.keys(bindings).sort()) !== JSON.stringify([...new Set(nodes)].sort())
+        || Object.values(bindings).some(value => !Number.isSafeInteger(value) || value < 1))
+        throw new Error("integration: node_revisions must bind exactly the node_refs to positive safe integer revisions");
+    }
     if (input.selection !== undefined) {
       const selection = input.selection;
       if (

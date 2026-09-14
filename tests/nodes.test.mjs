@@ -186,6 +186,26 @@ test("node snapshots and bindings round-trip; clear removes the graph and proven
       }),
     /node reference/,
   );
+  for (const invalid of [
+    { node_refs: [], node_revisions: { [node.id]: 1 } },
+    { node_refs: [String(node.id)], node_revisions: { [node.id]: 0 } },
+    {
+      node_refs: [String(node.id)],
+      node_revisions: { [node.id]: 1, 999999: 1 },
+    },
+  ]) {
+    assert.throws(
+      () =>
+        squad.integrationSubmit({
+          request_key: "invalid-revision-declaration",
+          config_revision: 1,
+          commits: ["a".repeat(40)],
+          ...invalid,
+        }),
+      /node_revisions/,
+    );
+  }
+  assert.equal(squad.integrationAttempts().length, 2);
   const before = squad.nodeGet(node.id),
     file = join(root, "backup.db");
   await squad.exportRoom(file);
