@@ -21,6 +21,7 @@ export interface BankOptions {
  * This is intentionally absent from CLI/MCP inputs. */
 export interface PreparedIntegrationSource {
   repository: string;
+  expected_target_blobs?: Record<string, string | null>;
   config_revision: number;
   commits: string[];
 }
@@ -387,6 +388,20 @@ export async function executeIntegration(
       guard();
       stage = "integration";
       const base = await fetchTarget();
+      for (const [path, expected] of Object.entries(
+        prepared?.expected_target_blobs ?? {},
+      )) {
+        const entry = base
+          ? await value(workspace, ["ls-tree", base, "--", path])
+          : "";
+        const actual = entry
+          ? /^(100644) blob ([0-9a-f]+)\t/.exec(entry)?.[2]
+          : null;
+        if (actual !== expected)
+          throw new Error(
+            "outline: target generated path changed; refusing replacement",
+          );
+      }
       if (base) await git(workspace, ["checkout", "--detach", "-f", base]);
       else
         await git(workspace, [

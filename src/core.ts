@@ -1,3 +1,10 @@
+import {
+  renderOutline,
+  publishOutline,
+  outlinePublications,
+  validateOutlinePath,
+  type OutlinePublishOptions,
+} from "./outline.js";
 import { rebuildNode } from "./node-review-executor.js";
 import { nodeMetadata, nodeRevisions, recordNodeRevision, validateNodeMetadata, writeNodeMetadata, bindNodes, type NodeMetadata } from "./nodes.js";
 import { executeIntegration, type BankOptions } from "./integration-executor.js";
@@ -1224,6 +1231,46 @@ export class Squad {
           : {}),
       },
     });
+  }
+
+  outlineRender() {
+    return this.nodeTransaction(() =>
+      renderOutline(
+        this.integrationGet(),
+        this.nodeList().map((n) => this.nodeGetSnapshot(n.id)),
+      ),
+    );
+  }
+  outlineStatus(path = "SQUAD_OUTLINE.md") {
+    validateOutlinePath(path);
+    return this.nodeTransaction(() => {
+      const snapshot = this.outlineRender();
+      const publications = outlinePublications(this.db, this.persona, path);
+      const latest = [...publications]
+        .reverse()
+        .find(
+          (p) =>
+            p.attempt.status === "verified" &&
+            p.config_revision === this.integrationGet().revision,
+        );
+      return {
+        path,
+        version: snapshot.version,
+        fresh: latest?.version === snapshot.version,
+        remote_visibility: "unobserved" as const,
+        publications,
+      };
+    });
+  }
+  async outlinePublish(options: OutlinePublishOptions) {
+    return publishOutline(
+      this.db,
+      this.persona,
+      () => this.outlineRender(),
+      () => this.integrationGet(),
+      () => this.touch(),
+      options,
+    );
   }
 
   integrationSubmit(input: IntegrationSubmission) {

@@ -21,7 +21,7 @@ import { basename, dirname, join } from "node:path";
  * below -- this version number exists purely as an export/import
  * compatibility check, not a migration-ordering mechanism.
  */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 /**
  * Parses an env var as a non-negative minute count, falling back to
@@ -47,6 +47,7 @@ export function envMinutes(name: string, fallback: number): number {
  * matters.
  */
 export const ROOM_TABLES = [
+  "outline_publications",
   "node_review_requests",
   "node_reviews",
   "node_review_builds",
@@ -74,6 +75,18 @@ export const ROOM_TABLES = [
 ] as const;
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS outline_publications (
+  request_key TEXT PRIMARY KEY,
+  path TEXT NOT NULL,
+  version TEXT NOT NULL,
+  content TEXT NOT NULL,
+  config_revision INTEGER NOT NULL,
+  base_commit TEXT NOT NULL,
+  expected_blob TEXT,
+  source_commit TEXT NOT NULL,
+  attempt_id TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS node_review_requests (
   request_id INTEGER PRIMARY KEY,
   card_id INTEGER NOT NULL,
