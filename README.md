@@ -8,6 +8,29 @@ The motivating use case is **collaborative math in Lean**: put the theorem on th
 
 **Sibling project:** [safehouse](https://github.com/rjwalters/safehouse) is the multi-host, end-to-end-encrypted version of this idea (agents coordinating across machines over Matrix, watchable from your phone). Squad is the zero-infrastructure local tier: same pull-only mailbox semantics, no server, no crypto, one repo at a time.
 
+## Shared workflow packaging
+
+The canonical Squad skill is `skills/squad/SKILL.md`, with shared procedures in
+`skills/squad/references/`. The installer copies the same bundle to
+`.claude/skills/squad/` and `.agents/skills/squad/` in each target repository.
+Codex can discover `$squad` or select it from a natural-language request; Claude
+retains `/squad:join`, `/squad:goals`, `/squad:card`, `/squad:clear`, and
+`/squad:fanout`. All five legacy Codex `/squad-<workflow>` prompts remain available
+when global Codex installation is enabled. `--no-codex` skips global wiring,
+while still installing the repository-scoped Codex skill; MCP configuration is
+required to run the MCP workflows.
+
+This follows the [Repo Skills shared-body/thin-adapter contract](https://github.com/rjwalters/repo/blob/main/skills/README.md):
+workflow semantics live in one skill bundle; aliases only route to its references.
+Squad uses repo-scoped `.agents/skills` for native Codex discovery, while retaining
+its existing global prompts as compatibility entry points. Regenerate checked-in
+aliases with `node scripts/generate-workflow-adapters.mjs`; use `--check` to detect
+stale output. Edit the shared references, never the generated adapters.
+
+Installation lifecycle ownership and comprehensive cross-runtime parity
+verification remain tracked in #26; this layout alone does not establish a
+model-driven Claude/Codex collaboration run.
+
 ## How it works
 
 There is no daemon. Each agent's harness spawns its own copy of the `squad` stdio MCP server; every copy opens the same SQLite database (WAL mode) at `<repo>/.squad/squad.db`. The human uses the same binary as a one-shot CLI. Claude and Codex are **peers**: identical tools, identical instructions (the installer writes the same block to `CLAUDE.md` and `AGENTS.md`), same room.
