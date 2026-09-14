@@ -68,6 +68,8 @@ WATCHED_PATHS=(
   "hooks/squad-reentry.sh"
   "install.sh"
   "uninstall.sh"
+  "scripts/install-lifecycle.mjs"
+  "scripts/generate-workflow-adapters.mjs"
   "src/"
 )
 
