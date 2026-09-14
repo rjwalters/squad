@@ -60,9 +60,70 @@ unset takes `expected_revision`. Both CLI and MCP return the same JSON state.
 
 Configuration history lives in the room's `integration_configs` table. Opening an
 older room adds the empty table without changing existing identities or other
-room state. Schema version 4 exports include every configuration revision;
+room state. Schema version 5 exports include every configuration revision;
 imports require a matching schema version and an empty destination. Open older
 rooms with this release and re-export to migrate older exports. `squad clear`
 resets integration configuration and its history along with the rest of the room;
 `squad nuke` removes the room directory. Export first when history must survive.
 Neither operation changes the configured Git repository.
+
+## Durable submissions and evidence
+
+Submit exact full lowercase Git commit IDs (40 or 64 hexadecimal characters), in
+integration order, against the current configured revision:
+
+```sh
+squad integration submit --request-key lemma-17-v1 --config-revision 1 \
+  --commit <full-commit-id> --node lemma-17
+squad integration attempt <attempt-id>
+squad integration attempts --status pending --limit 50
+```
+
+Repeat `--commit` for multiple commits and `--node` for optional stable research
+node references. Node references are reserved links, not evidence that a node,
+Science Card or independent review exists. Submission validates ID syntax only;
+the banking executor must prove the commits exist in the configured repository.
+Submission never runs Git, executes the build, publishes work or marks it banked.
+Queries report known submissions, not unobserved local edits.
+
+MCP equivalents are `squad_integration_submit` (`request_key`, `config_revision`,
+`commits`, optional `node_refs`), `squad_integration_attempt_get` (`id`), and
+`squad_integration_attempt_list` (optional `status`, `limit`). Status is `pending`,
+`failed` or `verified`; list limits are 1–1000, default 50, newest first.
+
+A room-wide request key identifies one ordered commit selection, node-reference
+set and configuration revision. Identical retries return the same attempt even
+after configuration changes; conflicting reuse fails. Each attempt pins its full
+configuration snapshot, stable ID, submitting actor and timestamps. Configuration
+changes never retarget it. Queries remain available when its repository is missing.
+A chat message saying “banked” has no effect on integration state.
+
+Only the internal trusted executor API can append evidence or finalize a verified
+record. It must supply the exact candidate commit/tree/base, a successful build of
+that commit/tree using the configured command with observed clean tracked inputs,
+and a subsequent publication intent and receipt for the configured remote and
+branch. A receipt observing a later descendant additionally requires the executor
+to prove candidate ancestry. This ledger checks evidence consistency, not Git or
+build truth; the executor owns those observations. No CLI or MCP operation accepts
+claimed build/publication success. Banking and independent node review are separate.
+
+Every evidence event records its actor, run identity, sequence and timestamp.
+Build output is stored in the room (first 65,536 JavaScript string characters,
+with an explicit truncation flag), not only at an ephemeral logfile path. Keep
+secrets out of build output. Failed attempts retain their diagnostics. An explicit
+retry starts a new run and requires fresh verification evidence; an interrupted
+pending run can resume its existing evidence after safely recovering publication.
+Verified records are immutable, and finalization retries return the original receipt.
+
+Executor claims use an opaque token, expiry and revision checks to fence concurrent
+writers. A takeover after expiry preserves the interrupted run identity; renewals
+must happen during long builds. Claims do not fence external Git pushes, so the
+executor must also use non-forcing remote updates and reconcile publication before
+retrying. Claim tokens are excluded from public attempt queries.
+
+The `integration_attempts`, `integration_events` and `integration_runners` tables
+travel with configuration in schema-5 exports and are covered by explicit room
+reset. Opening an older room adds empty ledger tables without changing existing
+room state. Exported active claims retain their expiry; a restored room can reclaim
+them after expiry. Do not run two restored copies as concurrent executors against
+the same target. Attempts do not contain or fabricate independent-review evidence.

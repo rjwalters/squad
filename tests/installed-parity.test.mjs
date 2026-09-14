@@ -182,6 +182,22 @@ test(
       assert.deepEqual(await call(clients[1], "squad_integration_get"), integration);
       assert.deepEqual(JSON.parse(cli(["integration", "check"])), integration);
       assert.deepEqual(await call(clients[1], "squad_integration_check"), integration);
+      const submission = { request_key: "installed-parity", config_revision: 1, commits: ["a".repeat(40)], node_refs: ["future-node"] };
+      const attempt = await call(clients[0], "squad_integration_submit", submission);
+      assert.equal(attempt.status, "pending");
+      assert.equal(attempt.submitted_by, joined[0].persona);
+      assert.deepEqual(await call(clients[1], "squad_integration_attempt_get", { id: attempt.id }), attempt);
+      assert.deepEqual(JSON.parse(cli(["integration", "attempt", attempt.id])), attempt);
+      assert.deepEqual(JSON.parse(cli(["integration", "submit", "--request-key", submission.request_key,
+        "--config-revision", "1", "--commit", submission.commits[0], "--node", "future-node"])), attempt);
+      assert.deepEqual(await call(clients[1], "squad_integration_attempt_list", { status: "pending" }), [attempt]);
+      assert.deepEqual(JSON.parse(cli(["integration", "attempts", "--status", "verified"])), []);
+      const secondAttempt = JSON.parse(cli(["integration", "submit", "--request-key", "cli-submission",
+        "--config-revision", "1", "--commit", "b".repeat(40)]));
+      assert.deepEqual(await call(clients[0], "squad_integration_attempt_get", { id: secondAttempt.id }), secondAttempt);
+      assert.equal((await call(clients[1], "squad_integration_attempt_list", { limit: 1 })).length, 1);
+      const unsupportedVerify = await clients[0].callTool({ name: "squad_integration_verify", arguments: { id: attempt.id } });
+      assert.equal(unsupportedVerify.isError, true);
       const disabled = JSON.parse(cli(["integration", "unset", "--expected-revision", "1"]));
       assert.deepEqual(await call(clients[0], "squad_integration_get"), disabled);
       const reset = JSON.parse(cli(["integration", "set", "--expected-revision", "2",

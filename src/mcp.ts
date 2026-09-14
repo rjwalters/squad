@@ -33,7 +33,20 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.7.0" });
+  const server = new McpServer({ name: "squad", version: "0.8.0" });
+
+  server.registerTool("squad_integration_submit", {
+    description: "Submit full committed Git object IDs for later integration, pinning the current configured revision. An idempotent request key identifies this exact ordered submission. Creates pending evidence only; does not run Git/builds, bank work, or create research nodes/reviews.",
+    inputSchema: { request_key: z.string(), config_revision: z.number().int().nonnegative(), commits: z.array(z.string()).min(1), node_refs: z.array(z.string()).optional() },
+  }, async input => json(squad.integrationSubmit(input)));
+  server.registerTool("squad_integration_attempt_get", {
+    description: "Inspect a durable integration attempt, pinned target, submitted commits, actors, state and complete ordered evidence. No repository access or mutation.",
+    inputSchema: { id: z.string() },
+  }, async ({ id }) => { squad.touch(); return json(squad.integrationAttempt(id)); });
+  server.registerTool("squad_integration_attempt_list", {
+    description: "List durable submitted integration attempts, newest first, optionally by pending/failed/verified status. Reports submitted work only, not unseen local edits. Does not confer review approval.",
+    inputSchema: { status: z.enum(["pending", "failed", "verified"]).optional(), limit: z.number().int().min(1).max(1000).optional() },
+  }, async input => { squad.touch(); return json(squad.integrationAttempts(input)); });
 
   server.registerTool("squad_integration_get", {
     description: "Read the shared room integration target and revision; null means integration is not configured.",
