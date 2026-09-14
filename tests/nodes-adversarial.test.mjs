@@ -223,3 +223,178 @@ test("changing or disabling the room target preserves history without presenting
   assert.equal(squad.integrationAttempt(attempt.id).config.branch, "main");
   assert.equal(squad.integrationAttempt(attempt.id).status, "verified");
 });
+
+// Invoke an actual writer connection between two reader statements. The hook
+// controls scheduling only; all reads, writes and WAL snapshots are real SQLite.
+function interleaveRead(db, sql, method, matches, write) {
+  const prepare = db.prepare.bind(db);
+  let fired = false;
+  db.prepare = (query, ...args) => {
+    const statement = prepare(query, ...args);
+    if (query === sql) {
+      const read = statement[method].bind(statement);
+      statement[method] = (...values) => {
+        if (!fired && matches(values)) {
+          fired = true;
+          write();
+        }
+        return read(...values);
+      };
+    }
+    return statement;
+  };
+  return () => {
+    db.prepare = prepare;
+    assert.equal(
+      fired,
+      true,
+      "the competing connection committed during the read",
+    );
+  };
+}
+
+test("nodeGet reads one WAL snapshot across concurrent content and target changes", async (t) => {
+  const { db, squad, create } = fixture(t);
+  const node = create();
+  const attempt = squad.nodeSubmit(node.id, node.revision, "snapshot-node", 1);
+  assert.equal((await squad.bank(attempt.id)).status, "verified");
+  const writerDb = openDb(),
+    writer = new Squad(writerDb, "concurrent-writer");
+  t.after(() => writerDb.close());
+  const before = squad.nodeGet(node.id);
+  const changes = db.prepare("SELECT total_changes() AS n").get().n;
+  db.exec("PRAGMA query_only=ON");
+  const restore = interleaveRead(
+    db,
+    "SELECT * FROM node_metadata WHERE card_id = ?",
+    "get",
+    () => true,
+    () => {
+      writer.nodeUpdate(node.id, node.revision, {
+        artifacts: [{ path: "different.txt", commit: "a".repeat(40) }],
+      });
+      writer.cardUpdate(node.id, { question: "Concurrent research question" });
+      writer.cardEvidenceAdd(
+        node.id,
+        "observation",
+        "concurrent://evidence",
+        "new assertion",
+      );
+      writer.cardTransition(node.id, "DIVERGE", "concurrent phase");
+      writer.integrationUnset(1);
+    },
+  );
+  let observed;
+  try {
+    observed = squad.nodeGet(node.id);
+  } finally {
+    restore();
+  }
+  assert.deepEqual(
+    observed,
+    before,
+    "content, revision, history, target and banking must all come from the original snapshot",
+  );
+  assert.equal(
+    db.prepare("SELECT total_changes() AS n").get().n,
+    changes,
+    "reads never write or renew presence",
+  );
+  const fresh = squad.nodeGet(node.id);
+  assert.equal(fresh.artifacts[0].path, "different.txt");
+  assert.equal(fresh.question, "Concurrent research question");
+  assert.ok(fresh.revision > before.revision);
+  assert.equal(fresh.banked, false);
+  assert.equal(fresh.integrations[0].current_configuration, false);
+  db.exec("SAVEPOINT enclosing_read");
+  assert.deepEqual(squad.nodeGet(node.id), fresh);
+  assert.equal(squad.nodeList().length, 1);
+  db.exec("ROLLBACK TO enclosing_read; RELEASE enclosing_read");
+  assert.equal(db.prepare("SELECT total_changes() AS n").get().n, changes);
+});
+
+test("nodeList shares one read snapshot across all nodes and configuration", async (t) => {
+  const { db, squad, create, commit } = fixture(t);
+  const first = create("First"),
+    second = create("Second");
+  const attempt = squad.integrationSubmit({
+    request_key: "snapshot-list",
+    config_revision: 1,
+    commits: [commit],
+    node_refs: [String(first.id), String(second.id)],
+    node_revisions: {
+      [first.id]: first.revision,
+      [second.id]: second.revision,
+    },
+    selection: { paths: ["artifact.txt"] },
+  });
+  assert.equal((await squad.bank(attempt.id)).status, "verified");
+  const writerDb = openDb(),
+    writer = new Squad(writerDb, "concurrent-writer");
+  t.after(() => writerDb.close());
+  const before = squad.nodeList();
+  assert.ok(before.every((node) => node.banked));
+  const changes = db.prepare("SELECT total_changes() AS n").get().n;
+  db.exec("PRAGMA query_only=ON");
+  const restore = interleaveRead(
+    db,
+    "SELECT * FROM science_cards WHERE id = ?",
+    "get",
+    (values) => values[0] === second.id,
+    () => {
+      writer.nodeUpdate(second.id, second.revision, {
+        dependencies: [first.id],
+      });
+      writer.cardUpdate(second.id, { question: "New list question" });
+      const configuration = writer.integrationGet();
+      writer.integrationSet(
+        { ...configuration.config, build_command: "false" },
+        configuration.revision,
+      );
+    },
+  );
+  let observed;
+  try {
+    observed = squad.nodeList();
+  } finally {
+    restore();
+  }
+  assert.deepEqual(
+    observed,
+    before,
+    "every list entry must reflect the same database snapshot",
+  );
+  assert.equal(db.prepare("SELECT total_changes() AS n").get().n, changes);
+  const fresh = squad.nodeList();
+  assert.ok(fresh.every((node) => !node.banked));
+  assert.deepEqual(fresh[1].dependencies, [first.id]);
+  assert.equal(fresh[1].question, "New list question");
+});
+
+test("nodeSubmit still rejects content edits after its read snapshot ends", (t) => {
+  const { db, squad, create } = fixture(t);
+  const node = create();
+  const writerDb = openDb(),
+    writer = new Squad(writerDb, "concurrent-writer");
+  t.after(() => writerDb.close());
+  const exec = db.exec.bind(db);
+  let fired = false;
+  db.exec = (sql) => {
+    if (sql === "BEGIN IMMEDIATE" && !fired) {
+      fired = true;
+      writer.cardUpdate(node.id, { question: "Changed before submission" });
+    }
+    return exec(sql);
+  };
+  try {
+    assert.throws(
+      () => squad.nodeSubmit(node.id, node.revision, "snapshot-submit-race", 1),
+      /revision changed/,
+    );
+  } finally {
+    db.exec = exec;
+  }
+  assert.equal(fired, true);
+  assert.equal(squad.integrationAttempts().length, 0);
+  assert.equal(squad.nodeGet(node.id).integrations.length, 0);
+});

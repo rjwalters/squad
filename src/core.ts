@@ -733,7 +733,8 @@ export class Squad {
     return this._sessionId;
   }
 
-  private nodeMutation<T>(fn: () => T): T {
+  /** SAVEPOINTs preserve a read snapshot without writes and nest inside callers. */
+  private nodeTransaction<T>(fn: () => T): T {
     const savepoint = `node_${randomUUID().replaceAll("-", "")}`;
     this.db.exec(`SAVEPOINT ${savepoint}`);
     try {
@@ -747,7 +748,7 @@ export class Squad {
   }
 
   nodeCreate(fields: CardCreateFields & Partial<NodeMetadata>) {
-    return this.nodeMutation(() => {
+    return this.nodeTransaction(() => {
       const metadata = validateNodeMetadata(this.db, null, {
         dependencies: fields.dependencies ?? [],
         artifacts: fields.artifacts ?? [],
@@ -770,7 +771,7 @@ export class Squad {
     expectedRevision: number,
     fields: Partial<NodeMetadata>,
   ) {
-    return this.nodeMutation(() => {
+    return this.nodeTransaction(() => {
       const node = this.nodeGet(id);
       if (node.revision !== expectedRevision)
         throw new Error("node: content revision changed; read node again");
@@ -802,6 +803,10 @@ export class Squad {
 
   /** Pure read: presence, leases, cursor and node history are never changed. */
   nodeGet(id: number) {
+    return this.nodeTransaction(() => this.nodeGetSnapshot(id));
+  }
+
+  private nodeGetSnapshot(id: number) {
     if (!Number.isSafeInteger(id) || id < 1)
       throw new Error("node: invalid node ID");
     const row = this.db
@@ -861,24 +866,26 @@ export class Squad {
   }
 
   nodeList() {
-    return (
-      this.db.prepare("SELECT id FROM science_cards ORDER BY id").all() as {
-        id: number;
-      }[]
-    ).map(({ id }) => {
-      const node = this.nodeGet(id);
-      return {
-        id,
-        title: node.title,
-        question: node.question,
-        phase: node.phase,
-        revision: node.revision,
-        dependencies: node.dependencies,
-        artifacts: node.artifacts,
-        banked: node.banked,
-        review_status: node.review_status,
-      };
-    });
+    return this.nodeTransaction(() =>
+      (
+        this.db.prepare("SELECT id FROM science_cards ORDER BY id").all() as {
+          id: number;
+        }[]
+      ).map(({ id }) => {
+        const node = this.nodeGetSnapshot(id);
+        return {
+          id,
+          title: node.title,
+          question: node.question,
+          phase: node.phase,
+          revision: node.revision,
+          dependencies: node.dependencies,
+          artifacts: node.artifacts,
+          banked: node.banked,
+          review_status: node.review_status,
+        };
+      }),
+    );
   }
 
   nodeSubmit(
@@ -1550,7 +1557,7 @@ export class Squad {
    * system message.
    */
   cardCreate(fields: CardCreateFields): Card {
-    return this.nodeMutation(() => {
+    return this.nodeTransaction(() => {
       const result = this.cardCreateRaw(fields);
       recordNodeRevision(this.db, result.id, this.persona, this.sessionId, "created");
       return result;
@@ -1644,7 +1651,7 @@ export class Squad {
    * keep their current value. Requires at least one recognized field.
    */
   cardUpdate(id: number, fields: CardUpdateFields): Card {
-    return this.nodeMutation(() => {
+    return this.nodeTransaction(() => {
       const result = this.cardUpdateRaw(id, fields);
       recordNodeRevision(this.db, id, this.persona, this.sessionId, "edited");
       return result;
@@ -1806,7 +1813,7 @@ export class Squad {
    * transitions are announced in chat as a system message.
    */
   cardTransition(id: number, toPhase: CardPhase, note?: string): Card {
-    return this.nodeMutation(() => {
+    return this.nodeTransaction(() => {
       const result = this.cardTransitionRaw(id, toPhase, note);
       recordNodeRevision(this.db, id, this.persona, this.sessionId, "edited");
       return result;
@@ -1866,7 +1873,7 @@ export class Squad {
    * `provenance`; rejects otherwise.
    */
   cardEvidenceAdd(cardId: number, type: EvidenceType, provenance: string, body?: string | null): CardEvidence {
-    return this.nodeMutation(() => {
+    return this.nodeTransaction(() => {
       const result = this.cardEvidenceAddRaw(cardId, type, provenance, body);
       recordNodeRevision(this.db, cardId, this.persona, this.sessionId, "edited");
       return result;
