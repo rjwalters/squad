@@ -227,4 +227,4 @@ prepared objects for retries and pass the same executor rather than assert succe
 Research nodes now provide a declared artifact map and immutable content-revision
 bindings for submissions. New `node_refs` must resolve to actual Science Card
 IDs and include matching `node_revisions`; old opaque references remain unresolved
-historical data. See [research nodes](nodes.md). Current exports use schema 6.
+historical data. See [research nodes](nodes.md). Current exports use schema 7.

@@ -111,3 +111,15 @@ Discover them through `squad_node_list`/`squad_node_get`; create with
 and bind committed artifacts with `squad_node_submit` before `squad_bank`.
 Nodes expose revision-bound provenance. Banking and independent review remain
 separate; research edits through legacy card tools also revise node content.
+
+Explicit node work uses `squad_node_claim` with `id`, `expected_revision` and an
+optional `target` (defaults to steward), even before banking. Reuse the returned
+directed review request; do not silently replace another target. The reviewer
+calls `squad_review_claim`, then `squad_node_review` with `request_id`, unique
+`request_key`, verified `attempt_id`, `verdict` (`approve`/`reject`) and scientific
+`rationale`. This rebuilds the exact bank in isolation without publishing.
+Authors cannot self-approve; prose resolution is not independent verification.
+Read `squad_node_get` for retained build evidence and current versus stale
+reviews. Content/config changes need fresh review; unrelated branch movement
+does not invalidate unchanged content. Declared identities do not prove
+cryptographic independence, and a passing build does not prove sound science.

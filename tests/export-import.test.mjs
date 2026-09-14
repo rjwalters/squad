@@ -68,6 +68,33 @@ test("round-trip export -> import preserves row counts and content across every 
   const { token } = ledger.claim(attempt.id);
   ledger.append(attempt.id, 0, { kind: "failure", stage: "build", message: "retained failure evidence" }, token);
   ledger.release(attempt.id, token);
+  const review = src.squad.nodeClaim(card.id, node.revision, "codex").review;
+  // Storage fixture only; real executor receipt round trips are covered in
+  // nodes-review-adversarial.test.mjs. This never represents verified evidence.
+  const failedReview = {
+    id: "export-failure",
+    status: "failed",
+    node_id: card.id,
+    revision: node.revision,
+  };
+  src.db
+    .prepare("INSERT INTO node_reviews VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+    .run(
+      failedReview.id,
+      "export-failure",
+      review.id,
+      card.id,
+      node.revision,
+      "{}",
+      JSON.stringify(failedReview),
+      0,
+    );
+  src.db
+    .prepare("INSERT INTO node_review_builds VALUES (?, ?)")
+    .run(
+      failedReview.id,
+      JSON.stringify({ exit_code: 1, clean: false, output: "storage fixture" }),
+    );
   src.squad.integrationUnset(1);
   const beforeAttempts = src.squad.integrationAttempts();
   const beforeIntegration = src.squad.integrationGet();
