@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.15.1
+
+- Keep sibling project MCP launchers and room paths portable across checkout moves,
+  preserve equivalent manual path corrections, and validate from the target root.
+
 ## 0.15.0
 
 - Add `squad doctor --room`: a read-only room drift report covering known unbanked

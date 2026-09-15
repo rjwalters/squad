@@ -33,7 +33,7 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.15.0" });
+  const server = new McpServer({ name: "squad", version: "0.15.1" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),

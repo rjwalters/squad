@@ -145,11 +145,11 @@ test(
         joined.push(await call(client, "squad_join"));
       }
       assert.equal(
-        joined[0].db,
-        joined[1].db,
+        resolve(repo, joined[0].db),
+        resolve(repo, joined[1].db),
         "both installed configurations select the same room",
       );
-      assert.equal(joined[0].db, cli(["path"]).trim());
+      assert.equal(resolve(repo, joined[0].db), resolve(repo, cli(["path"]).trim()));
       assert.notEqual(joined[0].persona, joined[1].persona);
       assert.ok(
         joined.every(
