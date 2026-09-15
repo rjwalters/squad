@@ -42,7 +42,7 @@ Codex       ──spawns──► squad (stdio MCP) ──┼──► <repo>/.s
 you         ──run─────► squad CLI ──────────┘
 ```
 
-**Room resolution:** an explicit `SQUAD_DIR` env wins (the installer pins it in the repo's `.mcp.json`, so Claude Code always lands in the right room); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. A linked **git worktree** resolves to the primary clone's room (via `git rev-parse --git-common-dir`), so a fleet running each agent in its own worktree still shares one room. Outside any repo, the fallback is `~/.squad`.
+**Room resolution:** an explicit `SQUAD_DIR` env wins (fresh installs set it to `.squad` in the repo's `.mcp.json`, relative to the project working directory); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. A linked **git worktree** resolves to the primary clone's room (via `git rev-parse --git-common-dir`), so a fleet running each agent in its own worktree still shares one room. Outside any repo, the fallback is `~/.squad`.
 
 **Moving a room between repos:** because the room is per-repo local state (created fresh, empty, by `install.sh`), a long-running collaboration that outgrows its host repo needs an explicit move, not a copy of `squad.db` — a plain `cp` can tear a live WAL-mode database mid-write, and stale `-wal`/`-shm` sidecars left behind in a destination directory can shadow whatever you restore over them. `squad export <path>` writes every room table (messages, goals, claims, cursors, members, presence sessions, divergence rounds, review requests, and Science Cards with their evidence/transition history) to a single portable SQLite file at `<path>`, using SQLite's Online Backup API so it reads correctly through any pending WAL writes even while an MCP server is still holding the room open. `squad import <path>` loads that file into the *current* room — refusing cleanly, with no partial writes, if the export was produced by a schema-incompatible squad build, or if the destination room isn't empty (run `squad clear` first). Export is non-destructive: the source room is left exactly as it was, so a deliberate `squad clear` or `squad nuke` on the old side is a separate, explicit step once you've confirmed the new room looks right.
 
@@ -150,7 +150,17 @@ Global setup is separate: with confirmation (or `-y`), installation writes all
 six compatibility prompts and an MCP registration under `$CODEX_HOME`, defaulting
 to `~/.codex`, and optionally runs `npm link`. `--no-codex` skips all global
 setup; `--no-link` skips only linking. Repo-scoped Codex skills always install.
-Global wiring is shared by every consumer repository on the machine.
+Global wiring is shared by every consumer repository on the machine. Its Codex
+launcher uses an absolute source path so it works from any project directory;
+refresh global setup on each machine after moving the Squad checkout.
+
+When the Squad checkout and target repository are siblings, project `.mcp.json`
+uses `../<squad-checkout>/dist/index.js` and `SQUAD_DIR: .squad`. Start the MCP
+client in the target repository root. Moving both checkouts together preserves
+this launcher without editing tracked configuration. Other layouts use an
+absolute launcher with an installer warning. Checks resolve project paths from
+the target root and accept equivalent absolute or relative spellings; existing
+custom launchers and room overrides remain preserved.
 
 ### Check, update, remove, and develop locally
 

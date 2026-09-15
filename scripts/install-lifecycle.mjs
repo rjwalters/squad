@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { resolve, dirname, join, relative, sep } from "node:path";
+import { resolve, dirname, join, relative, sep, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { spawnSync } from "node:child_process";
@@ -362,7 +362,7 @@ class Scope {
       };
     }
   }
-  jsonFields(rel, fields, preserve = [], retain = []) {
+  jsonFields(rel, fields, preserve = [], retain = [], equivalent = []) {
     const path = safePath(this.root, rel),
       text = read(path),
       cfg = parseJson(text, path),
@@ -426,6 +426,11 @@ class Scope {
         }
       } else if (previous) {
         if (!equal(existing, previous.installed)) {
+          if (equivalent.includes(key)) {
+            // Accept alternate path spelling without adopting user edits.
+            next.values[key] = previous;
+            continue;
+          }
           this.plan.conflict(`${path}:${key} was customized`);
           next.values[key] = previous;
         } else {
@@ -586,10 +591,19 @@ async function main() {
     }
   }
   for (const [rel, body] of artifacts) scope.file(rel, body);
+  const runtimePath = join(source, "dist/index.js");
+  const siblingSource = dirname(source) === dirname(opts.target);
+  const portableRuntime = siblingSource
+    ? relative(opts.target, runtimePath)
+    : runtimePath;
+  if (!siblingSource && opts.action === "install")
+    plan.note(
+      "warning: Squad source is not a sibling of the target; the project MCP launcher uses an absolute path and must be refreshed after moving checkouts",
+    );
   const fields = {
     "mcpServers/squad/command": "node",
-    "mcpServers/squad/args": [join(source, "dist/index.js")],
-    "mcpServers/squad/env/SQUAD_DIR": join(opts.target, ".squad"),
+    "mcpServers/squad/args": [portableRuntime],
+    "mcpServers/squad/env/SQUAD_DIR": ".squad",
   };
   // Retain recorded pins on ordinary refresh. Explicit new pins only populate
   // missing values; changing an existing user pin remains a direct config edit.
@@ -621,11 +635,27 @@ async function main() {
           previousLauncher[key].installed,
         ),
     );
+  const existingServer = beforeMcp.mcpServers?.squad;
+  const equivalentPaths = [];
+  if (
+    existingServer?.command === "node" &&
+    Array.isArray(existingServer.args) &&
+    existingServer.args.length === 1 &&
+    typeof existingServer.args[0] === "string" &&
+    resolve(opts.target, existingServer.args[0]) === runtimePath
+  )
+    equivalentPaths.push("mcpServers/squad/args");
+  if (
+    typeof existingServer?.env?.SQUAD_DIR === "string" &&
+    resolve(opts.target, existingServer.env.SQUAD_DIR) === join(opts.target, ".squad")
+  )
+    equivalentPaths.push("mcpServers/squad/env/SQUAD_DIR");
   const cfg = scope.jsonFields(
     ".mcp.json",
     fields,
     externalLauncher ? launcherKeys : [],
     changedLauncher ? launcherKeys : [],
+    equivalentPaths,
   );
   if (opts.check && externalLauncher)
     plan.attention.push(
@@ -636,11 +666,11 @@ async function main() {
     cfg.mcpServers?.squad?.command === "node" &&
     typeof cfg.mcpServers.squad.args?.[0] === "string"
   ) {
-    if (!fs.existsSync(cfg.mcpServers.squad.args[0]))
+    if (!fs.existsSync(resolve(opts.target, cfg.mcpServers.squad.args[0])))
       plan.attention.push(
         `broken Claude runtime path: ${cfg.mcpServers.squad.args[0]}`,
       );
-    if (cfg.mcpServers.squad.args[0] !== join(source, "dist/index.js"))
+    if (resolve(opts.target, cfg.mcpServers.squad.args[0]) !== runtimePath)
       plan.attention.push(
         `stale/different Claude runtime source: ${cfg.mcpServers.squad.args[0]}`,
       );
@@ -906,12 +936,18 @@ function globalScope(plan, opts, version, commit) {
       Array.isArray(server.args) &&
       typeof server.args[0] === "string"
     ) {
-      if (!fs.existsSync(server.args[0]))
-        plan.attention.push(`broken Codex runtime path: ${server.args[0]}`);
-      if (server.args[0] !== join(source, "dist/index.js"))
+      if (!isAbsolute(server.args[0])) {
         plan.attention.push(
-          `stale/different Codex runtime source: ${server.args[0]}`,
+          `relative global Codex runtime path depends on each project's working directory; verify separately: ${server.args[0]}`,
         );
+      } else {
+        if (!fs.existsSync(server.args[0]))
+          plan.attention.push(`broken Codex runtime path: ${server.args[0]}`);
+        if (server.args[0] !== join(source, "dist/index.js"))
+          plan.attention.push(
+            `stale/different Codex runtime source: ${server.args[0]}`,
+          );
+      }
     } else
       plan.attention.push(
         `custom Codex launcher requires operator verification: ${path}`,

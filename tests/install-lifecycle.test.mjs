@@ -383,3 +383,105 @@ test("valid TOML that cannot accept a squad table fails before any writes", () =
     assert.equal(existsSync(join(f.repo, ".agents")), false);
   }
 });
+
+test("sibling project launcher survives relocation and preserves equivalent path edits", async () => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const { resolve } = await import("node:path");
+  const original = join(scratch, "portable original");
+  const sourceCopy = join(original, "squad source");
+  const repo = join(original, "consumer");
+  mkdirSync(sourceCopy, { recursive: true });
+  mkdirSync(repo);
+  for (const path of ["scripts", "skills", "commands", "codex", "dist", "VERSION", "install.sh", "uninstall.sh"])
+    cpSync(resolve(path), join(sourceCopy, path), { recursive: true });
+  symlinkSync(realpathSync("node_modules"), join(sourceCopy, "node_modules"));
+  const env = { ...process.env, HOME: original };
+  for (const key of Object.keys(env)) if (key.startsWith("SQUAD_")) delete env[key];
+  function install(sourceRoot, target, args = []) {
+    const result = spawnSync("bash", [join(sourceRoot, "install.sh"), "--no-codex", ...args, target], {
+      cwd: scratch, env, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return result.stdout + result.stderr;
+  }
+  install(sourceCopy, repo);
+  const configPath = join(repo, ".mcp.json");
+  const config = JSON.parse(readFileSync(configPath));
+  assert.deepEqual(config.mcpServers.squad.args, ["../squad source/dist/index.js"]);
+  assert.equal(config.mcpServers.squad.env.SQUAD_DIR, ".squad");
+  assert.ok(!readFileSync(configPath, "utf8").includes(original));
+  install(sourceCopy, repo, ["--check"]);
+
+  // A pre-fix receipt plus the user's relative correction must remain healthy.
+  const receiptPath = join(repo, ".claude/skills/squad/.install-local.json");
+  const receipt = JSON.parse(readFileSync(receiptPath));
+  receipt.fragments[".mcp.json"].values["mcpServers/squad/args"].installed = [join(sourceCopy, "dist/index.js")];
+  receipt.fragments[".mcp.json"].values["mcpServers/squad/env/SQUAD_DIR"].installed = join(repo, ".squad");
+  const legacyConfig = structuredClone(config);
+  legacyConfig.mcpServers.squad.args = [join(sourceCopy, "dist/index.js")];
+  legacyConfig.mcpServers.squad.env.SQUAD_DIR = join(repo, ".squad");
+  writeFileSync(configPath, JSON.stringify(legacyConfig));
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  install(sourceCopy, repo);
+  assert.deepEqual(JSON.parse(readFileSync(configPath)), config);
+
+  // Keep the old receipt while leaving the user's relative spelling in place.
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  const corrected = readFileSync(configPath, "utf8");
+  install(sourceCopy, repo);
+  install(sourceCopy, repo, ["--check"]);
+  assert.equal(readFileSync(configPath, "utf8"), corrected);
+
+  const relocated = join(scratch, "portable relocated");
+  cpSync(original, relocated, { recursive: true });
+  rmSync(original, { recursive: true });
+  const newRepo = join(relocated, "consumer");
+  const client = new Client({ name: "relocated-project", version: "1" });
+  const server = JSON.parse(readFileSync(join(newRepo, ".mcp.json"))).mcpServers.squad;
+  try {
+    await client.connect(new StdioClientTransport({
+      command: server.command, args: server.args, cwd: newRepo,
+      env: { ...env, ...server.env }, stderr: "pipe",
+    }));
+    const tools = await client.listTools();
+    assert.ok(tools.tools.some((tool) => tool.name === "squad_join"));
+    const joined = await client.callTool({ name: "squad_join", arguments: {} });
+    assert.ok(!joined.isError, JSON.stringify(joined));
+    assert.ok(existsSync(join(newRepo, ".squad/squad.db")));
+  } finally {
+    await client.close();
+  }
+  install(join(relocated, "squad source"), newRepo);
+  install(join(relocated, "squad source"), newRepo, ["--check"]);
+  assert.equal(readFileSync(join(newRepo, ".mcp.json"), "utf8"), corrected);
+});
+
+test("non-sibling launcher warns and unchanged legacy paths migrate safely", () => {
+  const f = fixture("absolute-fallback");
+  assert.match(f.run(), /not a sibling.*absolute path/);
+  const configPath = join(f.repo, ".mcp.json");
+  const cfg = JSON.parse(readFileSync(configPath));
+  cfg.mcpServers.squad.env.SQUAD_DIR = join(f.repo, ".squad");
+  writeFileSync(configPath, JSON.stringify(cfg));
+  const receiptPath = join(f.repo, ".claude/skills/squad/.install-local.json");
+  const receipt = JSON.parse(readFileSync(receiptPath));
+  receipt.fragments[".mcp.json"].values["mcpServers/squad/env/SQUAD_DIR"].installed = join(f.repo, ".squad");
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  f.run();
+  assert.equal(JSON.parse(readFileSync(configPath)).mcpServers.squad.env.SQUAD_DIR, ".squad");
+  f.run("install.sh", ["--check"]);
+});
+
+
+test("relative global Codex launchers remain preserved and require cwd verification", () => {
+  const f = fixture("relative-global");
+  mkdirSync(f.env.CODEX_HOME);
+  const configPath = join(f.env.CODEX_HOME, "config.toml");
+  const config = '[mcp_servers.squad]\ncommand = "node"\nargs = ["../squad/dist/index.js"]\n';
+  writeFileSync(configPath, config);
+  f.run();
+  const output = f.run("install.sh", ["--check"], 1);
+  assert.match(output, /relative global Codex runtime path depends on each project's working directory/);
+  assert.equal(readFileSync(configPath, "utf8"), config);
+});
