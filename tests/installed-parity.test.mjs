@@ -334,6 +334,19 @@ test(
         JSON.parse(cli(["steward", "status"])),
         await call(clients[0], "squad_steward_status", {}),
       );
+      // squad_room_doctor / `squad doctor --room` (#77): any identity may call
+      // it (clients[1] here is not the configured steward), and CLI and MCP
+      // observe the same durable state -- the just-banked node's artifact is
+      // reported verified-clean in both.
+      const roomDoctorReport = await call(clients[1], "squad_room_doctor", {});
+      assert.ok(Array.isArray(roomDoctorReport.findings));
+      const bankedObservation = roomDoctorReport.branch_observations.find(
+        (o) => o.node_id === node.id,
+      );
+      assert.equal(bankedObservation.classification, "verified_clean");
+      const roomDoctorCli = cli(["doctor", "--room"]);
+      assert.match(roomDoctorCli, /read-only room drift report/);
+      assert.match(roomDoctorCli, new RegExp(`node ${node.id} `));
       for (const name of ["squad_steward_status", "squad_steward_tick"]) {
         const bad = await clients[0].callTool({ name, arguments: { force: true } });
         assert.equal(bad.isError, true);

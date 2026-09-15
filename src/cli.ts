@@ -1,5 +1,5 @@
 import { identityFromEnv } from "./identity.js";
-import { openDb, dbPath, squadDir } from "./db.js";
+import { openDb, openDbReadOnly, dbPath, squadDir } from "./db.js";
 import {
   Squad,
   CARD_TERMINAL_PHASES,
@@ -13,6 +13,7 @@ import {
   type ReviewStatus,
 } from "./core.js";
 import { rmSync } from "node:fs";
+import { formatRoomDoctorReport } from "./room-doctor.js";
 
 const REVIEW_OPEN_USAGE =
   "usage: squad review open --to <persona> [--priority low|normal|high|urgent] " +
@@ -167,6 +168,12 @@ Human CLI usage:
                                marker; it announces in the room when it stops
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
+  squad doctor --room         Read-only room drift report: known unbanked work,
+                               integration/outline divergence, overdue/missing
+                               reviews, and chat "banked" claims that disagree
+                               with the verified integration ledger. Every
+                               finding cites its evidence, age and a concrete
+                               next command; never writes to the room.
   squad help                  Show this help
 
 The room is per-repo: data lives in <repo-root>/.squad/, found by walking up
@@ -291,8 +298,23 @@ export async function runCli(argv: string[]): Promise<void> {
     console.log(dbPath());
     return;
   }
-  if (cmd === "doctor") {
+  if (cmd === "doctor" && !rest.includes("--room")) {
+    if (rest.length) throw new Error("usage: squad doctor [--room]");
     await runDoctor();
+    return;
+  }
+  if (cmd === "doctor") {
+    if (rest.length !== 1 || rest[0] !== "--room")
+      throw new Error("usage: squad doctor [--room]");
+    const db = openDbReadOnly();
+    try {
+      // This observer does not join or reserve an identity, even when a
+      // runtime exports a session ID. Reports are independent of persona.
+      const observer = new Squad(db, "room-doctor-observer");
+      process.stdout.write(formatRoomDoctorReport(observer.roomDoctor()));
+    } finally {
+      db.close();
+    }
     return;
   }
   if (cmd === "codex-reentry") {

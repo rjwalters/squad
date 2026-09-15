@@ -33,7 +33,7 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.14.0" });
+  const server = new McpServer({ name: "squad", version: "0.15.0" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
@@ -120,6 +120,24 @@ export async function runMcpServer(): Promise<void> {
       inputSchema: z.object({}).strict(),
     },
     async () => json(squad.stewardTick()),
+  );
+  server.registerTool(
+    "squad_room_doctor",
+    {
+      description:
+        "Read-only room drift report: known unbanked work, integration/outline divergence, overdue/missing independent reviews, claim hygiene, and possible chat 'banked' claims requiring verification against the integration ledger (heuristic warnings, not proven contradictions). Every finding cites its evidence, age and a concrete next command. Declared artifact commits are classified verified-clean, observed-unbanked, unreachable (absent from the configured integration repository) or unobserved (no integration target configured, or the check itself failed) -- an unreachable branch is never conflated with a verified-clean one. Any identity; never mutates the room.",
+      inputSchema: z
+        .object({
+          message_limit: z
+            .number()
+            .int()
+            .positive()
+            .optional()
+            .describe("Bound on how many recent chat messages to scan for informal banking claims (default 2000)"),
+        })
+        .strict(),
+    },
+    async ({ message_limit }) => json(squad.roomDoctor({ message_limit })),
   );
 
   server.registerTool(
