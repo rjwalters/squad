@@ -6,6 +6,7 @@ import {
   type OutlinePublishOptions,
 } from "./outline.js";
 import { rebuildNode } from "./node-review-executor.js";
+import { buildRoomDoctorReport, commitExistsLocally, type RoomReviewRow } from "./room-doctor.js";
 import { nodeMetadata, nodeRevisions, recordNodeRevision, validateNodeMetadata, writeNodeMetadata, bindNodes, type NodeMetadata } from "./nodes.js";
 import { executeIntegration, type BankOptions } from "./integration-executor.js";
 import { IntegrationLedger, type IntegrationSubmission, type IntegrationFilter } from "./integration-ledger.js";
@@ -1445,6 +1446,40 @@ export class Squad {
       this.db.exec("ROLLBACK");
       throw error;
     }
+  }
+
+  /**
+   * `squad doctor --room`: a read-only, evidence-first drift report over
+   * exactly the same durable state `stewardStatus()` reads, plus a bounded
+   * scan of chat for informal "banked" claims cross-checked against the
+   * verified integration ledger. Unlike `stewardTick`, this never writes --
+   * no reminders sent, no presence touched -- and unlike `send`/`read`, it
+   * never renews a session. One SAVEPOINT gives every section of the report
+   * a single consistent observed revision/state.
+   */
+  roomDoctor(options: { message_limit?: number } = {}) {
+    return this.nodeTransaction(() => {
+      const status = this.stewardStatus();
+      const reviewRequests = this.db
+        .prepare(
+          `SELECT n.card_id, n.revision, r.* FROM node_review_requests n
+           JOIN review_requests r ON r.id = n.request_id ORDER BY r.id`,
+        )
+        .all() as unknown as RoomReviewRow[];
+      const messages = (
+        this.db
+          .prepare("SELECT * FROM messages WHERE kind='chat' ORDER BY id DESC LIMIT ?")
+          .all(options.message_limit ?? 2000) as unknown as Message[]
+      ).reverse();
+      return buildRoomDoctorReport({
+        status,
+        reviewRequests,
+        messages,
+        checkCommitExists: status.configuration.config
+          ? (repository, commit) => commitExistsLocally(repository, commit)
+          : undefined,
+      });
+    });
   }
 
   outlineRender() {
