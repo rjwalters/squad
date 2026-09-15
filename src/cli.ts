@@ -72,7 +72,7 @@ const HELP = `squad — local cross-agent chat room with shared goals
 With no subcommand (and stdin not a TTY) squad runs as a stdio MCP server.
 
 Human CLI usage:
-  squad bank <attempt-id> [--build-timeout-ms N]  Integrate, build and publish committed work
+  squad bank <attempt-id> [--build-timeout-ms N]  Integrate exact committed work; selected paths must be clean against configured HEAD
   squad integration show|check|set|unset|submit|attempt|attempts (see docs/integration.md)
   squad send <text...>        Post a message to the room
   squad read [-n N]           Show the last N messages (default 30; stateless)

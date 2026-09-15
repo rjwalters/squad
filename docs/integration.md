@@ -169,8 +169,14 @@ use the same object algorithm, matching its source repository. Recovery chooses
 the same algorithm from the durable IDs even when the source is unavailable.
 Files must exist at the submitted commit; selected deletions require full-commit
 mode. Selected files must have no staged/unstaged/untracked changes and their
-working contents must match the submitted commit. Unrelated dirty files remain
-untouched. The target must exist and share a merge base with the submitted commit.
+working contents and index must match the configured checkout’s own HEAD,
+independently of the submitted commit. A clean checkout may be at a different
+revision: authors can commit in separate clones and push private branches into
+the configured repository to make their objects available without checking out
+those files there. Paths absent at configured HEAD must also be absent from its
+index and working tree, including ignored files. Banking always reads the exact
+submitted committed blobs; it never infers a source from the caller’s directory.
+Unrelated dirty files remain untouched. The target must exist and share a merge base with the submitted commit.
 Only selected changes from that merge base to the submitted commit are applied
 using Git's three-way indexed patch application, then committed in isolation.
 Conflicts fail; unrelated changes in the same source commit are excluded.

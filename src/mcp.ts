@@ -33,7 +33,7 @@ export async function runMcpServer(): Promise<void> {
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
 
-  const server = new McpServer({ name: "squad", version: "0.15.1" });
+  const server = new McpServer({ name: "squad", version: "0.15.2" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
@@ -283,7 +283,7 @@ export async function runMcpServer(): Promise<void> {
   }, async ({ id, build_timeout_ms }, extra) => json(await squad.bank(id, { build_timeout_ms, signal: extra.signal })));
 
   server.registerTool("squad_integration_submit", {
-    description: "Submit full committed Git object IDs for later integration, pinning the current configured revision. An idempotent request key identifies this exact ordered submission. Full-commit mode includes ancestry. Optional selection.paths applies only declared committed regular files from the merge base; requires one commit. selection.theorem explicitly declares a label mapped to those paths, never guesses a symbol. Numeric-string node_refs require matching node_revisions and declared source artifacts; use squad_node_submit to derive them. Creates pending evidence only; does not run Git/builds, bank work, or create research nodes/reviews.",
+    description: "Submit full committed Git object IDs for later integration, pinning the current configured revision. An idempotent request key identifies this exact ordered submission. Full-commit mode includes ancestry. Optional selection.paths applies only declared committed regular files from the merge base; requires one commit. The configured repository must have those objects; its selected paths must be clean against its own HEAD, which may differ from the submitted commit (including independent author clones). selection.theorem explicitly declares a label mapped to those paths, never guesses a symbol. Numeric-string node_refs require matching node_revisions and declared source artifacts; use squad_node_submit to derive them. Creates pending evidence only; does not run Git/builds, bank work, or create research nodes/reviews.",
     inputSchema: z.object({ request_key: z.string(), config_revision: z.number().int().nonnegative(), commits: z.array(z.string()).min(1), node_refs: z.array(z.string()).optional(), node_revisions: z.record(z.string(), z.number().int().positive()).optional(), selection: z.object({ paths: z.array(z.string()).min(1), theorem: z.string().optional() }).strict().optional() }).strict(),
   }, async input => json(squad.integrationSubmit(input)));
   server.registerTool("squad_integration_attempt_get", {

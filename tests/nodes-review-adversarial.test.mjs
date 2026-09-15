@@ -422,3 +422,86 @@ test("reviewer rename during build retains evidence without resolving as another
   );
   assert.notEqual(squad.nodeGet(node.id).review_status, "approved");
 });
+
+test("two independent clones bank and review committed artifacts absent from configured checkout", async (t) => {
+  const { root, repo, remote, git, squad, peer, node, bank, builds } =
+    fixture(t);
+  git(repo, "checkout", "main");
+  const author = join(root, "author");
+  execFileSync("git", ["clone", "-q", repo, author]);
+  git(author, "config", "user.name", "Author");
+  git(author, "config", "user.email", "author@example.org");
+  writeFileSync(join(author, "artifact.txt"), "independent research\n");
+  writeFileSync(join(author, "new-proof.txt"), "new proof\n");
+  writeFileSync(join(author, "unselected.txt"), "excluded\n");
+  git(author, "add", ".");
+  git(author, "commit", "-qm", "independent artifacts");
+  const commit = git(author, "rev-parse", "HEAD");
+  git(author, "push", "-q", "origin", "HEAD:refs/heads/author-artifacts");
+  const updated = squad.nodeUpdate(node.id, node.revision, {
+    artifacts: ["artifact.txt", "new-proof.txt"].map((path) => ({ path, commit })),
+  });
+  node.revision = updated.revision;
+  const index = readFileSync(join(repo, ".git", "index"));
+  assert.equal(existsSync(join(repo, "new-proof.txt")), false);
+  const submission = squad.nodeSubmit(node.id, node.revision, "two-clone-bank", 1);
+  const attempt = await squad.bank(submission.id);
+  assert.equal(attempt.status, "verified", JSON.stringify(attempt.evidence));
+  assert.equal(git(remote, "show", "main:artifact.txt"), "independent research");
+  assert.equal(git(remote, "show", "main:new-proof.txt"), "new proof");
+  assert.equal(git(remote, "ls-tree", "main", "--", "unselected.txt"), "");
+  assert.equal(existsSync(join(repo, "new-proof.txt")), false);
+  assert.deepEqual(readFileSync(join(repo, ".git", "index")), index);
+  assert.equal(git(author, "status", "--porcelain"), "");
+  const request = squad.nodeClaim(node.id, node.revision).review;
+  peer.reviewClaim(request.id);
+  const sourceHead = git(repo, "rev-parse", "HEAD"),
+    remoteHead = git(remote, "rev-parse", "refs/heads/main");
+  const first = await peer.nodeReview(request.id, reviewInput(attempt));
+  assert.equal(first.status, "approved");
+  assert.equal(first.reviewer, "peer");
+  assert.equal(first.revision, node.revision);
+  assert.equal(first.attempt_id, attempt.id);
+  assert.equal(
+    builds().length,
+    2,
+    "bank receipt must not replace a new independent build",
+  );
+  assert.notEqual(
+    builds()[0],
+    builds()[1],
+    "independent build gets its own checkout",
+  );
+  assert.notEqual(builds()[1], repo);
+  assert.equal(git(repo, "rev-parse", "HEAD"), sourceHead);
+  assert.equal(git(repo, "status", "--porcelain"), "");
+  assert.equal(git(remote, "rev-parse", "refs/heads/main"), remoteHead);
+  const replay = await peer.nodeReview(request.id, reviewInput(attempt));
+  assert.equal(replay.id, first.id);
+  assert.equal(
+    builds().length,
+    2,
+    "completed idempotent retry must not rebuild or duplicate proof",
+  );
+  await assert.rejects(
+    () =>
+      peer.nodeReview(request.id, {
+        ...reviewInput(attempt),
+        rationale: "different payload",
+      }),
+    /key|payload|conflict|different/i,
+  );
+  squad.cardUpdate(node.id, {
+    question: "A materially different research question?",
+  });
+  const current = peer.nodeGet(node.id);
+  assert.notEqual(current.review_status, "approved");
+  assert.ok(
+    current.reviews.some(
+      (review) =>
+        review.id === first.id &&
+        review.status === "approved" &&
+        review.current === false,
+    ),
+  );
+});

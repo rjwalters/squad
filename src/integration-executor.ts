@@ -334,6 +334,10 @@ export async function executeIntegration(
     }
     if (attempt.selection) {
       const selectedCommit = attempt.commits[0]!;
+      // The configured checkout is an object source, not the author checkout.
+      // Its cleanliness is relative to its own immutable HEAD, independently
+      // of the submitted commit whose exact blobs are integrated below.
+      const sourceHead = await value(source, ["rev-parse", "HEAD"]);
       for (const path of attempt.selection.paths) {
         const entry = await value(source, [
           "ls-tree",
@@ -346,24 +350,41 @@ export async function executeIntegration(
           throw new Error(
             `integration: artifact is not a committed regular file: ${path}`,
           );
-        if (
-          !(await matchesBlob(
-            source,
-            path,
-            fields[1]!,
-            fields[2]!,
-            objectFormat,
-            controller.signal,
-          ))
-        )
-          throw new Error(
-            `integration: selected artifact contains uncommitted bytes or mode: ${path}`,
-          );
-        const staged = await value(source, ["ls-files", "--stage", "--", path]);
-        if (!staged.startsWith(`${fields[1]} ${fields[2]} 0\t`))
-          throw new Error(
-            `integration: selected artifact index differs from submitted commit: ${path}`,
-          );
+        const headEntry = await value(source, ["ls-tree", sourceHead, "--", path]);
+        const headFields = /^(100(?:644|755)|120000) blob ([0-9a-f]+)\t/.exec(
+          headEntry,
+        );
+        const staged = await value(source, [
+          "ls-files", "--stage", "-z", "--", path,
+        ]);
+        if (!headEntry) {
+          // Even ignored/untracked files must not shadow a selected artifact.
+          let absent = false;
+          try {
+            await lstat(join(source, path));
+          } catch (error) {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") absent = true;
+            else throw error;
+          }
+          if (!absent || staged)
+            throw new Error(
+              `integration: selected artifact contains uncommitted work: ${path}`,
+            );
+        } else {
+          if (
+            !headFields ||
+            !(await matchesBlob(
+              source, path, headFields[1]!, headFields[2]!, objectFormat, controller.signal,
+            ))
+          )
+            throw new Error(
+              `integration: selected artifact contains uncommitted bytes or mode: ${path}`,
+            );
+          if (staged !== `${headFields[1]} ${headFields[2]} 0\t${path}\0`)
+            throw new Error(
+              `integration: selected artifact index differs from configured HEAD: ${path}`,
+            );
+        }
       }
       if (
         (await value(source, [
@@ -375,13 +396,13 @@ export async function executeIntegration(
         ])) ||
         (await value(source, [
           "diff",
-          selectedCommit,
+          sourceHead,
           "--",
           ...attempt.selection.paths,
         ]))
       )
         throw new Error(
-          "integration: selected artifacts contain uncommitted work or differ from submitted commit",
+          "integration: selected artifacts contain uncommitted work relative to configured HEAD",
         );
     }
     for (let reconciliation = 0; reconciliation < 3; reconciliation++) {
