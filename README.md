@@ -562,3 +562,21 @@ No process scheduler, bank, review approval or claim cleanup runs automatically.
 Follow [the shared steward workflow](skills/squad/references/steward.md) to resume
 existing bank attempts, review request keys and outline publications explicitly.
 Schema 9 exports/imports/resets include the reminder ledger.
+
+### Room drift report
+
+`squad doctor --room` (MCP `squad_room_doctor`) is a read-only, evidence-first
+drift report over the same durable state `squad steward status` reads, plus a
+bounded scan of chat for informal "banked" claims cross-checked against the
+verified integration ledger. Every finding cites its evidence, an age, and a
+concrete next command -- never a bare conclusion. Declared artifact commits
+are classified `verified_clean` (backed by a verified integration record),
+`observed_unbanked` (the commit exists in the configured integration
+repository but the node is not yet banked), `unreachable` (the commit is not
+present in that repository's object database -- most likely still confined to
+an unfetched per-agent branch), or `unobserved` (no integration target is
+configured, or the reachability check itself could not be performed, e.g. an
+inaccessible repository path) -- an unreachable or unobserved branch is never
+reported as if it were verified clean. Two runs against one unchanged observed
+revision/state always agree. Any identity may run it; it never writes to the
+room, sends chat, or renews presence.

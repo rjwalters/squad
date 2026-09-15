@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.15.0
+
+- Add `squad doctor --room`: a read-only room drift report covering known unbanked
+  work, integration/outline divergence, overdue and missing independent reviews, and
+  chat "banked" claims that disagree with the verified integration ledger. Every
+  finding cites its evidence, age and a concrete next command; declared artifact
+  commits are classified as verified-clean, observed-but-unbanked, unreachable
+  (absent from the configured integration repository's object database) or
+  unobserved (no integration target configured, or the check itself failed), so a
+  drifting or partially observable room is never reported as if it were clean.
+
 ## 0.14.0
 
 - Add a runtime-neutral steward status report for durable integration/build evidence,
