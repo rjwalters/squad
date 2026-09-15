@@ -484,3 +484,18 @@ export function openDb(): DatabaseSync {
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
   return db;
 }
+
+/** Observe an existing room without creating, adopting, or migrating its state. */
+export function openDbReadOnly(): DatabaseSync {
+  const db = new DatabaseSync(dbPath(), { readOnly: true });
+  try {
+    const version = db.prepare("PRAGMA user_version").get() as { user_version: number };
+    if (version.user_version !== SCHEMA_VERSION)
+      throw new Error(`Room schema ${version.user_version} cannot be inspected by this build (expected ${SCHEMA_VERSION}). Use a compatible Squad build or upgrade the room explicitly before retrying doctor --room.`);
+    db.exec("PRAGMA busy_timeout = 5000");
+    return db;
+  } catch (error) {
+    db.close();
+    throw error;
+  }
+}

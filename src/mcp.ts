@@ -125,7 +125,7 @@ export async function runMcpServer(): Promise<void> {
     "squad_room_doctor",
     {
       description:
-        "Read-only room drift report: known unbanked work, integration/outline divergence, overdue/missing independent reviews, claim hygiene, and chat 'banked' claims that disagree with the verified integration ledger. Every finding cites its evidence, age and a concrete next command. Declared artifact commits are classified verified-clean, observed-unbanked, unreachable (absent from the configured integration repository) or unobserved (no integration target configured, or the check itself failed) -- an unreachable branch is never conflated with a verified-clean one. Any identity; never mutates the room.",
+        "Read-only room drift report: known unbanked work, integration/outline divergence, overdue/missing independent reviews, claim hygiene, and possible chat 'banked' claims requiring verification against the integration ledger (heuristic warnings, not proven contradictions). Every finding cites its evidence, age and a concrete next command. Declared artifact commits are classified verified-clean, observed-unbanked, unreachable (absent from the configured integration repository) or unobserved (no integration target configured, or the check itself failed) -- an unreachable branch is never conflated with a verified-clean one. Any identity; never mutates the room.",
       inputSchema: z
         .object({
           message_limit: z

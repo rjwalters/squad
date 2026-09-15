@@ -1,5 +1,5 @@
 import { identityFromEnv } from "./identity.js";
-import { openDb, dbPath, squadDir } from "./db.js";
+import { openDb, openDbReadOnly, dbPath, squadDir } from "./db.js";
 import {
   Squad,
   CARD_TERMINAL_PHASES,
@@ -303,6 +303,20 @@ export async function runCli(argv: string[]): Promise<void> {
     await runDoctor();
     return;
   }
+  if (cmd === "doctor") {
+    if (rest.length !== 1 || rest[0] !== "--room")
+      throw new Error("usage: squad doctor [--room]");
+    const db = openDbReadOnly();
+    try {
+      // This observer does not join or reserve an identity, even when a
+      // runtime exports a session ID. Reports are independent of persona.
+      const observer = new Squad(db, "room-doctor-observer");
+      process.stdout.write(formatRoomDoctorReport(observer.roomDoctor()));
+    } finally {
+      db.close();
+    }
+    return;
+  }
   if (cmd === "codex-reentry") {
     // Handled before the shared `Squad` below: the supervisor is not a
     // human-persona command (it acts as the Codex persona it supervises) and
@@ -326,12 +340,6 @@ export async function runCli(argv: string[]): Promise<void> {
   const squad = new Squad(db, cmd === "import" ? (persona ?? "human") : persona, identityFromEnv());
 
   switch (cmd) {
-    case "doctor": {
-      if (rest.length !== 1 || rest[0] !== "--room")
-        throw new Error("usage: squad doctor [--room]");
-      process.stdout.write(formatRoomDoctorReport(squad.roomDoctor()));
-      break;
-    }
     case "steward": {
       if (rest.length !== 1 || !["status", "tick"].includes(rest[0]!))
         throw new Error("usage: squad steward <status|tick>");

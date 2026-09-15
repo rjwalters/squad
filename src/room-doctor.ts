@@ -20,7 +20,9 @@ import type { IntegrationEvidence } from "./integration-ledger.js";
  */
 
 const OVERDUE_MS = 86_400_000; // 24h, matching stewardStatus()'s existing stale-claim threshold
-const BANK_CLAIM_RE = /\bbank(?:ed|ing)?\b/i;
+// Only completed-action wording is a candidate. Even this is a heuristic:
+// quoted, conditional, and multi-node prose cannot prove a banking claim.
+const BANK_CLAIM_RE = /\bbanked\b|\bbanking\s+(?:complete(?:d)?|succeeded|successful)\b/i;
 const REF_RE = /#(\d+)/g;
 /** A revision explicitly named in the message, e.g. "revision 3" / "rev #3" --
  * used to recognize a legitimate claim about a *historical* revision instead
@@ -287,7 +289,7 @@ function classifyArtifact(
       artifact_path: artifact.path,
       commit: artifact.commit,
       classification: "unreachable",
-      evidence: `commit ${short} for artifact ${artifact.path} is not present in the configured integration repository's object database -- it likely lives only on an unfetched branch.`,
+      evidence: `commit ${short} for artifact ${artifact.path} is not present in the configured integration repository's object database. No conclusion about remote branches is possible from this local check.`,
     };
   return {
     node_id: node.id,
@@ -324,6 +326,9 @@ export function buildRoomDoctorReport(input: RoomDoctorInput): RoomDoctorReport 
     if (activeAttempt) {
       evidenceParts.push(`attempt ${activeAttempt.attempt_id} status=${activeAttempt.status}`);
       next_step = `Inspect 'squad integration attempt ${activeAttempt.attempt_id}' evidence and resume with 'squad bank ${activeAttempt.attempt_id}'.`;
+    } else if (!status.configuration.config) {
+      evidenceParts.push("no integration target configured");
+      next_step = "Inspect 'squad integration show', then configure the intended target with 'squad integration set --repository <path> --remote <remote> --branch <branch> --build-command <command> --steward <persona> --expected-revision <revision>' before submitting this node.";
     } else {
       evidenceParts.push("no submission recorded for the current integration configuration");
       next_step = `Use 'squad node submit ${node.id} ${node.revision} <request-key> ${status.configuration.revision}', then 'squad bank <attempt-id>'.`;
@@ -370,7 +375,7 @@ export function buildRoomDoctorReport(input: RoomDoctorInput): RoomDoctorReport 
         ? now - Date.parse(latestVerifiedPublication.attempt.updated_ts)
         : null,
       next_step:
-        "Inspect 'squad outline status', resume a pending publication with its existing request key, or explicitly publish a new snapshot via 'squad outline publish'.",
+        "Inspect 'squad outline status', resume a pending publication with its existing request key, or explicitly publish a new snapshot via 'squad outline publish <request-key> [path]'.",
     });
 
   for (const row of input.reviewRequests) {
@@ -386,7 +391,7 @@ export function buildRoomDoctorReport(input: RoomDoctorInput): RoomDoctorReport 
       summary: `Review request ${row.id} for node ${row.card_id} revision ${row.revision} is ${expired ? "expired" : "overdue"} (${row.status}).`,
       evidence: `target=${row.target}, requested_by=${row.requested_by}, priority=${row.priority}, created=${row.created_ts}${row.expires_ts ? `, expires=${row.expires_ts}` : ", no expiry"}.`,
       age_ms,
-      next_step: `@${row.target} inspect 'squad review show ${row.id}' and node ${row.card_id} history; claim it with 'squad review claim ${row.id}' then resolve, or cancel it if it is stale.`,
+      next_step: `@${row.target} inspect 'squad review show ${row.id}' and node ${row.card_id} history; claim it with 'squad review claim ${row.id}', inspect the exact revision and integration evidence, then record independent review with 'squad node review ${row.id} <JSON>' using the persisted request key when resuming. Cancel the request if stale.`,
     });
   }
 
@@ -437,13 +442,13 @@ export function buildRoomDoctorReport(input: RoomDoctorInput): RoomDoctorReport 
     // interpretation must never be reported as an asserted contradiction.
     if (isUncertainBankMention(message.body)) continue;
     const age_ms = now - Date.parse(message.ts);
-    const refs = [...message.body.matchAll(REF_RE)].map((m) => Number(m[1]));
+    const refs = [...message.body.replace(REVISION_REF_RE, "").matchAll(REF_RE)].map((m) => Number(m[1]));
     const nodeRefs = refs.filter((id) => nodesById.has(id));
     if (!nodeRefs.length) {
       findings.push({
         category: "banking_claim_mismatch",
         severity: "info",
-        summary: `Chat claim of banking by ${message.sender} does not reference a resolvable node ID.`,
+        summary: `Possible banking claim by ${message.sender} does not reference a resolvable node ID.`,
         evidence: `message #${message.id} at ${message.ts}: "${truncate(message.body)}".`,
         age_ms,
         next_step:
@@ -462,11 +467,16 @@ export function buildRoomDoctorReport(input: RoomDoctorInput): RoomDoctorReport 
       const node = nodesById.get(id)!;
       if (node.banked) continue; // claim matches the verified record
       if (claimedRevision !== null && claimedRevision !== node.revision) continue;
+      // A revisionless message predating the current revision cannot speak
+      // for that revision. Preserve it in chat, but do not invent current drift.
+      const currentRevisionTs = node.revisions.find((r) => r.revision === node.revision)?.ts;
+      if (claimedRevision === null && currentRevisionTs &&
+          Date.parse(message.ts) < Date.parse(currentRevisionTs)) continue;
       findings.push({
         category: "banking_claim_mismatch",
-        severity: "critical",
-        summary: `Chat message claims node ${id} is banked, but the verified integration ledger disagrees.`,
-        evidence: `message #${message.id} from ${message.sender} at ${message.ts}: "${truncate(message.body)}"; node ${id} revision ${node.revision} currently has banked=false.`,
+        severity: "warning",
+        summary: `Possible banking claim for node ${id} needs verification against its currently unbanked revision.`,
+        evidence: `message #${message.id} from ${message.sender} at ${message.ts}: "${truncate(message.body)}"; node ${id} revision ${node.revision} currently has banked=false. Chat interpretation is heuristic; this does not establish that the sender asserted banking for this revision.`,
         age_ms,
         next_step: `Verify with 'squad node show ${id}' and 'squad integration attempts'; if truly unbanked, submit and bank it explicitly instead of treating the chat claim as evidence.`,
       });

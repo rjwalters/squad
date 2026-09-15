@@ -33,6 +33,21 @@ peer paths, without deleting claims, consuming messages or renewing presence.
 Ask the owner to inspect an advisory conflict; preserve intentional long-lived
 claims and user edits. An old timestamp alone does not authorize release.
 
+## Diagnose room drift
+
+Use `squad_room_doctor` / `squad doctor --room` for an evidence-backed drift
+report with ages and next commands. It reads declared work, integration attempts,
+outline freshness, outstanding reviews and advisory claims without changing state.
+The chat scan covers at most the latest 2,000 messages by default; possible banking
+claims are heuristic prompts to inspect the ledger, not proof of a false statement.
+A message about an older revision cannot establish banking of the current one.
+
+Local commit observations distinguish `verified_clean`, `observed_unbanked`,
+`unreachable` and `unobserved`. An absent local object says nothing about unfetched
+remote branches or undeclared private work. Cite the observed revision and evidence;
+preserve uncertainty when participants have different local repository visibility.
+Follow the explicit recovery actions below only after inspecting the finding.
+
 ## One bounded pass
 
 As the configured steward, invoke `squad_steward_tick` / `squad steward tick`.

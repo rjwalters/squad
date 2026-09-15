@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -202,7 +202,7 @@ test("partially observable room: no integration configured, reachability cannot 
   assert.match(report.branch_observations[0].evidence, /no integration target is configured/);
   assert.match(
     findings(report, "unbanked_work")[0].next_step,
-    new RegExp(`squad node submit ${node.id} ${node.revision} <request-key> 0`),
+    /squad integration set/,
   );
 });
 
@@ -219,10 +219,10 @@ test("chat banking claims are cross-checked against the ledger, not taken on fai
 
   const report = squad.roomDoctor();
   const mismatches = findings(report, "banking_claim_mismatch");
-  const critical = mismatches.filter((f) => f.severity === "critical");
+  const warnings = mismatches.filter((f) => f.severity === "warning");
   const info = mismatches.filter((f) => f.severity === "info");
-  assert.equal(critical.length, 1);
-  assert.match(critical[0].evidence, new RegExp(`node ${node.id} revision`));
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0].evidence, new RegExp(`node ${node.id} revision`));
   assert.equal(info.length, 1);
   assert.match(info[0].summary, /does not reference a resolvable node ID/);
 });
@@ -307,6 +307,10 @@ test("chat mentions of banking that are not assertions of current state never be
   squad.send(`please bank #${node.id} once you get a chance`); // request/intent
   squad.send(`is #${node.id} banked?`); // genuine question -- uncertain, not asserted
 
+  squad.send(`Banking node #${node.id} failed.`);
+  squad.send(`I will bank node #${node.id} tomorrow.`);
+  squad.send(`The bank status for node #${node.id} is pending.`);
+
   const report = squad.roomDoctor();
   assert.equal(
     findings(report, "banking_claim_mismatch").length,
@@ -327,6 +331,9 @@ test("chat claims about a superseded revision are not compared against the curre
   const receipt = await squad.bank(attempt.id);
   assert.equal(receipt.status, "verified", JSON.stringify(receipt.evidence));
 
+  squad.send(`node #${node.id} was banked after review`);
+  // Ensure this historical message precedes the next durable revision.
+  await new Promise((resolve) => setTimeout(resolve, 5));
   writeFileSync(join(repo, "proof.txt"), "revised proof\n");
   git(repo, "add", ".");
   git(repo, "commit", "-qm", "revise proof");
@@ -353,4 +360,30 @@ test("chat claims about a superseded revision are not compared against the curre
 test("MCP: squad_room_doctor is registered as a read-only tool", () => {
   const mcpSrc = readFileSync("src/mcp.ts", "utf8");
   assert.match(mcpSrc, /registerTool\(\s*"squad_room_doctor"/);
+});
+
+
+test("CLI doctor neither reserves runtime identities nor migrates or creates a room", (t) => {
+  const { root, db, squad } = bareRoom(t);
+  squad.nodeCreate({ title: "existing work", question: "preserve?" });
+  const env = { ...process.env, SQUAD_SESSION_ID: "doctor-read-only-session" };
+  delete env.SQUAD_PERSONA;
+  const run = (...args) => spawnSync(process.execPath, ["dist/index.js", ...args], { encoding: "utf8", env });
+  const snapshot = () => db.prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all()
+    .map(({ name }) => [name, db.prepare(`SELECT * FROM "${name.replaceAll('"', '""')}"`).all()]);
+  const before = snapshot();
+  const result = run("doctor", "--room");
+  assert.equal(result.status, 0, result.stdout + result.stderr);
+  assert.deepEqual(snapshot(), before, "every durable table must remain unchanged");
+  db.exec("PRAGMA user_version = 1");
+  const oldSchema = run("doctor", "--room");
+  assert.notEqual(oldSchema.status, 0);
+  assert.match(oldSchema.stderr, /schema 1.*expected/);
+  assert.equal(db.prepare("PRAGMA user_version").get().user_version, 1);
+  assert.deepEqual(snapshot(), before);
+  env.SQUAD_DIR = join(root, "absent-room");
+  assert.notEqual(run("doctor", "--room").status, 0);
+  assert.equal(existsSync(env.SQUAD_DIR), false);
+  assert.notEqual(run("doctor", "--room", "extra").status, 0);
+  assert.equal(existsSync(env.SQUAD_DIR), false);
 });

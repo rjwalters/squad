@@ -573,10 +573,9 @@ concrete next command -- never a bare conclusion. Declared artifact commits
 are classified `verified_clean` (backed by a verified integration record),
 `observed_unbanked` (the commit exists in the configured integration
 repository but the node is not yet banked), `unreachable` (the commit is not
-present in that repository's object database -- most likely still confined to
-an unfetched per-agent branch), or `unobserved` (no integration target is
+present in that repository's object database; remote branches remain unobserved), or `unobserved` (no integration target is
 configured, or the reachability check itself could not be performed, e.g. an
 inaccessible repository path) -- an unreachable or unobserved branch is never
 reported as if it were verified clean. Two runs against one unchanged observed
-revision/state always agree. Any identity may run it; it never writes to the
+revision/state and observation time agree, provided local repository visibility also agrees. Chat findings are heuristic warnings requiring verification, never proof that a participant falsely claimed banking. The default scan covers the latest 2,000 chat messages. Any identity may run it; it never writes to the
 room, sends chat, or renews presence.
