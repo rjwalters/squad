@@ -514,6 +514,9 @@ Research rooms can opt into a [shared integration target](docs/integration.md).
 Its repository, remote, branch, build command and steward are revisioned in the
 room. Submit committed work, then run `squad bank <attempt-id>` (MCP `squad_bank`)
 to integrate in isolation, build the exact candidate and publish without force.
+Authors may use independent clones: make submitted commit objects available in
+the configured repository; its selected paths must be clean against its own HEAD.
+Banking reads exact submitted blobs even when that checkout is at another revision.
 Only a verified receipt means banked; configuration and chat claims do not.
 
 ### Durable research nodes

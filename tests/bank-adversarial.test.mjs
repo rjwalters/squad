@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { openDb } from "../dist/db.js";
@@ -105,6 +105,7 @@ const artifactBuild = nodeCommand(
 test("path banking excludes unrelated committed changes and preserves unrelated source dirt", async (t) => {
   const f = fixture(t);
   f.configure(artifactBuild);
+  git(f.source, "checkout", "main");
   writeFileSync(join(f.source, "other.txt"), "unrelated dirty work\n");
   writeFileSync(join(f.source, "scratch.txt"), "untracked notes\n");
   const before = f.sourceState();
@@ -231,4 +232,67 @@ test("divergent selected-path edits fail with source and remote state preserved"
   assert.equal(result.status, "failed");
   assert.equal(git(f.remote, "rev-parse", "main"), remoteBefore);
   assert.deepEqual(f.sourceState(), before);
+});
+
+for (const dirt of ["unstaged", "staged", "assume-unchanged", "skip-worktree"]) {
+  test(`different configured HEAD rejects selected ${dirt} work and permits a clean retry`, async (t) => {
+    const f = fixture(t);
+    git(f.source, "checkout", "main");
+    f.configure(artifactBuild);
+    if (["assume-unchanged", "skip-worktree"].includes(dirt))
+      git(f.source, "update-index", `--${dirt}`, "proof.txt");
+    writeFileSync(join(f.source, "proof.txt"), "contribution\n");
+    if (dirt === "staged") git(f.source, "add", "proof.txt");
+    const before = f.sourceState();
+    const attempt = f.submit({ paths: ["proof.txt"] });
+    const failed = await f.squad.bank(attempt.id);
+    assert.equal(failed.status, "failed");
+    assert.deepEqual(f.sourceState(), before);
+    assert.equal(git(f.remote, "rev-parse", "main"), f.base);
+    if (["assume-unchanged", "skip-worktree"].includes(dirt))
+      git(f.source, "update-index", `--no-${dirt}`, "proof.txt");
+    git(f.source, "restore", "--source=HEAD", "--staged", "--worktree", "proof.txt");
+    const result = await f.squad.bank(attempt.id);
+    assert.equal(result.status, "verified", JSON.stringify(result.evidence));
+    assert.ok(result.evidence.some((e) => e.event.kind === "failure"));
+    assert.ok(result.evidence.some((e) => e.event.kind === "retry"));
+    assert.equal(git(f.source, "rev-parse", "HEAD"), f.base);
+  });
+}
+for (const dirt of ["untracked", "ignored", "staged", "directory"]) {
+  test(`selected path absent at configured HEAD rejects ${dirt} local work`, async (t) => {
+    const f = fixture(t);
+    git(f.source, "checkout", "main");
+    git(f.source, "rm", "proof.txt");
+    git(f.source, "commit", "-qm", "configured checkout without proof");
+    f.configure(artifactBuild);
+    if (dirt === "directory") mkdirSync(join(f.source, "proof.txt"));
+    else writeFileSync(join(f.source, "proof.txt"), "contribution\n");
+    if (dirt === "ignored") writeFileSync(join(f.source, ".git", "info", "exclude"), "proof.txt\n");
+    if (dirt === "staged") git(f.source, "add", "proof.txt");
+    const index = readFileSync(join(f.source, ".git", "index"));
+    const result = await f.squad.bank(f.submit({ paths: ["proof.txt"] }).id);
+    assert.equal(result.status, "failed");
+    assert.match(result.evidence.at(-1).event.message, /uncommitted work/);
+    assert.deepEqual(readFileSync(join(f.source, ".git", "index")), index);
+    assert.equal(git(f.remote, "rev-parse", "main"), f.base);
+  });
+}
+
+test("selected Unicode and tab paths use raw index records", async (t) => {
+  const f = fixture(t);
+  const path = "preuve-é\t.txt";
+  git(f.source, "mv", "proof.txt", path);
+  git(f.source, "commit", "-qm", "rename selected artifact");
+  const commit = git(f.source, "rev-parse", "HEAD");
+  f.configure(nodeCommand(`require('node:assert/strict').equal(require('node:fs').readFileSync(${JSON.stringify(path)},'utf8'),'contribution\\n')`));
+  const attempt = f.squad.integrationSubmit({
+    request_key: "unicode-artifact",
+    config_revision: 1,
+    commits: [commit],
+    selection: { paths: [path] },
+  });
+  const result = await f.squad.bank(attempt.id);
+  assert.equal(result.status, "verified", JSON.stringify(result.evidence));
+  assert.equal(git(f.remote, "show", `main:${path}`), "contribution");
 });
