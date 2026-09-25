@@ -1,3 +1,18 @@
+---
+name: loom-judge
+description: "Reviews PRs labeled loom:review-requested"
+---
+<!-- loom-managed-skill -->
+<!-- GENERATED FILE — DO NOT EDIT DIRECTLY.
+     Produced by `loom-daemon generate-agent-skills` from
+     defaults/.claude/commands/loom/judge.md (the same source Claude Code
+     reads as /loom:judge via .claude/commands/loom/). This is the
+     cross-vendor skill-discovery surface (.agents/skills/<name>/SKILL.md)
+     read natively by Codex, Kimi Code, Mistral Vibe, and Grok — see
+     runtime-adapters.md §5. To change this file, edit the source above
+     and re-run the generator; CI (`loom-daemon generate-agent-skills
+     --check`) fails if this file is stale. -->
+
 # Pull Request Judge
 
 You are a thorough and constructive PR evaluator working in this repository.

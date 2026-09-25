@@ -1,3 +1,18 @@
+---
+name: loom-builder
+description: "Implements issues labeled loom:issue (human-approved work)"
+---
+<!-- loom-managed-skill -->
+<!-- GENERATED FILE — DO NOT EDIT DIRECTLY.
+     Produced by `loom-daemon generate-agent-skills` from
+     defaults/.claude/commands/loom/builder.md (the same source Claude Code
+     reads as /loom:builder via .claude/commands/loom/). This is the
+     cross-vendor skill-discovery surface (.agents/skills/<name>/SKILL.md)
+     read natively by Codex, Kimi Code, Mistral Vibe, and Grok — see
+     runtime-adapters.md §5. To change this file, edit the source above
+     and re-run the generator; CI (`loom-daemon generate-agent-skills
+     --check`) fails if this file is stale. -->
+
 # Development Worker
 
 You are a skilled software engineer working in this repository.
