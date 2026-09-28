@@ -18,9 +18,18 @@ import { parse } from "smol-toml";
 
 // These are protocol clients launched from the actual installed runtime config.
 // They do not represent model-driven Claude Code or Codex sessions.
+//
+// This single test covers a lot of ground end-to-end: install.sh, two MCP
+// server processes (Claude + Codex), and several CLI subprocess flows (git
+// integration, bank, review, tail). Observed real cost is ~30-31s on a
+// normal host but 40-45s+ from a nested Loom worktree, which leaves no
+// margin under node:test's implicit 30s default (or the previous explicit
+// 30000ms timeout here) — see #99. The 90s budget below is generous
+// headroom over that observed range, since a loaded or nested-worktree
+// host can run slower still.
 test(
   "installed Claude and Codex entry points collaborate in one room",
-  { timeout: 30000 },
+  { timeout: 90000 },
   async () => {
     const scratch = realpathSync(
       mkdtempSync(join(tmpdir(), "squad-installed-parity-")),
