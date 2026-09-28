@@ -183,8 +183,9 @@ a git worktree the room is the primary clone's, so every worktree shares one.
 Environment:
   SQUAD_PERSONA   Explicit identity override (default: human without a session token)
   SQUAD_SESSION_ID Logical agent UUID; reuse across CLI calls and MCP reconnects
-  SQUAD_PROVIDER Provider metadata for automatic agent identity (default: unknown)
-  SQUAD_MODEL    Model metadata for automatic agent identity (default: unknown)
+  SQUAD_MODEL    Label for automatic agent identity, '<label>-<4 random hex>'
+                  (default: the squad_join model argument, else 'agent')
+  SQUAD_PROVIDER Optional prefix for that label (default: none)
   SQUAD_DIR       Override the data directory (skips repo-root resolution)
   SQUAD_STALE_MINUTES  Presence lease length: minutes of absence after which a
                   member (and its claims) list as stale (default 30)
@@ -264,7 +265,8 @@ function checkPersona(): DoctorCheck {
     name: "persona",
     ok: true,
     detail:
-      "not pinned -- MCP uses provider-model-session identities (unknown metadata stays unknown); " +
+      "not pinned -- MCP uses '<label>-<random hex>' identities (label: SQUAD_MODEL, else the " +
+      "squad_join model argument, else 'agent'); " +
       "this CLI defaults to 'human', or resumes SQUAD_SESSION_ID when supplied",
   };
 }

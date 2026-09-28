@@ -49,21 +49,29 @@ you         ──run─────► squad CLI ──────────
 **Moving a room between repos:** because the room is per-repo local state (created fresh, empty, by `install.sh`), a long-running collaboration that outgrows its host repo needs an explicit move, not a copy of `squad.db` — a plain `cp` can tear a live WAL-mode database mid-write, and stale `-wal`/`-shm` sidecars left behind in a destination directory can shadow whatever you restore over them. `squad export <path>` writes every room table (messages, goals, claims, cursors, members, presence sessions, divergence rounds, review requests, and Science Cards with their evidence/transition history) to a single portable SQLite file at `<path>`, using SQLite's Online Backup API so it reads correctly through any pending WAL writes even while an MCP server is still holding the room open. `squad import <path>` loads that file into the *current* room — refusing cleanly, with no partial writes, if the export was produced by a schema-incompatible squad build, or if the destination room isn't empty (run `squad clear` first). Export is non-destructive: the source room is left exactly as it was, so a deliberate `squad clear` or `squad nuke` on the old side is a separate, explicit step once you've confirmed the new room looks right.
 
 **Identity** is stamped server-side. Unpinned MCP connections automatically get
-`<provider>-<model>-<short-session-id>` names, so two sessions see each other's
-messages. Configure trusted launcher metadata with `SQUAD_PROVIDER` and
-`SQUAD_MODEL`; absent/empty metadata becomes `unknown` independently (for example,
-`unknown-unknown-a1b2c3d4`). Squad never infers a provider or model from a harness:
-Codex and Claude Code are harnesses and can use different backends. No runtime
-model file is scraped. Launchers must supply the actual selected metadata.
+`<label>-<4 random hex>` names (for example `opus-5-3f2a`, `gpt-6-9c81`, or
+`agent-be04`), so two sessions see each other's messages. The label is, in order:
+trusted launcher metadata `SQUAD_MODEL`; else the optional `model` argument the
+agent passes to its first `squad_join`; else the literal `agent`. `SQUAD_PROVIDER`,
+when set, prefixes the label (`groq-llama-3-3f2a`) for anyone who needs provider
+disambiguation; it is never defaulted. Squad never infers a model from a harness:
+Codex and Claude Code are harnesses and can use different backends, and no runtime
+model file is scraped. The `model` argument is self-reported rather than trusted,
+which is safe because the server alone picks the suffix and refuses names already
+held, so a label can neither choose nor collide with a peer's name. It only labels a
+freshly minted, not-yet-used name: `SQUAD_MODEL` wins over it, and it never renames a
+resumed or already-published identity.
 
 A non-null `identity_id` in `squad_join` is the durable automatic identity token
 (save it as `SQUAD_SESSION_ID`). Explicit personas, including after a rename,
 return null and must use the returned persona as `SQUAD_PERSONA` instead; `session_id` is only the presence lease ID.
 Each connection creates a random UUID unless its launcher supplies
-`SQUAD_SESSION_ID=<uuid>` for a logical session. The first eight hexadecimal
-characters form the suffix. SQLite serializes name reservations, extending a
-colliding suffix by four characters until unique (up to the full UUID; a full
-collision fails explicitly). Reservations survive lease expiry and reconnects,
+`SQUAD_SESSION_ID=<uuid>` for a logical session. That token is a bearer credential,
+so the visible suffix is drawn from fresh randomness and never discloses any part
+of it. SQLite serializes name reservations; a colliding suffix is rerolled (never
+lengthened), and a bounded run of collisions fails explicitly. Because the suffix
+is random, the same logical session gets a different name in a different room.
+Reservations survive lease expiry and reconnects,
 including hosts using the same room database. Distinct sessions must have distinct
 UUIDs; reusing one deliberately means the same logical identity. Separate room
 databases do not coordinate reservations.
@@ -71,14 +79,17 @@ databases do not coordinate reservations.
 Names are frozen for the session: runtime model changes do not rename existing
 claims, reviews, or senders. A restarted MCP process gets a new identity unless
 the launcher supplies its previous `SQUAD_SESSION_ID`; with that token it restores
-the reserved name even if metadata changed or the presence lease ended. Presence
+the reserved name even if metadata (or the `model` argument) changed or the
+presence lease ended. Presence
 leases still use independent per-connection UUIDs. Keep the token in launcher
 state and pass it on resume. Room clear removes identity reservations too; connected agents restore their
 reservation on the next operation (resolving any new collision before sending). Exports
-include them (schema version 3).
+include them (schema version 3). Rooms need no migration: reservations made under the
+earlier `<provider>-<model>-<session-prefix>` format keep resolving to those names;
+only new identities get the new format.
 
-Provider/model components are lowercased, non-alphanumerics become hyphens, and
-each is capped at 40 characters. The unique suffix is never truncated. Custom
+Label components (`SQUAD_PROVIDER`, and the model) are lowercased,
+non-alphanumerics become hyphens, and each is capped at 40 characters. The unique suffix is never truncated. Custom
 join names accept 1–128 ASCII letters, digits, underscores or hyphens, starting
 with a letter or digit. `SQUAD_PERSONA` overrides automatic naming and remains a
 namespace: `codex` accepts `codex-2`, but refuses unrelated names. Explicit join
@@ -90,7 +101,7 @@ Custom co-named sessions still receive `identity_collision` warnings.
 
 The human CLI defaults to `human`. To act as an MCP agent, pass its exact returned
 name on every call (`SQUAD_PERSONA=<joined-name> squad send ...`), or share its
-launcher-provided `SQUAD_SESSION_ID`, `SQUAD_PROVIDER`, and `SQUAD_MODEL`. CLI calls
+launcher-provided `SQUAD_SESSION_ID` (plus `SQUAD_MODEL`/`SQUAD_PROVIDER` when set). CLI calls
 with a session token restore the same reserved identity across invocations. For
 new CLI workers, generate a UUID once per worker and retain it for all calls.
 Subagents share the parent's MCP connection, so use the CLI with their own token

@@ -11,7 +11,12 @@ import { nodeMetadata, nodeRevisions, recordNodeRevision, validateNodeMetadata, 
 import { executeIntegration, type BankOptions } from "./integration-executor.js";
 import { IntegrationLedger, type IntegrationSubmission, type IntegrationFilter } from "./integration-ledger.js";
 import { resolveIntegration, validateIntegration, type IntegrationInput, type IntegrationState } from "./integration.js";
-import { automaticPersona, type AgentIdentity } from "./identity.js";
+import {
+  automaticLabel,
+  automaticPersona,
+  reserveAutomaticPersona,
+  type AgentIdentity,
+} from "./identity.js";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, backup } from "node:sqlite";
 import { existsSync } from "node:fs";
@@ -722,11 +727,21 @@ export class Squad {
     this.automaticIdentity = persona === undefined
       ? { ...identity, sessionId: identity.sessionId ?? randomUUID() }
       : null;
-    this._persona = persona ?? automaticPersona(db, this.automaticIdentity!);
+    if (persona !== undefined) {
+      this._persona = persona;
+    } else {
+      const reserved = reserveAutomaticPersona(db, this.automaticIdentity!);
+      this._persona = reserved.persona;
+      // Only a name this connection just minted, with no trusted SQUAD_MODEL,
+      // may still take a self-reported label — and only until first published.
+      this.labelOpen = reserved.minted && !this.automaticIdentity!.model?.trim();
+    }
   }
 
   private _persona: string;
   private automaticIdentity: AgentIdentity | null;
+  /** Whether a self-reported model may still relabel this automatic identity. */
+  private labelOpen = false;
 
   /** Automatic resume token; explicit personas must resume through SQUAD_PERSONA. */
   get identityId(): string | null {
@@ -1583,9 +1598,39 @@ export class Squad {
     }
   }
 
+  /**
+   * Apply a self-reported model (the `squad_join` `model` argument) as the
+   * label of this connection's automatic name. Trusted `SQUAD_MODEL` always
+   * wins; a resumed or already-published name never changes; the server
+   * always draws a fresh suffix, so the model cannot pick or collide a name.
+   */
+  requestModelLabel(model: string): PersonaRequestResult {
+    const identity = this.automaticIdentity;
+    if (!identity) return { persona: this._persona, applied: false };
+    const wanted = automaticLabel({ ...identity, model: undefined, label: model });
+    const tail = this._persona.startsWith(`${wanted}-`) ? this._persona.slice(wanted.length + 1) : "";
+    if (/^[a-f0-9]+$/.test(tail)) return { persona: this._persona, applied: false };
+    if (!this.labelOpen) {
+      const reason = identity.model?.trim()
+        ? "SQUAD_MODEL launcher metadata takes precedence"
+        : "an established automatic name is never renamed";
+      return {
+        persona: this._persona,
+        applied: false,
+        note: `model '${model}' not applied to '${this._persona}': ${reason}.`,
+      };
+    }
+    const next = { ...identity, label: model };
+    this._persona = reserveAutomaticPersona(this.db, next, { relabelFrom: this._persona }).persona;
+    this.automaticIdentity = next;
+    this.labelOpen = false;
+    return { persona: this._persona, applied: true };
+  }
+
   /** Rename this connection's identity (used by persona autofill on join). */
   setPersona(persona: string): void {
     this.automaticIdentity = null;
+    this.labelOpen = false;
     this._persona = persona;
   }
 
@@ -1630,8 +1675,9 @@ export class Squad {
     if (this.automaticIdentity && !this.db.prepare(
       "SELECT 1 FROM agent_identities WHERE identity_id = ?",
     ).get(this.identityId!.toLowerCase())) {
-      this._persona = automaticPersona(this.db, this.automaticIdentity);
+      this._persona = automaticPersona(this.db, this.automaticIdentity, { prefer: this._persona });
     }
+    this.labelOpen = false;
     const ts = now();
     this.db
       .prepare(

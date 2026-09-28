@@ -329,8 +329,12 @@ export async function runMcpServer(): Promise<void> {
         "history. Your lease renews on every squad_* call, so nothing extra is needed to stay " +
         "active; call squad_leave when you are done. Advances your read cursor past the " +
         "returned history, so squad_check afterwards yields only new messages. Idempotent — " +
-        "call again anytime to re-sync. Your identity defaults to provider-model-session suffix; the " +
-        "optional persona argument renames this connection. A pinned identity (SQUAD_PERSONA " +
+        "call again anytime to re-sync. Unpinned, your identity is '<label>-<4 random hex>' (e.g. " +
+        "'opus-5-3f2a'): the label is SQUAD_MODEL launcher metadata (prefixed by SQUAD_PROVIDER when " +
+        "set), else the optional model argument you pass here, else 'agent'. Pass model on your first " +
+        "squad_join; it is ignored when SQUAD_MODEL is set and never renames a resumed or already-used " +
+        "name. The server always picks the suffix. The optional persona argument renames this " +
+        "connection instead. A pinned identity (SQUAD_PERSONA " +
         "config) is a namespace, not a fixed name: a rename that refines it — '<pinned>-<suffix>', " +
         "e.g. 'codex-2' — is honored, which is how several sessions of one agent stay visible to " +
         "each other; any other name is refused (with a note in the result). If the identity you " +
@@ -347,12 +351,24 @@ export async function runMcpServer(): Promise<void> {
             "Preferred identity for this connection. When pinned via config, only a " +
               "refinement of the pinned name is honored (e.g. 'codex' -> 'codex-2')",
           ),
+        model: z
+          .string()
+          .min(1)
+          .max(128)
+          .optional()
+          .describe(
+            "The model you are (e.g. 'opus-5', 'gpt-6'), self-reported, used as the label of your " +
+              "automatic name when no SQUAD_MODEL is configured. Ignored when pinned or renamed.",
+          ),
       },
     },
-    async ({ persona: requested }) => {
+    async ({ persona: requested, model }) => {
       const notes: string[] = [];
       if (requested && requested !== squad.persona) {
         const outcome = squad.requestPersona(requested, pinned ?? null);
+        if (outcome.note) notes.push(outcome.note);
+      } else if (model) {
+        const outcome = squad.requestModelLabel(model);
         if (outcome.note) notes.push(outcome.note);
       }
       // join() reports an identity collision — another live session already
