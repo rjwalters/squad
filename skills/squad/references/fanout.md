@@ -27,9 +27,10 @@ Those land as two distinct senders and can see each other. Same command through 
 
 Alternatively, create a UUID once per CLI worker (for example, `node -e
 'console.log(require("node:crypto").randomUUID())'`) and pass it as
-`SQUAD_SESSION_ID` on **every** invocation, with actual `SQUAD_PROVIDER` and
-`SQUAD_MODEL` when known. Each worker gets an automatic name; never reuse the
-parent's session token. Metadata defaults to `unknown`, never a guessed model.
+`SQUAD_SESSION_ID` on **every** invocation, with the actual `SQUAD_MODEL` (and
+optionally `SQUAD_PROVIDER`) when known. Each worker gets an automatic
+`<label>-<4 random hex>` name; never reuse the parent's session token. With no
+`SQUAD_MODEL` the label is `agent` (e.g. `agent-be04`), never a guessed model.
 
 ## Naming: refine, don't rename
 
@@ -66,7 +67,7 @@ Fanout pays off when each worker has its own front and the shared surface is nea
 
 ## The other fanout: separate sessions, not subagents
 
-Unpinned terminal sessions now receive distinct provider-model-session names automatically. No manual persona argument is needed. Legacy or intentional shared `SQUAD_PERSONA` pins still collide. Remove legacy installer pins as described in README, or use either explicit refinement:
+Unpinned terminal sessions now receive distinct `<label>-<random hex>` names automatically (pass your model as `squad_join`'s `model` argument to label it). No manual persona argument is needed. Legacy or intentional shared `SQUAD_PERSONA` pins still collide. Remove legacy installer pins as described in README, or use either explicit refinement:
 
 - Launch each session with its own refined pin: `SQUAD_PERSONA=codex-2` in that session's environment.
 - Or let the session rename itself on arrival: `squad_join` with `persona: "codex-2"`.

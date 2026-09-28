@@ -19,6 +19,7 @@ test("real MCP sessions and CLI calls retain server-stamped identities", async (
     };
     delete env.SQUAD_PERSONA;
     if (!extra.SQUAD_SESSION_ID) delete env.SQUAD_SESSION_ID;
+    for (const [key, value] of Object.entries(extra)) if (value === null) delete env[key];
     const client = new Client({ name: "identity-test", version: "1" });
     clients.push(client);
     await client.connect(
@@ -38,7 +39,7 @@ test("real MCP sessions and CLI calls retain server-stamped identities", async (
     const b = await connect();
     const first = await call(a, "squad_join");
     const second = await call(b, "squad_join");
-    assert.match(first.persona, /^openai-gpt-6-[a-f0-9]{8}$/);
+    assert.match(first.persona, /^openai-gpt-6-[a-f0-9]{4}$/);
     assert.notEqual(first.persona, second.persona);
     assert.notEqual(first.identity_id, first.session_id);
     assert.equal((await call(a, "squad_join")).persona, first.persona);
@@ -81,6 +82,18 @@ test("real MCP sessions and CLI calls retain server-stamped identities", async (
       SQUAD_MODEL: "different",
     });
     assert.equal((await call(resumed, "squad_join")).persona, first.persona);
+    // Self-reported model labels an unconfigured connection; env metadata wins over it.
+    const bare = await connect({ SQUAD_PROVIDER: null, SQUAD_MODEL: null });
+    const labelled = await call(bare, "squad_join", { model: "Opus 5" });
+    assert.match(labelled.persona, /^opus-5-[a-f0-9]{4}$/);
+    assert.equal(labelled.note, undefined);
+    assert.equal((await call(bare, "squad_join", { model: "gpt-6" })).persona, labelled.persona);
+    const unlabelled = await connect({ SQUAD_PROVIDER: null, SQUAD_MODEL: null });
+    assert.match((await call(unlabelled, "squad_join")).persona, /^agent-[a-f0-9]{4}$/);
+    const configured = await connect();
+    const envWins = await call(configured, "squad_join", { model: "opus-5" });
+    assert.match(envWins.persona, /^openai-gpt-6-[a-f0-9]{4}$/);
+    assert.match(envWins.note, /SQUAD_MODEL/);
     const invalid = await b.callTool({
       name: "squad_join",
       arguments: { persona: "a".repeat(129) },

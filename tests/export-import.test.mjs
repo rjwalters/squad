@@ -262,3 +262,19 @@ test("empty (freshly-installed) room exports and imports cleanly", async () => {
   const importCounts = dest.squad.importRoom(exportPath);
   for (const t of ROOM_TABLES) assert.equal(importCounts[t], 0);
 });
+
+test("old- and new-format automatic identities round-trip unchanged through export/import (#96)", async () => {
+  const src = freshRoom("claude");
+  const legacyId = "abcdef01-2222-4222-8222-222222222222";
+  src.db
+    .prepare("INSERT INTO agent_identities (identity_id, persona) VALUES (?, ?)")
+    .run(legacyId, "unknown-unknown-abcdef01");
+  const current = new Squad(src.db, undefined, { model: "opus-5" });
+  current.join();
+  const dest = join(src.dir, "identities-export.db");
+  await src.squad.exportRoom(dest);
+  const dst = freshRoom("claude");
+  dst.squad.importRoom(dest);
+  assert.equal(new Squad(dst.db, undefined, { sessionId: legacyId, model: "opus-5" }).persona, "unknown-unknown-abcdef01");
+  assert.equal(new Squad(dst.db, undefined, { sessionId: current.identityId }).persona, current.persona);
+});
