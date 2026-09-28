@@ -7,8 +7,9 @@
 # consumer), squad's install.sh copies a narrower surface into each target
 # repo -- commands/squad/*.md and skills/squad/SKILL.md into
 # .claude/commands/squad/ + .claude/skills/squad/ (install.sh copies these
-# per-repo), plus the opt-in hooks/squad-reentry.sh (installed only with
-# --reentry). codex/prompts/squad-*.md is copied globally into
+# per-repo), plus hooks/ -- squad-mcp.mjs, the project MCP launcher .mcp.json
+# names, is installed into every consumer repo, and squad-reentry.sh is
+# installed with --reentry. codex/prompts/squad-*.md is copied globally into
 # ~/.codex/prompts/, not per-repo, but is still consumer-visible surface with
 # the same staleness risk. install.sh and uninstall.sh define what actually
 # gets copied/removed, so a behavior change there is exactly as
@@ -65,7 +66,7 @@ WATCHED_PATHS=(
   "commands/squad/"
   "skills/squad/"
   "codex/prompts/"
-  "hooks/squad-reentry.sh"
+  "hooks/"
   "install.sh"
   "uninstall.sh"
   "scripts/install-lifecycle.mjs"
@@ -148,11 +149,12 @@ echo "check-surface-version-bump: FAIL — consumer-visible surface changed with
 echo "" >&2
 echo "$CHANGED_FILES" | sed 's/^/  /' >&2
 echo "" >&2
-echo "commands/squad/, skills/squad/SKILL.md, codex/prompts/, and (when" >&2
-echo "installed with --reentry) hooks/squad-reentry.sh are copied into every" >&2
+echo "commands/squad/, skills/squad/SKILL.md, codex/prompts/, hooks/squad-mcp.mjs" >&2
+echo "and (with --reentry) hooks/squad-reentry.sh are copied into every" >&2
 echo "consumer repo by install.sh; install.sh/uninstall.sh define that copy" >&2
 echo "behavior; src/ compiles to the MCP server every installed .mcp.json" >&2
-echo "invokes directly. VERSION is the signal install-metadata.json and" >&2
+echo "invokes through that launcher. VERSION is the signal" >&2
+echo "install-metadata.json and" >&2
 echo "/repo:update-tools use to detect drift, so a change to this surface must" >&2
 echo "bump it (at minimum the patch component), keeping VERSION and" >&2
 echo "package.json's \"version\" field in sync:" >&2

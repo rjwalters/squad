@@ -42,7 +42,9 @@ Codex       ──spawns──► squad (stdio MCP) ──┼──► <repo>/.s
 you         ──run─────► squad CLI ──────────┘
 ```
 
-**Room resolution:** an explicit `SQUAD_DIR` env wins (fresh installs set it to `.squad` in the repo's `.mcp.json`, relative to the project working directory); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. A linked **git worktree** resolves to the primary clone's room (via `git rev-parse --git-common-dir`), so a fleet running each agent in its own worktree still shares one room. Outside any repo, the fallback is `~/.squad`.
+**Room resolution:** an explicit `SQUAD_DIR` env wins (fresh installs set it to `.squad` in the repo's `.mcp.json`); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. A linked **git worktree** resolves to the primary clone's room (via `git rev-parse --git-common-dir`), so a fleet running each agent in its own worktree still shares one room. Outside any repo, the fallback is `~/.squad`.
+
+**Worktree sessions** are supported for the Claude runtime as long as the installed `.claude/hooks/squad-mcp.mjs` launcher and `.mcp.json` are committed — a linked worktree only contains tracked files. `.mcp.json` names that in-repo launcher rather than the runtime itself, because a path relative to the project working directory would resolve beside the worktree, where no squad checkout exists; the launcher then resolves both the runtime (`SQUAD_RUNTIME`) and a relative `SQUAD_DIR` against the primary clone, so a worktree session spawns the server from the same checkout and joins the same room as the primary clone. A worktree that wants its own room can still opt in by creating its own `.squad/`. Codex's global registration already uses an absolute source path and is unaffected.
 
 **Moving a room between repos:** because the room is per-repo local state (created fresh, empty, by `install.sh`), a long-running collaboration that outgrows its host repo needs an explicit move, not a copy of `squad.db` — a plain `cp` can tear a live WAL-mode database mid-write, and stale `-wal`/`-shm` sidecars left behind in a destination directory can shadow whatever you restore over them. `squad export <path>` writes every room table (messages, goals, claims, cursors, members, presence sessions, divergence rounds, review requests, and Science Cards with their evidence/transition history) to a single portable SQLite file at `<path>`, using SQLite's Online Backup API so it reads correctly through any pending WAL writes even while an MCP server is still holding the room open. `squad import <path>` loads that file into the *current* room — refusing cleanly, with no partial writes, if the export was produced by a schema-incompatible squad build, or if the destination room isn't empty (run `squad clear` first). Export is non-destructive: the source room is left exactly as it was, so a deliberate `squad clear` or `squad nuke` on the old side is a separate, explicit step once you've confirmed the new room looks right.
 
@@ -154,13 +156,18 @@ Global wiring is shared by every consumer repository on the machine. Its Codex
 launcher uses an absolute source path so it works from any project directory;
 refresh global setup on each machine after moving the Squad checkout.
 
-When the Squad checkout and target repository are siblings, project `.mcp.json`
-uses `../<squad-checkout>/dist/index.js` and `SQUAD_DIR: .squad`. Start the MCP
-client in the target repository root. Moving both checkouts together preserves
-this launcher without editing tracked configuration. Other layouts use an
-absolute launcher with an installer warning. Checks resolve project paths from
-the target root and accept equivalent absolute or relative spellings; existing
-custom launchers and room overrides remain preserved.
+Project `.mcp.json` runs `node .claude/hooks/squad-mcp.mjs` with
+`SQUAD_DIR: .squad`; when the Squad checkout and target repository are siblings
+it records `SQUAD_RUNTIME: ../<squad-checkout>/dist/index.js`. The launcher is a
+byte-identical installed artifact — everything machine-local stays in
+`.mcp.json` — and resolves the runtime and a relative room path against the
+primary clone, so linked git worktrees work too (see "Worktree sessions" above).
+Start the MCP client in the target repository root or any of its worktrees.
+Moving both checkouts together preserves this launcher without editing tracked
+configuration. Other layouts record an absolute runtime path with an installer
+warning. Checks resolve project paths from the target root and accept equivalent
+absolute or relative spellings; existing custom launchers and room overrides
+remain preserved, and an unmanaged launcher is never given a `SQUAD_RUNTIME`.
 
 ### Check, update, remove, and develop locally
 
@@ -477,7 +484,7 @@ for what these deterministic checks establish.
 ### VERSION bumps for consumer-visible changes
 
 `install.sh` copies `commands/squad/*.md`, `skills/squad/SKILL.md`, its workflow
-references, and (with
+references, `hooks/squad-mcp.mjs` (the project MCP launcher), and (with
 `--reentry`) `hooks/squad-reentry.sh` into every consumer repo, and
 `codex/prompts/squad-*.md` globally into `$CODEX_HOME/prompts/` (default
 `~/.codex/prompts/`); every installed
@@ -489,7 +496,7 @@ detect drift — so a `VERSION` that never moves makes every consumer look
 falsely "current."
 
 **If your PR touches the installed surface** (`commands/squad/`,
-`skills/squad/`, `codex/prompts/`, `hooks/squad-reentry.sh`,
+`skills/squad/`, `codex/prompts/`, `hooks/`,
 `install.sh`, `uninstall.sh`, `scripts/install-lifecycle.mjs`,
 `scripts/generate-workflow-adapters.mjs`, or `src/`) — bump `VERSION` (keep
 `package.json`'s `"version"` and the `McpServer` version string in

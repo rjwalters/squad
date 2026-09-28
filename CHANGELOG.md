@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.15.3
+
+- Spawn the project MCP server from a linked git worktree. `.mcp.json` now runs the
+  installed `.claude/hooks/squad-mcp.mjs` launcher and carries the runtime path in
+  `SQUAD_RUNTIME`; the launcher resolves the runtime and a relative `SQUAD_DIR`
+  against the primary clone, so worktree sessions reach the same checkout and room.
+  Tracked configuration stays free of machine-specific absolute paths, and
+  pre-launcher installations migrate on refresh.
+
 ## 0.15.2
 
 - Bank exact committed artifacts from independent author clones while checking

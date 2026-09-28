@@ -393,7 +393,7 @@ test("sibling project launcher survives relocation and preserves equivalent path
   const repo = join(original, "consumer");
   mkdirSync(sourceCopy, { recursive: true });
   mkdirSync(repo);
-  for (const path of ["scripts", "skills", "commands", "codex", "dist", "VERSION", "install.sh", "uninstall.sh"])
+  for (const path of ["scripts", "skills", "commands", "codex", "hooks", "dist", "VERSION", "install.sh", "uninstall.sh"])
     cpSync(resolve(path), join(sourceCopy, path), { recursive: true });
   symlinkSync(realpathSync("node_modules"), join(sourceCopy, "node_modules"));
   const env = { ...process.env, HOME: original };
@@ -408,7 +408,9 @@ test("sibling project launcher survives relocation and preserves equivalent path
   install(sourceCopy, repo);
   const configPath = join(repo, ".mcp.json");
   const config = JSON.parse(readFileSync(configPath));
-  assert.deepEqual(config.mcpServers.squad.args, ["../squad source/dist/index.js"]);
+  // args names the in-repo launcher; the runtime path travels in SQUAD_RUNTIME.
+  assert.deepEqual(config.mcpServers.squad.args, [".claude/hooks/squad-mcp.mjs"]);
+  assert.equal(config.mcpServers.squad.env.SQUAD_RUNTIME, "../squad source/dist/index.js");
   assert.equal(config.mcpServers.squad.env.SQUAD_DIR, ".squad");
   assert.ok(!readFileSync(configPath, "utf8").includes(original));
   install(sourceCopy, repo, ["--check"]);
@@ -416,10 +418,10 @@ test("sibling project launcher survives relocation and preserves equivalent path
   // A pre-fix receipt plus the user's relative correction must remain healthy.
   const receiptPath = join(repo, ".claude/skills/squad/.install-local.json");
   const receipt = JSON.parse(readFileSync(receiptPath));
-  receipt.fragments[".mcp.json"].values["mcpServers/squad/args"].installed = [join(sourceCopy, "dist/index.js")];
+  receipt.fragments[".mcp.json"].values["mcpServers/squad/env/SQUAD_RUNTIME"].installed = join(sourceCopy, "dist/index.js");
   receipt.fragments[".mcp.json"].values["mcpServers/squad/env/SQUAD_DIR"].installed = join(repo, ".squad");
   const legacyConfig = structuredClone(config);
-  legacyConfig.mcpServers.squad.args = [join(sourceCopy, "dist/index.js")];
+  legacyConfig.mcpServers.squad.env.SQUAD_RUNTIME = join(sourceCopy, "dist/index.js");
   legacyConfig.mcpServers.squad.env.SQUAD_DIR = join(repo, ".squad");
   writeFileSync(configPath, JSON.stringify(legacyConfig));
   writeFileSync(receiptPath, JSON.stringify(receipt));
@@ -473,6 +475,108 @@ test("non-sibling launcher warns and unchanged legacy paths migrate safely", () 
   f.run("install.sh", ["--check"]);
 });
 
+
+test("pre-launcher installations migrate to the in-repo launcher", () => {
+  const f = fixture("launcher-migration");
+  f.run();
+  const configPath = join(f.repo, ".mcp.json");
+  const receiptPath = join(f.repo, ".claude/skills/squad/.install-local.json");
+  const cfg = JSON.parse(readFileSync(configPath));
+  const runtime = cfg.mcpServers.squad.env.SQUAD_RUNTIME;
+  assert.ok(runtime, "a fresh install must record the runtime path");
+  // Rewind config and receipt to the pre-#95 shape: args named the runtime
+  // directly, and no SQUAD_RUNTIME existed at all.
+  cfg.mcpServers.squad.args = [runtime];
+  delete cfg.mcpServers.squad.env.SQUAD_RUNTIME;
+  writeFileSync(configPath, JSON.stringify(cfg));
+  const receipt = JSON.parse(readFileSync(receiptPath));
+  const values = receipt.fragments[".mcp.json"].values;
+  values["mcpServers/squad/args"].installed = [runtime];
+  delete values["mcpServers/squad/env/SQUAD_RUNTIME"];
+  writeFileSync(receiptPath, JSON.stringify(receipt));
+  f.run();
+  const after = JSON.parse(readFileSync(configPath)).mcpServers.squad;
+  assert.deepEqual(after.args, [".claude/hooks/squad-mcp.mjs"]);
+  assert.equal(after.env.SQUAD_RUNTIME, runtime);
+  f.run("install.sh", ["--check"]);
+});
+
+test("a session in a linked worktree spawns the server and joins the primary clone's room", async () => {
+  const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+  const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");
+  const { resolve } = await import("node:path");
+  const home = join(scratch, "worktree fleet");
+  const sourceCopy = join(home, "squad");
+  const repo = join(home, "consumer");
+  mkdirSync(sourceCopy, { recursive: true });
+  mkdirSync(repo);
+  for (const path of ["scripts", "skills", "commands", "codex", "hooks", "dist", "VERSION", "install.sh", "uninstall.sh"])
+    cpSync(resolve(path), join(sourceCopy, path), { recursive: true });
+  symlinkSync(realpathSync("node_modules"), join(sourceCopy, "node_modules"));
+  const env = { ...process.env, HOME: home };
+  for (const key of Object.keys(env)) if (key.startsWith("SQUAD_")) delete env[key];
+  const git = (...args) => {
+    const result = spawnSync("git", ["-C", repo, ...args], { env, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return result.stdout;
+  };
+  const install = (args = []) => {
+    const result = spawnSync("bash", [join(sourceCopy, "install.sh"), "--no-codex", ...args, repo], {
+      cwd: scratch, env, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return result.stdout + result.stderr;
+  };
+  install();
+  const configPath = join(repo, ".mcp.json");
+  const primaryServer = JSON.parse(readFileSync(configPath)).mcpServers.squad;
+  assert.deepEqual(primaryServer.args, [".claude/hooks/squad-mcp.mjs"]);
+  // Both tracked files must stay free of machine-specific absolute paths.
+  assert.ok(!readFileSync(configPath, "utf8").includes(home));
+  assert.ok(!readFileSync(join(repo, ".claude/hooks/squad-mcp.mjs"), "utf8").includes(home));
+
+  git("init", "-b", "main");
+  git("add", "-A");
+  git("-c", "user.email=squad@example.com", "-c", "user.name=squad", "commit", "-m", "install squad");
+  // Nested, as a fleet's worktrees are: a sibling worktree would accidentally
+  // keep a ../squad/... runtime path resolvable and hide the bug.
+  const worktree = join(repo, "worktrees/agent");
+  git("worktree", "add", "-b", "agent", worktree);
+  assert.ok(
+    existsSync(join(worktree, ".claude/hooks/squad-mcp.mjs")),
+    "the launcher must be tracked, so every worktree checkout has it",
+  );
+  const server = JSON.parse(readFileSync(join(worktree, ".mcp.json"))).mcpServers.squad;
+  // The fixture only exercises the bug while this holds: the recorded runtime
+  // path resolves against the primary clone and nowhere near the worktree.
+  assert.equal(existsSync(resolve(worktree, server.env.SQUAD_RUNTIME)), false);
+  assert.ok(existsSync(resolve(repo, server.env.SQUAD_RUNTIME)));
+
+  const client = new Client({ name: "worktree-session", version: "1" });
+  try {
+    await client.connect(new StdioClientTransport({
+      command: server.command, args: server.args, cwd: worktree,
+      env: { ...env, ...server.env }, stderr: "pipe",
+    }));
+    const tools = await client.listTools();
+    assert.ok(tools.tools.some((tool) => tool.name === "squad_join"));
+    const joined = await client.callTool({ name: "squad_join", arguments: {} });
+    assert.ok(!joined.isError, JSON.stringify(joined));
+    assert.equal(
+      realpathSync(JSON.parse(joined.content[0].text).db),
+      realpathSync(join(repo, ".squad/squad.db")),
+    );
+  } finally {
+    await client.close();
+  }
+  assert.ok(existsSync(join(repo, ".squad/squad.db")));
+  assert.equal(
+    existsSync(join(worktree, ".squad")),
+    false,
+    "a worktree session must join the shared room, not split off a private one",
+  );
+  install(["--check"]);
+});
 
 test("relative global Codex launchers remain preserved and require cwd verification", () => {
   const f = fixture("relative-global");

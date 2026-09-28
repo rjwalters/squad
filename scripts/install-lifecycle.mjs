@@ -561,6 +561,17 @@ async function main() {
       `.claude/commands/squad/${name}.md`,
       fs.readFileSync(join(source, `commands/squad/${name}.md`), "utf8"),
     );
+  // The project MCP launcher .mcp.json names instead of the runtime itself, so
+  // that a linked git worktree can spawn the server at all: a worktree checkout
+  // has this repository-relative file, but not the sibling squad checkout a
+  // runtime-relative path would need (#95). It is byte-identical in every
+  // consumer on every machine — the machine-local runtime path travels in
+  // .mcp.json's SQUAD_RUNTIME — so it is an ordinary tracked artifact.
+  const launcherRel = ".claude/hooks/squad-mcp.mjs";
+  artifacts.set(
+    launcherRel,
+    fs.readFileSync(join(source, "hooks/squad-mcp.mjs"), "utf8"),
+  );
   const hookRel = ".claude/hooks/squad-reentry.sh";
   const allowed = new Set([...artifacts.keys(), ...metaPaths, hookRel]);
   const scope = new Scope(plan, opts.target, localReceipt, allowed);
@@ -598,12 +609,17 @@ async function main() {
     : runtimePath;
   if (!siblingSource && opts.action === "install")
     plan.note(
-      "warning: Squad source is not a sibling of the target; the project MCP launcher uses an absolute path and must be refreshed after moving checkouts",
+      "warning: Squad source is not a sibling of the target; the project MCP launcher records an absolute path and must be refreshed after moving checkouts",
     );
+  // args names the launcher, never the runtime: a repository-relative path is
+  // the only kind every linked worktree of the target also has. The launcher
+  // resolves SQUAD_RUNTIME (and a relative SQUAD_DIR) against the primary clone.
+  const launcherPath = join(opts.target, launcherRel);
   const fields = {
     "mcpServers/squad/command": "node",
-    "mcpServers/squad/args": [portableRuntime],
+    "mcpServers/squad/args": [launcherRel],
     "mcpServers/squad/env/SQUAD_DIR": ".squad",
+    "mcpServers/squad/env/SQUAD_RUNTIME": portableRuntime,
   };
   // Retain recorded pins on ordinary refresh. Explicit new pins only populate
   // missing values; changing an existing user pin remains a direct config edit.
@@ -625,6 +641,9 @@ async function main() {
     !previousLauncher?.["mcpServers/squad/command"] &&
     !previousLauncher?.["mcpServers/squad/args"];
   const launcherKeys = ["mcpServers/squad/command", "mcpServers/squad/args"];
+  // SQUAD_RUNTIME only means anything to the managed launcher, so it follows
+  // command/args: never injected into an unmanaged one, retained with them.
+  const launcherFields = [...launcherKeys, "mcpServers/squad/env/SQUAD_RUNTIME"];
   const changedLauncher =
     opts.action === "uninstall" &&
     launcherKeys.some(
@@ -642,9 +661,18 @@ async function main() {
     Array.isArray(existingServer.args) &&
     existingServer.args.length === 1 &&
     typeof existingServer.args[0] === "string" &&
-    resolve(opts.target, existingServer.args[0]) === runtimePath
+    // The managed launcher, or a pre-launcher install naming the runtime
+    // directly: both reach this source, so neither is a customization to fight.
+    [launcherPath, runtimePath].includes(
+      resolve(opts.target, existingServer.args[0]),
+    )
   )
     equivalentPaths.push("mcpServers/squad/args");
+  if (
+    typeof existingServer?.env?.SQUAD_RUNTIME === "string" &&
+    resolve(opts.target, existingServer.env.SQUAD_RUNTIME) === runtimePath
+  )
+    equivalentPaths.push("mcpServers/squad/env/SQUAD_RUNTIME");
   if (
     typeof existingServer?.env?.SQUAD_DIR === "string" &&
     resolve(opts.target, existingServer.env.SQUAD_DIR) === join(opts.target, ".squad")
@@ -653,8 +681,8 @@ async function main() {
   const cfg = scope.jsonFields(
     ".mcp.json",
     fields,
-    externalLauncher ? launcherKeys : [],
-    changedLauncher ? launcherKeys : [],
+    externalLauncher ? launcherFields : [],
+    changedLauncher ? launcherFields : [],
     equivalentPaths,
   );
   if (opts.check && externalLauncher)
@@ -666,14 +694,26 @@ async function main() {
     cfg.mcpServers?.squad?.command === "node" &&
     typeof cfg.mcpServers.squad.args?.[0] === "string"
   ) {
-    if (!fs.existsSync(resolve(opts.target, cfg.mcpServers.squad.args[0])))
+    const configured = cfg.mcpServers.squad;
+    const launched = resolve(opts.target, configured.args[0]);
+    if (!fs.existsSync(launched))
+      plan.attention.push(`broken Claude launcher path: ${configured.args[0]}`);
+    // The managed launcher takes the runtime from SQUAD_RUNTIME; a pre-launcher
+    // or custom configuration names the runtime directly in args.
+    const spec =
+      launched === launcherPath
+        ? configured.env?.SQUAD_RUNTIME
+        : configured.args[0];
+    if (typeof spec !== "string" || !spec)
       plan.attention.push(
-        `broken Claude runtime path: ${cfg.mcpServers.squad.args[0]}`,
+        "missing Claude runtime path: the managed launcher needs SQUAD_RUNTIME in .mcp.json",
       );
-    if (resolve(opts.target, cfg.mcpServers.squad.args[0]) !== runtimePath)
-      plan.attention.push(
-        `stale/different Claude runtime source: ${cfg.mcpServers.squad.args[0]}`,
-      );
+    else {
+      if (!fs.existsSync(resolve(opts.target, spec)))
+        plan.attention.push(`broken Claude runtime path: ${spec}`);
+      if (resolve(opts.target, spec) !== runtimePath)
+        plan.attention.push(`stale/different Claude runtime source: ${spec}`);
+    }
   }
   if (
     opts.reentry &&
