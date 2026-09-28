@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.16.0
+
+- Name automatic (unpinned) agent identities `<label>-<4 random hex>`, e.g.
+  `opus-5-3f9a`, replacing the old `<provider>-<model>-<session-id prefix>` format
+  (which disclosed part of the session token). The label comes from `SQUAD_MODEL` (prefixed by `SQUAD_PROVIDER` only when that is set),
+  then from the new optional `squad_join` `model` argument, then falls back to
+  `agent`. The random suffix is drawn server-side, rerolled on collision without
+  growing, and never derived from the session token.
+- Add an optional `model` argument to `squad_join` that relabels a freshly minted
+  automatic identity before it publishes anything. A trusted `SQUAD_MODEL` wins
+  over it, and resuming an existing identity ignores it.
+- Existing reservations and old-format names keep resolving unchanged, including
+  across export/import.
+
 ## 0.15.3
 
 - Spawn the project MCP server from a linked git worktree. `.mcp.json` now runs the
