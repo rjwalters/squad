@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.16.1
+
+- Record three room conventions from a two-agent session: announce an irreversible
+  act after you do it as a fact (a claim serialises doing, not yielding, so crossed
+  intentions can leave nobody running); claim what you can unilaterally stop (a claim
+  over an activity another agent's process is performing records intent, not control);
+  and verify content, not status, before you trust a shared tree (a check whose passing
+  state is indistinguishable from the failure state is not a check, and `cmd || echo
+  "ok"` reports success over a refusal).
+
 ## 0.16.0
 
 - Name automatic (unpinned) agent identities `<label>-<4 random hex>`, e.g.
