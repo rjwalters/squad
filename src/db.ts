@@ -414,8 +414,14 @@ export function dbPath(): string {
  * primary clone has a populated room, say so instead of joining in silence.
  * Reachable when the worktree carries its own .squad, or when git is missing
  * from PATH and the walk fell back to the worktree root.
+ *
+ * Only meaningful for the *unintentional* split: a caller who explicitly set
+ * `SQUAD_DIR` (checked here, not by the caller, so every callsite gets this
+ * for free) has already stated which room they want, so the "Set SQUAD_DIR="
+ * suggestion would be advising a choice they deliberately overrode -- skip it.
  */
 export function roomSplitWarning(dir: string, cwd: string): string | null {
+  if (process.env.SQUAD_DIR) return null; // caller stated intent explicitly
   if (existsSync(join(dir, "squad.db"))) return null; // room already in use
   let wt: string | null = null;
   for (let d = cwd; ; ) {

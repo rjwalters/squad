@@ -150,6 +150,16 @@ test("warns when an empty worktree room shadows the primary clone's", { skip: !h
   assert.equal(roomSplitWarning(join(repo, ".squad"), wt), null);
   // ...nor from the primary clone itself.
   assert.equal(roomSplitWarning(join(repo, ".squad"), repo), null);
+
+  // No warning when the caller set SQUAD_DIR explicitly, even though the
+  // resolved room is the same empty worktree room that fires above -- the
+  // caller already stated their intent, so the advisory would be redundant.
+  try {
+    process.env.SQUAD_DIR = join(wt, ".squad");
+    assert.equal(roomSplitWarning(join(wt, ".squad"), wt), null);
+  } finally {
+    delete process.env.SQUAD_DIR;
+  }
 });
 
 test("mainWorktreeRoot ignores non-worktree git dirs", { skip: !hasGit }, () => {
