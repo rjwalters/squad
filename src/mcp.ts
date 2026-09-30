@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { openDb, dbPath } from "./db.js";
+import { opportunisticRelay } from "./relay.js";
 import {
   Squad,
   CARD_PHASES,
@@ -32,8 +33,12 @@ export async function runMcpServer(): Promise<void> {
   const pinned = process.env.SQUAD_PERSONA || undefined;
   const db = openDb();
   const squad = new Squad(db, pinned, identityFromEnv());
+  // Opportunistic relay (#113): after each message insert, schedule a
+  // fire-and-forget pass to any SQUAD_RELAY_ENDPOINT. A no-op when unset, and
+  // never able to block or fail the tool call that inserted the message.
+  squad.onMessageInserted = opportunisticRelay(db);
 
-  const server = new McpServer({ name: "squad", version: "0.17.1" });
+  const server = new McpServer({ name: "squad", version: "0.18.0" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),

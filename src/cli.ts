@@ -14,6 +14,14 @@ import {
 } from "./core.js";
 import { rmSync } from "node:fs";
 import { formatRoomDoctorReport } from "./room-doctor.js";
+import {
+  relayConfigFromEnv,
+  relayKnownTargets,
+  relayOnce,
+  relayStatus,
+  type RelayResult,
+  type RelayTargetStatus,
+} from "./relay.js";
 
 const REVIEW_OPEN_USAGE =
   "usage: squad review open --to <persona> [--priority low|normal|high|urgent] " +
@@ -166,6 +174,14 @@ Human CLI usage:
                                SQUAD_REENTRY_MAX_ATTEMPTS, and stopped by
                                SQUAD_REENTRY_STOP=1 or a .squad/reentry-stop
                                marker; it announces in the room when it stops
+  squad relay [--once]        Ship room messages past the relay cursor to
+                               SQUAD_RELAY_ENDPOINT (OTLP logs) and exit; on a
+                               newly-enabled room this backfills full history
+  squad relay --follow [--interval <seconds>]
+                               Keep shipping new messages (poll every 5s by
+                               default) until Ctrl-C / SIGTERM
+  squad relay status          Configured target, cursor lag, and last error
+                               (or "not configured")
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad doctor --room         Read-only room drift report: known unbanked work,
@@ -199,6 +215,14 @@ Environment:
                   .squad/reentry-stop / .squad/reentry/<persona>.stop)
   SQUAD_CODEX_BIN      The codex binary 'squad codex-reentry' supervises
                   (default 'codex')
+  SQUAD_RELAY_ENDPOINT   OTLP/HTTP logs endpoint to relay room messages to,
+                  e.g. https://collector.example/v1/logs. Unset = relay off.
+                  Enabling it sends message bodies off this machine
+  SQUAD_RELAY_HEADERS    Auth headers for it, 'name=value,name=value' (e.g.
+                  signoz-ingestion-key=...); never written to the room db
+  SQUAD_RELAY_ROOM_NAME  squad.room attribute (default: the repo directory name)
+  SQUAD_RELAY_KINDS      Comma-separated message kinds to relay, e.g. 'chat'
+                  (default: every kind)
 `;
 
 function fmt(m: Message): string {
@@ -290,6 +314,134 @@ async function runDoctor(): Promise<void> {
   }
 }
 
+export const RELAY_USAGE =
+  "usage: squad relay [--once] | squad relay --follow [--interval <seconds>] | squad relay status";
+
+export type RelayCommand =
+  | { mode: "once" }
+  | { mode: "follow"; intervalMs: number }
+  | { mode: "status" }
+  | { mode: "help" };
+
+/** Parse `squad relay ...` arguments. Throws the usage string on anything else. */
+export function parseRelayArgs(args: string[]): RelayCommand {
+  if (args.length === 1 && (args[0] === "--help" || args[0] === "-h")) return { mode: "help" };
+  if (args.length === 1 && args[0] === "status") return { mode: "status" };
+  if (args.length === 0 || (args.length === 1 && args[0] === "--once")) return { mode: "once" };
+  if (args[0] === "--follow") {
+    if (args.length === 1) return { mode: "follow", intervalMs: 5000 };
+    if (args.length === 3 && args[1] === "--interval") {
+      const seconds = Number(args[2]);
+      if (Number.isFinite(seconds) && seconds > 0 && args[2]!.trim() !== "")
+        return { mode: "follow", intervalMs: Math.round(seconds * 1000) };
+    }
+  }
+  throw new Error(RELAY_USAGE);
+}
+
+function formatRelayResult(r: RelayResult): string {
+  switch (r.status) {
+    case "empty":
+      return `relay: nothing new for ${r.target} (cursor at #${r.cursor})`;
+    case "lease-held":
+      return `relay: another relay pass holds the lease for ${r.target}; nothing sent (cursor at #${r.cursor})`;
+    case "failed":
+      return `relay: ${r.error ?? "pass failed"} (shipped ${r.shipped} before stopping; cursor at #${r.cursor})`;
+    default:
+      return (
+        `relay: shipped ${r.shipped} message(s) to ${r.target}` +
+        (r.rejected ? `, ${r.rejected} rejected by the collector` : "") +
+        ` (scanned ${r.scanned}; cursor at #${r.cursor})`
+      );
+  }
+}
+
+function formatRelayStatus(st: RelayTargetStatus): string[] {
+  return [
+    `  target:     ${st.target}`,
+    `  cursor:     message #${st.cursor}${st.updatedAt ? ` (last advanced ${st.updatedAt})` : " (never advanced)"}`,
+    `  lag:        ${st.lag} unshipped message(s)`,
+    `  last error: ${st.lastError ? `${st.lastError}${st.lastErrorAt ? ` (at ${st.lastErrorAt})` : ""}` : "none"}`,
+    `  lease:      ${st.leaseHeld ? "held (a relay pass is in flight)" : "free"}`,
+  ];
+}
+
+/** `squad relay [--once|--follow|status]` (#113). */
+async function runRelay(command: RelayCommand): Promise<void> {
+  if (command.mode === "help") {
+    console.log(RELAY_USAGE);
+    return;
+  }
+  const config = relayConfigFromEnv();
+  const db = openDb();
+  try {
+    if (command.mode === "status") {
+      if (!config) {
+        console.log("relay: not configured (set SQUAD_RELAY_ENDPOINT to enable; see 'squad help')");
+        const known = relayKnownTargets(db);
+        if (known.length) {
+          console.log("previously relayed targets in this room:");
+          for (const target of known) for (const line of formatRelayStatus(relayStatus(db, target))) console.log(line);
+        }
+        return;
+      }
+      console.log("relay: configured");
+      console.log(`  room:       ${config.room}`);
+      console.log(`  kinds:      ${config.kinds ? config.kinds.join(", ") : "all"}`);
+      for (const line of formatRelayStatus(relayStatus(db, config.target, config.kinds))) console.log(line);
+      return;
+    }
+    if (!config) throw new Error("relay: not configured -- set SQUAD_RELAY_ENDPOINT (see 'squad help')");
+    if (command.mode === "once") {
+      const result = await relayOnce(db, config);
+      console.log(formatRelayResult(result));
+      if (result.status === "failed") process.exitCode = 1;
+      return;
+    }
+    // --follow: pass, sleep, repeat until SIGINT/SIGTERM. The signal aborts
+    // both the sleep and any in-flight POST; the cursor only ever advances
+    // past batches the collector accepted, so stopping mid-backfill is safe
+    // to resume with another `squad relay`.
+    const controller = new AbortController();
+    const stop = () => controller.abort();
+    process.once("SIGINT", stop);
+    process.once("SIGTERM", stop);
+    console.log(`relay: following ${config.target} every ${command.intervalMs / 1000}s (Ctrl-C to stop)`);
+    let lastError: string | undefined;
+    let cursor = 0;
+    try {
+      while (!controller.signal.aborted) {
+        const result = await relayOnce(db, config, { signal: controller.signal });
+        cursor = result.cursor;
+        if (controller.signal.aborted) break;
+        if (result.status === "failed") {
+          if (result.error !== lastError) console.log(formatRelayResult(result));
+          lastError = result.error;
+        } else {
+          if (lastError !== undefined) console.log(`relay: ${config.target} reachable again`);
+          lastError = undefined;
+          if (result.shipped || result.rejected) console.log(formatRelayResult(result));
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(done, command.intervalMs);
+          function done() {
+            clearTimeout(timer);
+            controller.signal.removeEventListener("abort", done);
+            resolve();
+          }
+          controller.signal.addEventListener("abort", done, { once: true });
+        });
+      }
+    } finally {
+      process.removeListener("SIGINT", stop);
+      process.removeListener("SIGTERM", stop);
+    }
+    console.log(`relay: stopped (cursor at #${cursor})`);
+  } finally {
+    db.close();
+  }
+}
+
 export async function runCli(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
   if (cmd === "help" || cmd === "--help" || cmd === "-h" || cmd === undefined) {
@@ -333,6 +485,13 @@ export async function runCli(argv: string[]): Promise<void> {
       `codex re-entry supervisor stopped after ${summary.runs} run(s) / ` +
         `${summary.attempts} re-entry(ies): ${summary.stopReason}`,
     );
+    return;
+  }
+
+  if (cmd === "relay") {
+    // Handled before the shared `Squad` below: relaying is delivery plumbing,
+    // not a persona acting in the room, so it must not open a presence lease.
+    await runRelay(parseRelayArgs(rest));
     return;
   }
 
@@ -1020,6 +1179,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "path",
       "doctor",
       "codex-reentry",
+      "relay",
       "help",
       "--help",
       "-h",

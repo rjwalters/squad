@@ -578,12 +578,18 @@ test("the installer never writes a relay credential into a consumer repo", () =>
   }
   // ...and the engine is the only module that reads the header variable, so a
   // future persistence path cannot pick it up implicitly somewhere else.
+  // (src/cli.ts may *name* it in its help text (#113) -- it just never reads it.)
   const relay = readFileSync(new URL("../src/relay.ts", import.meta.url), "utf8");
   assert.ok(relay.includes("SQUAD_RELAY_HEADERS"), "the engine is what reads the header variable");
-  for (const other of ["../src/core.ts", "../src/db.ts", "../src/cli.ts", "../src/mcp.ts"]) {
+  const readsHeaders = /env\s*(\.\s*SQUAD_RELAY_HEADERS|\[\s*["'`]SQUAD_RELAY_HEADERS)/;
+  for (const other of ["../src/core.ts", "../src/db.ts", "../src/mcp.ts"]) {
     assert.ok(
       !readFileSync(new URL(other, import.meta.url), "utf8").includes("SQUAD_RELAY_HEADERS"),
       `${other} must not read the relay credential`,
     );
   }
+  assert.ok(
+    !readsHeaders.test(readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8")),
+    "src/cli.ts must not read the relay credential from the environment",
+  );
 });
