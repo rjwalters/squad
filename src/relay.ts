@@ -8,10 +8,11 @@ import { squadDir } from "./db.js";
  * OpenTelemetry collector (SigNoz and anything else speaking OTLP/HTTP) so a
  * room is visible somewhere other than the machine it lives on.
  *
- * This module is the engine only -- no CLI command, no MCP hook, nothing that
- * runs on its own. `relayOnce()` is a plain function a later phase wires up.
- * It is off unless `SQUAD_RELAY_ENDPOINT` is set, and it never throws at the
- * caller: a relay is an observability side channel, so an unreachable
+ * This module is the engine: `relayOnce()` is a plain function. Its callers
+ * (#113) are `squad relay [--once|--follow|status]` in src/cli.ts and the
+ * fire-and-forget `opportunisticRelay()` trigger below, which src/mcp.ts hangs
+ * off every message a live MCP server inserts. It is off unless
+ * `SQUAD_RELAY_ENDPOINT` is set, and it never throws at the caller: a relay is an observability side channel, so an unreachable
  * collector must degrade to "nothing shipped, cursor unmoved" rather than
  * failing the room operation that triggered it.
  *
@@ -382,7 +383,56 @@ async function rejectedCount(response: Response): Promise<number> {
  *    already draining this outbox; this one returns `status: "lease-held"`
  *    having sent nothing, rather than duplicating its batch.
  */
-export async function relayOnce(db: DatabaseSync, config: RelayConfig): Promise<RelayResult> {
+export async function relayOnce(
+  db: DatabaseSync,
+  config: RelayConfig,
+  options: RelayOptions = {},
+): Promise<RelayResult> {
+  const result = await relayPass(db, config, options.signal);
+  recordOutcome(db, result, options.signal);
+  return result;
+}
+
+/** Options for `relayOnce()`. */
+export interface RelayOptions {
+  /**
+   * Stop early (between batches, or by aborting an in-flight POST). Progress
+   * already accepted by the collector keeps its cursor advance, so a stopped
+   * pass is safely resumable; an interrupted POST leaves its batch unshipped
+   * and it is re-sent next pass, exactly like any other failed request.
+   */
+  signal?: AbortSignal;
+}
+
+/**
+ * Persist the pass's failure reason (or clear it) for `squad relay status`.
+ * A "lease-held" pass learned nothing about the endpoint and an aborted pass
+ * failed because we asked it to, so neither touches the stored error.
+ * Best-effort: the engine's never-throws contract outranks bookkeeping.
+ */
+function recordOutcome(db: DatabaseSync, result: RelayResult, signal?: AbortSignal): void {
+  try {
+    if (result.status === "lease-held" || signal?.aborted) return;
+    if (result.status === "failed")
+      db.prepare("UPDATE relay_cursors SET last_error=?, last_error_at=? WHERE target=?").run(
+        result.error ?? "relay: pass failed",
+        new Date().toISOString(),
+        result.target,
+      );
+    else
+      db.prepare(
+        "UPDATE relay_cursors SET last_error=NULL, last_error_at=NULL WHERE target=? AND last_error IS NOT NULL",
+      ).run(result.target);
+  } catch {
+    // e.g. the db was closed under a fire-and-forget pass: nothing to record into.
+  }
+}
+
+async function relayPass(
+  db: DatabaseSync,
+  config: RelayConfig,
+  signal: AbortSignal | undefined,
+): Promise<RelayResult> {
   const result: RelayResult = {
     target: config.target,
     status: "ok",
@@ -392,7 +442,15 @@ export async function relayOnce(db: DatabaseSync, config: RelayConfig): Promise<
     batches: 0,
     cursor: 0,
   };
-  const token = acquireLease(db, config.target, config.leaseMs, Date.now());
+  let token: number | null;
+  try {
+    token = acquireLease(db, config.target, config.leaseMs, Date.now());
+  } catch (err) {
+    // A closed or locked db: report it rather than break the never-throws contract.
+    result.status = "failed";
+    result.error = `relay: could not open the outbox for ${config.target}: ${err instanceof Error ? err.message : String(err)}`;
+    return result;
+  }
   if (token === null) {
     result.status = "lease-held";
     result.cursor = readCursor(db, config.target);
@@ -405,6 +463,7 @@ export async function relayOnce(db: DatabaseSync, config: RelayConfig): Promise<
       "SELECT id, sender, kind, body, ts, occurrences FROM messages WHERE id>? ORDER BY id LIMIT ?",
     );
     for (;;) {
+      if (signal?.aborted) break;
       const rows = select.all(cursor, config.batchSize) as unknown as MessageRow[];
       if (!rows.length) break;
       result.scanned += rows.length;
@@ -419,7 +478,9 @@ export async function relayOnce(db: DatabaseSync, config: RelayConfig): Promise<
             method: "POST",
             headers: { "content-type": "application/json", ...config.headers },
             body: JSON.stringify(toExportRequest(records, config)),
-            signal: AbortSignal.timeout(config.timeoutMs),
+            signal: signal
+              ? AbortSignal.any([AbortSignal.timeout(config.timeoutMs), signal])
+              : AbortSignal.timeout(config.timeoutMs),
           });
         } catch (err) {
           result.status = "failed";
@@ -447,7 +508,161 @@ export async function relayOnce(db: DatabaseSync, config: RelayConfig): Promise<
     }
     if (result.batches === 0 && result.scanned === 0) result.status = "empty";
     return result;
+  } catch (err) {
+    result.status = "failed";
+    result.error = `relay: ${config.target}: ${err instanceof Error ? err.message : String(err)}`;
+    return result;
   } finally {
-    releaseLease(db, config.target, token);
+    try {
+      releaseLease(db, config.target, token);
+    } catch {
+      // Closed db: the lease simply expires on its own after leaseMs.
+    }
   }
+}
+
+/** What `squad relay status` reports for one target. */
+export interface RelayTargetStatus {
+  target: string;
+  /** `relay_cursors.last_message_id`; 0 for a target that never shipped. */
+  cursor: number;
+  /** When the cursor last moved, or null. */
+  updatedAt: string | null;
+  /** Messages past the cursor that a pass would ship (after `kinds`). */
+  lag: number;
+  /** Most recent failed pass's reason, or null when the last pass succeeded. */
+  lastError: string | null;
+  lastErrorAt: string | null;
+  /** A shipping lease is live right now (a pass is in flight somewhere). */
+  leaseHeld: boolean;
+}
+
+/**
+ * Read-only status for `target`: where its cursor is, how far behind the
+ * room it is, and why the last pass failed (if it did). Never writes, so a
+ * target that has never shipped reports cursor 0 without creating a row.
+ * `kinds` narrows the lag count to what a pass would actually send.
+ */
+export function relayStatus(
+  db: DatabaseSync,
+  target: string,
+  kinds: string[] | null = null,
+  now = Date.now(),
+): RelayTargetStatus {
+  const row = db
+    .prepare(
+      "SELECT last_message_id, updated_at, lease_expires, last_error, last_error_at FROM relay_cursors WHERE target=?",
+    )
+    .get(target) as
+    | {
+        last_message_id: number;
+        updated_at: string | null;
+        lease_expires: number;
+        last_error: string | null;
+        last_error_at: string | null;
+      }
+    | undefined;
+  const cursor = row ? Number(row.last_message_id) : 0;
+  const lagRow = (
+    kinds && kinds.length
+      ? db
+          .prepare(
+            `SELECT COUNT(*) AS n FROM messages WHERE id>? AND kind IN (${kinds.map(() => "?").join(",")})`,
+          )
+          .get(cursor, ...kinds)
+      : db.prepare("SELECT COUNT(*) AS n FROM messages WHERE id>?").get(cursor)
+  ) as { n: number };
+  return {
+    target,
+    cursor,
+    updatedAt: row?.updated_at ?? null,
+    lag: Number(lagRow.n),
+    lastError: row?.last_error ?? null,
+    lastErrorAt: row?.last_error_at ?? null,
+    leaseHeld: row ? Number(row.lease_expires) > now : false,
+  };
+}
+
+/** Every target this room has ever relayed to, for status with no config. */
+export function relayKnownTargets(db: DatabaseSync): string[] {
+  return (
+    db.prepare("SELECT target FROM relay_cursors ORDER BY target").all() as unknown as {
+      target: string;
+    }[]
+  ).map((r) => r.target);
+}
+
+/**
+ * The opportunistic hook (#113): returns a trigger a live MCP server calls
+ * after every message insert. The trigger is synchronous, O(1), and cannot
+ * throw -- it only schedules a pass on a later macrotask (`setImmediate`, so
+ * the inserting transaction has committed and the tool call has returned
+ * before any relay work starts) and never hands its promise back to the
+ * caller. So a slow, unreachable or misconfigured collector can never block
+ * or fail the tool call that triggered it.
+ *
+ * Passes are coalesced: while one is in flight, further triggers just mark
+ * the outbox dirty and one follow-up pass runs when it finishes, so a burst
+ * of messages costs at most two passes rather than one POST per message.
+ * Config is re-read from the environment on every pass (nothing to do when
+ * `SQUAD_RELAY_ENDPOINT` is unset); an invalid config is reported once on
+ * stderr -- stdout is the MCP transport -- and otherwise ignored.
+ */
+export function opportunisticRelay(
+  db: DatabaseSync,
+  options: {
+    env?: NodeJS.ProcessEnv;
+    overrides?: Partial<RelayConfig>;
+    /** Observes each finished pass; for tests. Must not throw (it is caught if it does). */
+    onPass?: (result: RelayResult) => void;
+  } = {},
+): () => void {
+  const env = options.env ?? process.env;
+  let scheduled = false,
+    running = false,
+    dirty = false,
+    warned = false;
+  const drain = async (): Promise<void> => {
+    running = true;
+    try {
+      do {
+        dirty = false;
+        let config: RelayConfig | null;
+        try {
+          config = relayConfigFromEnv(env, options.overrides);
+        } catch (err) {
+          if (!warned) {
+            warned = true;
+            console.error(`squad: ${err instanceof Error ? err.message : String(err)} (relay disabled)`);
+          }
+          return;
+        }
+        if (!config) return;
+        const result = await relayOnce(db, config);
+        try {
+          options.onPass?.(result);
+        } catch {
+          // observer errors are not the caller's problem either
+        }
+      } while (dirty);
+    } finally {
+      running = false;
+    }
+  };
+  return () => {
+    try {
+      if (running) {
+        dirty = true;
+        return;
+      }
+      if (scheduled) return;
+      scheduled = true;
+      setImmediate(() => {
+        scheduled = false;
+        drain().catch(() => {});
+      });
+    } catch {
+      // never propagate into the insert path
+    }
+  };
 }

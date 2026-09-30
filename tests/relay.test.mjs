@@ -578,12 +578,24 @@ test("the installer never writes a relay credential into a consumer repo", () =>
   }
   // ...and the engine is the only module that reads the header variable, so a
   // future persistence path cannot pick it up implicitly somewhere else.
+  // (src/cli.ts may *name* it in its help text (#113) -- it just never reads it.)
   const relay = readFileSync(new URL("../src/relay.ts", import.meta.url), "utf8");
   assert.ok(relay.includes("SQUAD_RELAY_HEADERS"), "the engine is what reads the header variable");
-  for (const other of ["../src/core.ts", "../src/db.ts", "../src/cli.ts", "../src/mcp.ts"]) {
+  for (const other of ["../src/core.ts", "../src/db.ts", "../src/mcp.ts"]) {
     assert.ok(
       !readFileSync(new URL(other, import.meta.url), "utf8").includes("SQUAD_RELAY_HEADERS"),
       `${other} must not read the relay credential`,
     );
   }
+  // src/cli.ts may only name it inside the HELP template literal: strip that
+  // literal, then the variable must not appear at all -- this catches any read
+  // form (process.env.X, env?.X, env["X"], destructuring, ...).
+  const cli = readFileSync(new URL("../src/cli.ts", import.meta.url), "utf8");
+  const helpLiteral = /const HELP = `[^`]*`;/;
+  assert.match(cli, helpLiteral, "src/cli.ts still defines HELP as a single template literal");
+  assert.ok(cli.match(helpLiteral)[0].includes("SQUAD_RELAY_HEADERS"), "the help text names the variable");
+  assert.ok(
+    !cli.replace(helpLiteral, "").includes("SQUAD_RELAY_HEADERS"),
+    "src/cli.ts must not read the relay credential from the environment",
+  );
 });

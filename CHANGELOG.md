@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.18.0
+
+- Wire the relay engine into the product (#113). `squad relay [--once]` ships
+  every message past the relay cursor to `SQUAD_RELAY_ENDPOINT` and exits (a
+  newly-enabled room backfills its full history); `squad relay --follow
+  [--interval <seconds>]` keeps shipping until SIGINT/SIGTERM, stopping cleanly
+  and resumably mid-backfill; `squad relay status` reports the target, cursor,
+  lag and last error, or "not configured". A live MCP server now schedules a
+  fire-and-forget relay pass after each message it inserts -- coalesced, and
+  unable to block or fail the tool call when the collector is slow or down.
+  `relay_cursors` gains `last_error`/`last_error_at` (additive; outside
+  `ROOM_TABLES`, so exports stay compatible). README documents the four
+  `SQUAD_RELAY_*` variables, that relaying sends message bodies off-machine, and
+  a SigNoz saved view / query filtered by `squad.room`.
+
 ## 0.17.1
 
 - Keep the room out of git from the runtime that creates it: opening a room now

@@ -357,11 +357,18 @@ CREATE INDEX IF NOT EXISTS review_requests_target_status ON review_requests (tar
 -- 0 when free, and is acquired/renewed by the same atomic
 -- "UPDATE ... WHERE lease_expires <= ?" shape node_reviews uses (src/core.ts)
 -- so two concurrent relays cannot ship the same batch.
+--
+-- last_error / last_error_at (#113) hold the most recent failed pass's reason
+-- for 'squad relay status', cleared by the next pass that reaches the end of
+-- the outbox. The reason quotes relayTarget(), never the raw endpoint or any
+-- header, so this is no more sensitive than target itself.
 CREATE TABLE IF NOT EXISTS relay_cursors (
   target TEXT PRIMARY KEY,
   last_message_id INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT,
-  lease_expires INTEGER NOT NULL DEFAULT 0
+  lease_expires INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  last_error_at TEXT
 );
 `;
 
@@ -637,6 +644,21 @@ function ensureMessagesOccurrencesColumn(db: DatabaseSync): void {
   }
 }
 
+/**
+ * Same idea for `relay_cursors.last_error`/`last_error_at` (#113), added after
+ * the table first shipped (#112). relay_cursors is outside ROOM_TABLES, so this
+ * does not move SCHEMA_VERSION.
+ */
+function ensureRelayErrorColumns(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(relay_cursors)").all() as unknown as Array<{
+    name: string;
+  }>;
+  if (!cols.some((c) => c.name === "last_error"))
+    db.exec("ALTER TABLE relay_cursors ADD COLUMN last_error TEXT");
+  if (!cols.some((c) => c.name === "last_error_at"))
+    db.exec("ALTER TABLE relay_cursors ADD COLUMN last_error_at TEXT");
+}
+
 export function openDb(): DatabaseSync {
   if (!warnedRoomSplit) {
     warnedRoomSplit = true;
@@ -658,6 +680,7 @@ export function openDb(): DatabaseSync {
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
   ensureMessagesOccurrencesColumn(db);
+  ensureRelayErrorColumns(db);
   adoptNodes(db);
   // Every open of a db by the current build stamps it current: SCHEMA's
   // migration strategy is additive-only (CREATE TABLE IF NOT EXISTS above,

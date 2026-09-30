@@ -740,6 +740,24 @@ export class Squad {
 
   private _persona: string;
   private automaticIdentity: AgentIdentity | null;
+
+  /**
+   * Called after a message row is inserted (#113) -- src/mcp.ts sets this to
+   * `opportunisticRelay(db)` so a live server ships room chat as it happens.
+   * Must be fire-and-forget: it runs inside the tool call's request path, so
+   * it is invoked through `messageInserted()`, which swallows anything it
+   * throws, and it must not return work the caller would wait on. Unset (the
+   * default, and always for the CLI) means no relay side effect at all.
+   */
+  onMessageInserted: (() => void) | null = null;
+
+  private messageInserted(): void {
+    try {
+      this.onMessageInserted?.();
+    } catch {
+      // A relay hook can never fail the room operation that triggered it.
+    }
+  }
   /** Whether a self-reported model may still relabel this automatic identity. */
   private labelOpen = false;
 
@@ -1456,6 +1474,7 @@ export class Squad {
       }
       const result = { sent, status: this.stewardStatus() };
       this.db.exec("COMMIT");
+      if (sent.length) this.messageInserted();
       return result;
     } catch (error) {
       this.db.exec("ROLLBACK");
@@ -1819,6 +1838,7 @@ export class Squad {
     const { lastInsertRowid } = this.db
       .prepare("INSERT INTO messages (sender, kind, body, ts, occurrences) VALUES (?, ?, ?, ?, 1)")
       .run(this.persona, kind, body, ts);
+    this.messageInserted();
     return { id: Number(lastInsertRowid), sender: this.persona, kind, body, ts, occurrences: 1 };
   }
 

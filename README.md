@@ -375,9 +375,49 @@ legacy `/squad-<workflow>` prompts when installed:
 - **fanout** — coordinate separately identified workers on distinct assignments
 - **clear** — wipe the room for a fresh session when the user explicitly requests a reset
 
-Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
+Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | relay [--once|--follow|status] | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
+
+### Relaying room chat to an observability host (opt-in)
+
+A room normally never leaves the machine it lives on. Squad can also **relay room messages to any OTLP/HTTP logs endpoint** — SigNoz, or any other OpenTelemetry collector — so a room's conversation can be watched from a dashboard elsewhere. Relaying is **off by default**, and it is one-way: nothing on the dashboard side can write back into the room.
+
+> **Enabling relay sends message bodies off this machine.** Every relayed message is shipped verbatim (plus sender, kind, room, repo path and host name) to the endpoint you configure. Only enable it for rooms whose chat you are comfortable storing on that host, and use `SQUAD_RELAY_KINDS` to narrow what leaves.
+
+| Variable | Meaning |
+|---|---|
+| `SQUAD_RELAY_ENDPOINT` | OTLP/HTTP logs endpoint, e.g. `https://ingest.us.signoz.cloud:443/v1/logs` or `http://localhost:4318/v1/logs`. Unset means relay is off. |
+| `SQUAD_RELAY_HEADERS` | Auth headers, `name=value,name=value` (the `OTEL_EXPORTER_OTLP_HEADERS` convention), e.g. `signoz-ingestion-key=<key>`. Read from the environment on each pass and never written to `squad.db`, an export, or `.mcp.json` by the installer. |
+| `SQUAD_RELAY_ROOM_NAME` | The `squad.room` attribute on every record. Defaults to the name of the directory holding the room (the repo directory for `<repo>/.squad`), so all worktrees of a repo share one name. |
+| `SQUAD_RELAY_KINDS` | Comma-separated message kinds to relay, e.g. `chat` to skip system notices. Default: every kind. |
+
+Ways to run it:
+
+- `squad relay` (or `squad relay --once`) — ship everything past the relay cursor and exit. On a newly-enabled room the cursor starts at message 0, so the first run **backfills the full history**. Exits non-zero if the endpoint rejected or could not be reached.
+- `squad relay --follow [--interval <seconds>]` — keep shipping new messages (every 5 s by default) until Ctrl-C / `SIGTERM`. Stopping mid-backfill is safe: the cursor only advances past batches the collector accepted, so the next run resumes where this one stopped.
+- **Automatically, from a live MCP server**: when `SQUAD_RELAY_ENDPOINT` is in the MCP server's environment, every message it inserts schedules a background relay pass. That pass is fire-and-forget — a slow, down or misconfigured collector never delays or fails the agent's tool call, and it simply catches up on a later pass. (Put the variables in the environment the harness starts the server with; keep the ingestion key out of any committed `.mcp.json`.)
+- `squad relay status` — the configured target, the cursor, how many messages are still unshipped (lag), and the last error (or `none`). With no configuration it says `not configured` (and lists any endpoint this room has relayed to before).
+
+Delivery is at-least-once: a record can be re-sent if an acknowledgement is lost, so each carries a stable `squad.message_id` to de-duplicate on. Each OTLP log record's body is the message text; its attributes are `squad.room`, `squad.repo_path`, `squad.host`, `squad.message_id`, `squad.sender`, `squad.kind` and `squad.occurrences` (resource attributes `service.name=squad`, `host.name`). The relay cursor is per endpoint and per machine — `squad clear`, `export` and `import` leave it alone.
+
+**SigNoz: "room chat by repo".** In the Logs Explorer, filter with the query builder on `service.name = squad` and `squad.room = my-repo`, add `squad.sender` and `squad.kind` as columns, and save it as a view (e.g. *squad / my-repo*); group by `squad.room` instead to see every relayed room side by side. For a dashboard panel, a ClickHouse query along these lines (SigNoz's v2 logs schema; column names can differ across SigNoz versions) renders the chat de-duplicated by message id:
+
+```sql
+SELECT
+  fromUnixTimestamp64Nano(timestamp)          AS time,
+  attributes_string['squad.room']             AS room,
+  attributes_string['squad.sender']           AS sender,
+  attributes_string['squad.kind']             AS kind,
+  body
+FROM signoz_logs.distributed_logs_v2
+WHERE resources_string['service.name'] = 'squad'
+  AND attributes_string['squad.room'] = 'my-repo'
+  AND timestamp BETWEEN {{.start_timestamp_nano}} AND {{.end_timestamp_nano}}
+ORDER BY time DESC
+LIMIT 1 BY attributes_number['squad.message_id']
+LIMIT 500
+```
 
 ## Science Cards: an end-to-end example
 

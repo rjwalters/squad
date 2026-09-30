@@ -308,7 +308,14 @@ test("opening a pre-relay squad.db adds relay_cursors without disturbing the roo
       .prepare("PRAGMA table_info(relay_cursors)")
       .all()
       .map((c) => c.name);
-    assert.deepEqual(columns, ["target", "last_message_id", "updated_at", "lease_expires"]);
+    assert.deepEqual(columns, [
+      "target",
+      "last_message_id",
+      "updated_at",
+      "lease_expires",
+      "last_error", // #113
+      "last_error_at", // #113
+    ]);
     assert.equal(
       db.prepare("SELECT COUNT(*) AS n FROM relay_cursors").get().n,
       0,
