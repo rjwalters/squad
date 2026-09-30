@@ -23,6 +23,9 @@ import { parseRelayArgs, RELAY_USAGE, HELP } from "../dist/cli.js";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 const entry = join(repoRoot, "dist", "index.js");
+// Node 22 prints an ExperimentalWarning for node:sqlite to stderr (engines is
+// >=22.16.0); silence it so stderr assertions see only squad's own output.
+const NODE_FLAGS = ["--no-warnings=ExperimentalWarning"];
 const RELAY_VARS = ["SQUAD_RELAY_ENDPOINT", "SQUAD_RELAY_HEADERS", "SQUAD_RELAY_ROOM_NAME", "SQUAD_RELAY_KINDS"];
 
 /** A mock OTLP/HTTP+JSON logs receiver (same shape as relay.test.mjs's). */
@@ -84,7 +87,7 @@ function envWith(extra) {
 /** Run the CLI without blocking this process's event loop. */
 function runCli(args, env) {
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [entry, ...args], { cwd: repoRoot, env: envWith(env) });
+    const child = spawn(process.execPath, [...NODE_FLAGS, entry, ...args], { cwd: repoRoot, env: envWith(env) });
     let stdout = "",
       stderr = "";
     child.stdout.on("data", (c) => (stdout += c));
@@ -284,7 +287,7 @@ for (const signal of ["SIGTERM", "SIGINT"]) {
     const dir = freshRoom(t);
     const receiver = await mockOtlp(t);
     seed(dir, ["backlog"]);
-    const child = spawn(process.execPath, [entry, "relay", "--follow", "--interval", "0.1"], {
+    const child = spawn(process.execPath, [...NODE_FLAGS, entry, "relay", "--follow", "--interval", "0.1"], {
       cwd: repoRoot,
       env: envWith({ SQUAD_DIR: dir, SQUAD_RELAY_ENDPOINT: receiver.endpoint }),
     });
@@ -315,7 +318,7 @@ test("--follow interrupted mid-POST leaves the batch unshipped and resumable", a
   t.after(() => release());
   seed(dir, ["stuck"]);
   const env = { SQUAD_DIR: dir, SQUAD_RELAY_ENDPOINT: receiver.endpoint };
-  const child = spawn(process.execPath, [entry, "relay", "--follow"], { cwd: repoRoot, env: envWith(env) });
+  const child = spawn(process.execPath, [...NODE_FLAGS, entry, "relay", "--follow"], { cwd: repoRoot, env: envWith(env) });
   let stdout = "";
   child.stdout.on("data", (c) => (stdout += c));
   const exited = new Promise((r) => child.on("close", (status) => r(status)));
