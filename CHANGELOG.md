@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.17.0
+
+- Add the relay engine (`src/relay.ts`): a cursor-based outbox that ships room
+  messages to a remote OTLP/HTTP logs endpoint (SigNoz and friends) as one log
+  record per message, so a room is visible somewhere other than the machine it
+  lives on. Off unless `SQUAD_RELAY_ENDPOINT` is set; `SQUAD_RELAY_HEADERS`,
+  `SQUAD_RELAY_ROOM_NAME`, and `SQUAD_RELAY_KINDS` tune auth, the reported room
+  name, and which kinds ship. Delivery is at-least-once, de-dupable on the
+  `squad.message_id` attribute: the `relay_cursors` high-water mark advances
+  only after the collector returns 2xx, and a SQLite lease keeps two concurrent
+  passes from shipping the same batch. No new dependency — OTLP/HTTP+JSON is a
+  plain `fetch` POST. `SQUAD_RELAY_HEADERS` is read from the environment on
+  every pass and never persisted. Engine only: no CLI command or MCP hook calls
+  it yet.
+
 ## 0.16.3
 
 - Record a room-visibility convention: the room protects only the agents in it. A
