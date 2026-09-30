@@ -1,9 +1,9 @@
 import { adoptNodes } from "./nodes.js";
 import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 /**
  * Bumped whenever a table is added to (or removed from) ROOM_TABLES
@@ -441,6 +441,146 @@ export function dbPath(): string {
 }
 
 /**
+ * Nearest ancestor (including `start`) holding a `.git` entry, i.e. the root of
+ * the working tree that literally contains `start`. Deliberately *not*
+ * findRepoRoot(): that one also stops at `.squad`/`.mcp.json` markers (right
+ * for choosing a room) and resolves a linked worktree back to its primary clone
+ * (right for sharing a room). Here we want the checkout whose `git status` a
+ * stray room would dirty, which is a strictly git question.
+ */
+function findGitRoot(start: string): string | null {
+  let dir = resolve(start);
+  for (;;) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
+/**
+ * The *common* git directory for the working tree rooted at `root`:
+ * `<root>/.git` for a normal clone, and for a linked worktree the primary
+ * clone's `.git`, resolved through the pointer file's `commondir` (no git
+ * subprocess, so this still works when git is missing from PATH). `info/` lives
+ * in the common dir, so `info/exclude` is shared by every worktree of a repo.
+ */
+function gitCommonDir(root: string): string | null {
+  const dotGit = join(root, ".git");
+  let st;
+  try {
+    st = statSync(dotGit);
+  } catch {
+    return null;
+  }
+  if (st.isDirectory()) return dotGit;
+  if (!st.isFile()) return null;
+  let pointer: string;
+  try {
+    pointer = readFileSync(dotGit, "utf8");
+  } catch {
+    return null;
+  }
+  const match = /^gitdir:\s*(.+?)\s*$/m.exec(pointer);
+  if (!match) return null;
+  const gitDir = resolve(root, match[1]);
+  try {
+    const common = readFileSync(join(gitDir, "commondir"), "utf8").trim();
+    if (common) return resolve(gitDir, common);
+  } catch {
+    // No commondir file: gitDir is itself the common dir (a relocated .git).
+  }
+  return existsSync(gitDir) ? gitDir : null;
+}
+
+/** Every literal spelling of an ignore line that already covers `rel`. */
+function ignoreVariants(rel: string): string[] {
+  return [rel, `${rel}/`, `/${rel}`, `/${rel}/`];
+}
+
+/** True when `path` already contains one of `variants` as a whole line. */
+function hasIgnoreLine(path: string, variants: string[]): boolean {
+  let text: string;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return false;
+  }
+  return text.split(/\r?\n/).some((line) => variants.includes(line.trim()));
+}
+
+/** True when git already ignores `path` (broader pattern, global excludes, …). */
+function gitIgnores(root: string, path: string): boolean {
+  try {
+    execFileSync("git", ["-C", root, "check-ignore", "-q", "--", path], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    return true; // exit 0: ignored
+  } catch {
+    return false; // exit 1 (not ignored) or git unavailable — assume not
+  }
+}
+
+const IGNORE_NOTE =
+  "# squad: local room state (SQLite db + WAL sidecars), never committed";
+
+/**
+ * Keep the room out of the enclosing repo's `git status`.
+ *
+ * The room is created lazily by openDb(), so any checkout that reached
+ * squadDir() without a fresh `install.sh` run (an install predating the
+ * installer's own `.gitignore` step, a partial install, a plain `npx squad`)
+ * ended up with an untracked, non-ignored `.squad/` — #111. This closes that
+ * gap at the one place the directory is actually created, which also means it
+ * self-heals an already-affected checkout on the next run.
+ *
+ * `.git/info/exclude` rather than `.gitignore`: it is local-only, never needs a
+ * commit, and cannot surprise a repo by mutating a tracked file — the right
+ * trade for an unattended runtime write. The installer's `.gitignore` step is
+ * unchanged and still preferred for a repo that wants the ignore shared with
+ * the team; this only ever *adds* a line, and only when nothing already covers
+ * the room.
+ *
+ * Returns the exclude file written, or null when nothing needed writing.
+ * Never throws: a read-only or exotic checkout must not block opening a room.
+ */
+export function ensureRoomIgnored(roomDir: string): string | null {
+  try {
+    const room = resolve(roomDir);
+    const root = findGitRoot(dirname(room));
+    if (!root) return null; // not inside a working tree (~/.squad, /tmp, …)
+    const rel = relative(root, room).split(sep).join("/");
+    if (!rel || rel === "." || rel.startsWith("../") || isAbsolute(rel)) return null;
+    const common = gitCommonDir(root);
+    if (!common) return null;
+    const exclude = join(common, "info", "exclude");
+    const variants = ignoreVariants(rel);
+    // Cheap textual checks first, so the steady state costs two small reads.
+    if (hasIgnoreLine(join(root, ".gitignore"), variants)) return null;
+    if (hasIgnoreLine(exclude, variants)) return null;
+    // Then the authoritative one, which also catches broader patterns, nested
+    // .gitignore files and a global core.excludesFile.
+    if (gitIgnores(root, room)) return null;
+    const entry = rel.includes("/") ? `/${rel}/` : `${rel}/`;
+    mkdirSync(dirname(exclude), { recursive: true });
+    let text = "";
+    try {
+      text = readFileSync(exclude, "utf8");
+    } catch {
+      // No exclude file yet (or unreadable): start one.
+    }
+    const separator = text && !text.endsWith("\n") ? "\n" : "";
+    writeFileSync(exclude, `${text}${separator}${IGNORE_NOTE}\n${entry}\n`);
+    return exclude;
+  } catch {
+    return null;
+  }
+}
+
+/** Rooms this process has already checked, so openDb() stays cheap to re-call. */
+const ignoreChecked = new Set<string>();
+
+/**
  * Defense in depth for the split-brain the worktree resolution above prevents:
  * if we still land in an empty room while cwd is inside a linked worktree whose
  * primary clone has a populated room, say so instead of joining in silence.
@@ -504,7 +644,15 @@ export function openDb(): DatabaseSync {
     const warning = roomSplitWarning(squadDir(), process.cwd());
     if (warning) console.error(warning);
   }
-  mkdirSync(squadDir(), { recursive: true });
+  const dir = squadDir();
+  mkdirSync(dir, { recursive: true });
+  // Creating the room is also the moment to make sure the enclosing repo
+  // ignores it (#111) — once per process per room, since the answer only
+  // changes when we ourselves change it.
+  if (!ignoreChecked.has(dir)) {
+    ignoreChecked.add(dir);
+    ensureRoomIgnored(dir);
+  }
   const db = new DatabaseSync(dbPath());
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
