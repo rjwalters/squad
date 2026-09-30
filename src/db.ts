@@ -6,7 +6,7 @@ import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 
 /**
- * Bumped whenever a table is added to (or removed from) SCHEMA / ROOM_TABLES
+ * Bumped whenever a table is added to (or removed from) ROOM_TABLES
  * below, *or* an existing ROOM_TABLES table's column shape changes (e.g. a
  * new column via an `ensure*Column()` migration in openDb()) -- either kind
  * of change can make `Squad.importRoom()`'s `INSERT INTO t SELECT * FROM t2`
@@ -20,6 +20,11 @@ import { basename, dirname, join } from "node:path";
  * `ALTER TABLE ADD COLUMN` migrations (new columns on an existing table)
  * below -- this version number exists purely as an export/import
  * compatibility check, not a migration-ordering mechanism.
+ *
+ * A SCHEMA table deliberately kept *out* of ROOM_TABLES (relay_cursors, #112)
+ * is invisible to clear()/exportRoom()/importRoom() and therefore does not
+ * move this number: bumping it for such a table would reject every previously
+ * produced export for no compatibility gain.
  */
 export const SCHEMA_VERSION = 9;
 
@@ -45,6 +50,12 @@ export function envMinutes(name: string, fallback: number): number {
  * each other or with SCHEMA below. Order is insignificant: no table here
  * declares a SQL `FOREIGN KEY`, so neither DELETE nor INSERT ordering
  * matters.
+ *
+ * Not every SCHEMA table belongs here: `relay_cursors` (#112) records what
+ * *this host* has already shipped to a remote OTLP endpoint, which is a
+ * property of the delivery channel rather than of the room, so it is
+ * deliberately excluded -- a `squad clear` or a room import must not silently
+ * rewind (or fast-forward) an outbox cursor.
  */
 export const ROOM_TABLES = [
   "steward_reminders",
@@ -331,6 +342,27 @@ CREATE TABLE IF NOT EXISTS review_requests (
   cancel_reason TEXT
 );
 CREATE INDEX IF NOT EXISTS review_requests_target_status ON review_requests (target, status);
+-- Relay delivery bookkeeping (#112): the outbox high-water mark per remote
+-- OTLP target, plus that target's shipping lease. Deliberately NOT in
+-- ROOM_TABLES above -- this is local delivery state about *this* host's
+-- conversation with *this* endpoint, not room content, so clear()/export/
+-- import leave it alone (and SCHEMA_VERSION, which exists solely as an
+-- export/import compatibility check over ROOM_TABLES, does not move: neither
+-- importRoom()'s positional INSERT ... SELECT nor its missing-table check
+-- ever looks at a table outside that set).
+--
+-- target is the endpoint's scheme://host/path with any query string and
+-- userinfo stripped (relayTarget(), src/relay.ts), so a credential passed as
+-- a URL parameter can never be persisted here. lease_expires is epoch ms,
+-- 0 when free, and is acquired/renewed by the same atomic
+-- "UPDATE ... WHERE lease_expires <= ?" shape node_reviews uses (src/core.ts)
+-- so two concurrent relays cannot ship the same batch.
+CREATE TABLE IF NOT EXISTS relay_cursors (
+  target TEXT PRIMARY KEY,
+  last_message_id INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT,
+  lease_expires INTEGER NOT NULL DEFAULT 0
+);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */

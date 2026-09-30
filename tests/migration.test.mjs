@@ -81,9 +81,18 @@ const SCIENCE_CARD_TABLES = ["science_cards", "science_card_transitions", "scien
  * leases; #39: directed review requests; #41: session-scoped read cursors —
  * session_cursors holds the per-session cursor, while the pre-existing
  * persona-keyed `cursors` table stays in PRE_EXISTING_TABLES and keeps the
- * persona's durable high-water mark).
+ * persona's durable high-water mark; #112: relay_cursors, the outbox
+ * high-water mark per remote OTLP target — the first SCHEMA table that is
+ * deliberately not a ROOM_TABLE, so it is additive here but invisible to
+ * clear/export/import).
  */
-const LATER_TABLES = [...SCIENCE_CARD_TABLES, "sessions", "review_requests", "session_cursors"];
+const LATER_TABLES = [
+  ...SCIENCE_CARD_TABLES,
+  "sessions",
+  "review_requests",
+  "session_cursors",
+  "relay_cursors",
+];
 const PRE_EXISTING_TABLES = [
   "messages",
   "cursors",
@@ -151,6 +160,10 @@ test("opening an old-schema .squad/squad.db adds the Science Card tables without
     // ...and the session-scoped cursor table starts empty too — an upgrade
     // never migrates the old persona-keyed `cursors` rows into it.
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM session_cursors").get().n, 0);
+    // ...and the relay outbox cursor table starts empty: a room that predates
+    // relaying has shipped nothing, and must not be recorded as having
+    // already shipped its history to some target.
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM relay_cursors").get().n, 0);
     // ...and the science_cards table is empty (freshly created), not
     // pre-populated with anything.
     const cardCount = db.prepare("SELECT COUNT(*) AS n FROM science_cards").get();
@@ -263,6 +276,62 @@ test("opening a squad.db whose messages table predates occurrences adds the colu
       reopened.prepare("SELECT occurrences FROM messages WHERE sender = 'claude'").get().occurrences,
       1,
     );
+    reopened.close();
+  } finally {
+    delete process.env.SQUAD_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// --- relay_cursors (#112) --------------------------------------------------
+
+test("opening a pre-relay squad.db adds relay_cursors without disturbing the room", () => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-migration-relay-"));
+  const dbFile = join(dir, "squad.db");
+  try {
+    // A room from before relaying existed: messages, nothing relay-shaped.
+    const seed = new DatabaseSync(dbFile);
+    seed.exec(PRE_SCIENCE_CARD_SCHEMA);
+    seed
+      .prepare("INSERT INTO messages (sender, kind, body, ts) VALUES (?, ?, ?, ?)")
+      .run("claude", "chat", "pre-relay message", "2026-01-01T00:00:00.000Z");
+    seed.close();
+
+    const pre = new DatabaseSync(dbFile);
+    assert.ok(!tableNames(pre).includes("relay_cursors"), "fixture must predate relay_cursors");
+    pre.close();
+
+    process.env.SQUAD_DIR = dir;
+    const db = openDb();
+    assert.ok(tableNames(db).includes("relay_cursors"), "relay_cursors added on open");
+    const columns = db
+      .prepare("PRAGMA table_info(relay_cursors)")
+      .all()
+      .map((c) => c.name);
+    assert.deepEqual(columns, ["target", "last_message_id", "updated_at", "lease_expires"]);
+    assert.equal(
+      db.prepare("SELECT COUNT(*) AS n FROM relay_cursors").get().n,
+      0,
+      "an upgraded room has shipped nothing yet",
+    );
+    // The pre-existing message is untouched -- and, because the cursor starts
+    // unset, a first relay pass back-fills it rather than skipping it.
+    assert.equal(
+      db.prepare("SELECT body FROM messages WHERE sender = 'claude'").get().body,
+      "pre-relay message",
+    );
+    db.prepare(
+      "INSERT INTO relay_cursors (target, last_message_id, updated_at, lease_expires) VALUES (?, ?, ?, 0)",
+    ).run("https://collector.example/v1/logs", 1, "2026-01-01T00:00:01.000Z");
+    db.close();
+
+    // Re-opening is idempotent: CREATE TABLE IF NOT EXISTS neither recreates
+    // the table nor rewinds a cursor already recorded in it.
+    const reopened = openDb();
+    const cursor = reopened.prepare("SELECT * FROM relay_cursors").get();
+    assert.equal(cursor.target, "https://collector.example/v1/logs");
+    assert.equal(cursor.last_message_id, 1);
+    assert.equal(cursor.lease_expires, 0);
     reopened.close();
   } finally {
     delete process.env.SQUAD_DIR;
