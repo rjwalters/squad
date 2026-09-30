@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.17.1
+
+- Keep the room out of git from the runtime that creates it: opening a room now
+  appends its repo-relative path to `.git/info/exclude` unless `.gitignore`, an
+  existing exclude entry, or a broader pattern already ignores it. A checkout that
+  already carries an untracked, non-ignored `.squad/` heals itself on the next run,
+  instead of waiting for a reinstall of the installer's `.gitignore` step.
+
 ## 0.17.0
 
 - Add the relay engine (`src/relay.ts`): a cursor-based outbox that ships room
