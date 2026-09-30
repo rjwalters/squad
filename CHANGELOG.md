@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.16.3
+
+- Record a room-visibility convention: the room protects only the agents in it. A
+  fleet worker, scheduled job, or agent that never joined sees none of the chat or
+  claims, so a negotiated decision they must respect belongs in repo state (a label,
+  draft PR, base branch, or claim), not only in chat.
+
+## 0.16.2
+
+- Stop the room-split advisory from suggesting `SQUAD_DIR=...` when the caller has
+  already set `SQUAD_DIR` explicitly; it now fires only for an accidental split from
+  the repo-root walk.
+
 ## 0.16.1
 
 - Record three room conventions from a two-agent session: announce an irreversible
