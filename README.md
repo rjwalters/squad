@@ -294,6 +294,81 @@ forever on unread chatter alone:
   restarting TTL. Earlier directed resets cannot be reconstructed, so this
   migrated count is only a lower bound on pre-upgrade fires.
 
+### Mid-turn inbox delivery (opt-in)
+
+The `Stop` hook above covers an agent that is *finishing* a turn. The common
+case it cannot reach is an agent **in the middle of a long task** in its own
+repo — one that may never have run `/squad:join`, and will not call
+`squad_check` for another hour. Squad is pull-only, so a directed message sent
+from outside that session (`SQUAD_DIR=<repo>/.squad squad send "@<persona>
+…"`) sits unread with nothing to put it in front of the agent.
+
+`./install.sh --inbox` (off by default; same `SQUAD_CLAUDE_PERSONA`
+requirement as `--reentry`, for the same reason) installs
+`.claude/hooks/squad-inbox.sh` and wires it into `.claude/settings.json`'s
+`PostToolUse` **and** `UserPromptSubmit` arrays. On each eligible invocation it
+peeks the room *without consuming* and, when something is waiting, emits a
+`hookSpecificOutput.additionalContext` notice — so the agent reads it mid-task
+without anything being stopped, woken, or blocked:
+
+```
+📬 squad: 1 directed message — opus-5-3f2a: "disk triage: pause writes".
+Nothing was consumed — run squad_check to read and act on it.
+```
+
+Both hooks are additive and opt-in; `--reentry` and `--inbox` can be installed
+together or separately, and an ordinary refresh keeps whichever is already
+installed.
+
+- **What it surfaces, deliberately narrowly**: unread `@mentions` of this
+  persona, unexpired pending/claimed directed review requests, and `@repo`
+  broadcasts. Not ordinary chatter — this hook interrupts, so the bar is
+  "someone needs *you*". Detection is literally the re-entry adapters' own
+  (`observeDirectedItems()` in `src/reentry-room.ts`), so the two can never
+  disagree about what counts as directed.
+- **`@repo` is a reserved broadcast target**: it means "every agent working in
+  this repo", including sessions that never joined, and it reads naturally
+  because the room *is* the repo. Every inbox hook treats it as a mention of
+  itself, so it needs no persona and works for automatically named
+  `<label>-<hex>` sessions too. The literal name `repo` is reserved room-wide
+  (`src/identity.ts`): automatic minting skips it, a `squad_join` rename is
+  refused with a note, and a `SQUAD_PERSONA=repo` pin fails at open time rather
+  than silently shadowing the broadcast. Refinements are unaffected —
+  `repo-doctor` is an ordinary name.
+- **Nothing is consumed**: the peek leaves the read cursor where it was, so
+  `squad_check` still returns the full message. The hook keeps its own
+  "already said this" high-water mark, separate from that cursor, in
+  `<repo>/.squad/inbox/<persona>.json` — so one item is announced once rather
+  than on every tool call.
+- **Cost**: at most one peek per `SQUAD_INBOX_INTERVAL_SECONDS` (default `60`;
+  `0` peeks on every invocation). Inside that window the bash wrapper
+  short-circuits on the state file's mtime *before* spawning node — about 6 ms
+  on a loaded 8-core Linux box, versus ~50 ms when node runs and ~1 peek/minute
+  that opens SQLite at all. The wrapper's check is skip-only and conservative:
+  `src/inbox.ts`'s `peekDue()` remains the authority.
+- **It never blocks, fails, or creates**: no decision field is ever emitted, a
+  malformed payload / missing build / unreadable or locked database / corrupt
+  state file all fail *silent* with exit 0, and a cwd with no room gets no
+  inbox and no side effects (the hook never creates a `.squad/`). A corrupt
+  state file costs at most one repeated notice, never a dropped message.
+  The peek does renew the persona's presence lease — a busy agent shows as
+  `active` rather than drifting to `stale` while it works.
+- **Operator stop**: `SQUAD_INBOX_STOP=1`, `<repo>/.squad/inbox-stop` (all
+  personas), or `<repo>/.squad/inbox/<persona>.stop` (one persona), mirroring
+  the re-entry stop markers.
+- **Claude-only, like the `Stop` hook and for the same reason**: Codex's only
+  hook event is `pre_tool_use` (verified against Codex 0.146.0), which fires
+  *before* a tool runs and is a permission decision, not a context channel —
+  there is no `post_tool_use` or prompt-submit event to carry a notice on. A
+  Codex persona still receives directed work through
+  `squad codex-reentry`'s between-run observation, which is the Codex-side
+  answer to the same problem.
+- **One pin, one inbox**: the rate limit and the notified mark are keyed per
+  persona per room. Two concurrent Claude sessions sharing a single pinned
+  name share that mark, so only one of them is told; give each session a
+  refinement (`<pinned>-2`) — the convention `/squad:fanout` already uses — if
+  both must be notified.
+
 ### Re-entry for Codex: `squad codex-reentry`
 
 Codex has **no end-of-turn hook** to mirror the `Stop` hook above with — its

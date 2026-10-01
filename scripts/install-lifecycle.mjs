@@ -37,6 +37,7 @@ function options() {
     check: false,
     dry: false,
     reentry: false,
+    inbox: false,
   };
   let targetSeen = false;
   for (const arg of args) {
@@ -50,6 +51,8 @@ function options() {
     else if (arg === "--dry-run") opts.dry = true;
     else if (arg === "--reentry") opts.reentry = true;
     else if (arg === "--no-reentry") opts.reentry = false;
+    else if (arg === "--inbox") opts.inbox = true;
+    else if (arg === "--no-inbox") opts.inbox = false;
     else if (arg === "-h" || arg === "--help") {
       console.log(`usage: ./${action}.sh [options] [target-repo]
 Install/update copies canonical workflows for Claude and Codex. Modified or
@@ -59,6 +62,8 @@ unowned files are preserved and reported; resolve conflicts and rerun.
   --no-link       skip the optional npm link
   --reentry       opt-in hook; requires SQUAD_CLAUDE_PERSONA=<unique-name>
   --no-reentry    do not add a hook (existing managed hooks remain installed)
+  --inbox         opt-in mid-turn inbox hook; same persona requirement
+  --no-inbox      do not add it (existing managed hooks remain installed)
   --check         read-only status against this source; nonzero means attention
   --dry-run       preflight and print planned changes without writing
   --global        uninstall only: also remove owned global Codex artifacts
@@ -505,6 +510,10 @@ async function main() {
   const opts = options();
   if (opts.reentry && !process.env.SQUAD_CLAUDE_PERSONA)
     throw new Error("--reentry requires SQUAD_CLAUDE_PERSONA=<unique-name>");
+  // Same reason as --reentry: a separate hook process cannot discover an
+  // automatically generated session identity, so @mention delivery needs a pin.
+  if (opts.inbox && !process.env.SQUAD_CLAUDE_PERSONA)
+    throw new Error("--inbox requires SQUAD_CLAUDE_PERSONA=<unique-name>");
   if (!opts.check && !opts.dry) {
     if (opts.action === "install" && opts.codex)
       opts.codex = await confirm(
@@ -573,7 +582,8 @@ async function main() {
     fs.readFileSync(join(source, "hooks/squad-mcp.mjs"), "utf8"),
   );
   const hookRel = ".claude/hooks/squad-reentry.sh";
-  const allowed = new Set([...artifacts.keys(), ...metaPaths, hookRel]);
+  const inboxRel = ".claude/hooks/squad-inbox.sh";
+  const allowed = new Set([...artifacts.keys(), ...metaPaths, hookRel, inboxRel]);
   const scope = new Scope(plan, opts.target, localReceipt, allowed);
   // A cloned consumer has tracked artifact hashes but no machine-local config
   // receipt. Recover only file ownership; never infer config ownership.
@@ -715,44 +725,100 @@ async function main() {
         plan.attention.push(`stale/different Claude runtime source: ${spec}`);
     }
   }
-  if (
-    opts.reentry &&
-    cfg.mcpServers?.squad?.env?.SQUAD_PERSONA !==
-      process.env.SQUAD_CLAUDE_PERSONA
-  )
-    throw new Error(
-      "--reentry persona conflicts with preserved MCP configuration",
-    );
+  for (const flag of ["reentry", "inbox"])
+    if (
+      opts[flag] &&
+      cfg.mcpServers?.squad?.env?.SQUAD_PERSONA !==
+        process.env.SQUAD_CLAUDE_PERSONA
+    )
+      throw new Error(
+        `--${flag} persona conflicts with preserved MCP configuration`,
+      );
   const block = fs.readFileSync(
     join(source, "skills/squad/instructions.md"),
     "utf8",
   );
   for (const name of ["CLAUDE.md", "AGENTS.md"])
     scope.block(name, "<!-- BEGIN SQUAD -->", "<!-- END SQUAD -->", block);
-  const reentry = opts.reentry || Boolean(scope.old.files?.[hookRel]);
-  const retainHook = hookSettings(scope, reentry);
-  if (reentry && retainHook && opts.action === "uninstall") {
-    if (scope.old.files?.[hookRel])
-      scope.next.files[hookRel] = scope.old.files[hookRel];
-    plan.conflict(
-      `${hookRel} retained because a surviving Stop hook still uses it`,
+  // Each opt-in hook script: requested explicitly, or already installed (an
+  // ordinary refresh never silently drops a hook the operator opted into).
+  // `events` is every settings.json hooks array the script is wired into; the
+  // script file survives uninstall while any of them still references it.
+  const hooks = [
+    {
+      rel: hookRel,
+      source: "hooks/squad-reentry.sh",
+      runtime: "dist/reentry-hook.js",
+      jsToken: "__SQUAD_REENTRY_JS__",
+      personaToken: "__SQUAD_REENTRY_PERSONA__",
+      label: "reentry",
+      events: ["Stop"],
+      requested: opts.reentry || Boolean(scope.old.files?.[hookRel]),
+    },
+    {
+      rel: inboxRel,
+      source: "hooks/squad-inbox.sh",
+      runtime: "dist/inbox-hook.js",
+      jsToken: "__SQUAD_INBOX_JS__",
+      personaToken: "__SQUAD_INBOX_PERSONA__",
+      label: "inbox",
+      events: ["PostToolUse", "UserPromptSubmit"],
+      requested: opts.inbox || Boolean(scope.old.files?.[inboxRel]),
+    },
+  ];
+  // One pass over .claude/settings.json for every event of every hook: the
+  // plan holds a single change per file, so each array cannot be edited from
+  // its own independently-read copy.
+  const retained = hookSettings(
+    scope,
+    hooks.flatMap((hook) =>
+      hook.events.map((event) => ({
+        event,
+        command: `\${CLAUDE_PROJECT_DIR}/${hook.rel}`,
+        // Receipt key: the legacy reentry receipt is keyed by the bare file so
+        // existing installations keep their ownership record.
+        fragment:
+          hook.label === "reentry"
+            ? ".claude/settings.json"
+            : `.claude/settings.json#${event}`,
+        requested: hook.requested,
+      })),
+    ),
+  );
+  for (const hook of hooks) {
+    if (!hook.requested) continue;
+    const stillWired = hook.events.some((event) =>
+      retained.get(
+        hook.label === "reentry"
+          ? ".claude/settings.json"
+          : `.claude/settings.json#${event}`,
+      ),
     );
-  } else if (reentry) {
+    if (stillWired && opts.action === "uninstall") {
+      if (scope.old.files?.[hook.rel])
+        scope.next.files[hook.rel] = scope.old.files[hook.rel];
+      plan.conflict(
+        `${hook.rel} retained because a surviving hook still uses it`,
+      );
+      continue;
+    }
     const persona =
       process.env.SQUAD_CLAUDE_PERSONA ||
       cfg.mcpServers?.squad?.env?.SQUAD_PERSONA;
     if (opts.action === "install" && !persona)
-      throw new Error("managed reentry hook requires its explicit MCP persona");
+      throw new Error(
+        `managed ${hook.label} hook requires its explicit MCP persona`,
+      );
     const quoteDouble = (value) =>
       String(value ?? "").replace(/[\\"$`]/g, "\\$&");
-    const hook = fs
-      .readFileSync(join(source, "hooks/squad-reentry.sh"), "utf8")
-      .replaceAll(
-        "__SQUAD_REENTRY_JS__",
-        quoteDouble(join(source, "dist/reentry-hook.js")),
-      )
-      .replaceAll("__SQUAD_REENTRY_PERSONA__", quoteDouble(persona));
-    scope.file(hookRel, hook, 0o755);
+    scope.file(
+      hook.rel,
+      fs
+        .readFileSync(join(source, hook.source), "utf8")
+        .replaceAll(hook.jsToken, quoteDouble(join(source, hook.runtime)))
+        .replaceAll(hook.personaToken, quoteDouble(persona)),
+      0o755,
+    );
   }
   gitignore(scope);
   const metadata = {
@@ -845,64 +911,114 @@ async function main() {
   process.exitCode = plan.conflicts.length ? 1 : 0;
 }
 
-function hookSettings(scope, requested) {
+/**
+ * Own one managed entry per (event, command) in .claude/settings.json.
+ *
+ * `specs` is `{ event, command, fragment, requested }[]`; several specs share
+ * one settings.json, so this makes a single plan change from a single parse —
+ * two independently-read copies of the file would each plan a write and the
+ * last one would silently drop the other's entry. Returns a Map of
+ * `fragment -> true` when some *surviving* hook entry still invokes that
+ * command, which is what keeps the script file installed through uninstall.
+ *
+ * Receipts record which containers this installer created (`created` for the
+ * file, `createdHooks` for `hooks`, `createdEvent` for the event's array) so
+ * removal can unwind exactly as much as it built. `createdStop` is the legacy
+ * spelling of `createdEvent` from when `Stop` was the only wired event.
+ */
+function hookSettings(scope, specs) {
   const rel = ".claude/settings.json",
     path = safePath(scope.root, rel),
     text = read(path);
-  const cfg = parseJson(text, path),
-    prior = scope.old.fragments?.[rel];
-  if (prior && (prior.kind !== "hook" || !object(prior.entry)))
-    throw new Error("invalid hook receipt");
+  const cfg = parseJson(text, path);
   const removing = scope.plan.opts.action === "uninstall";
-  if (!requested && !prior) return;
+  const retained = new Map();
+  const entries = specs.map((spec) => ({
+    ...spec,
+    prior: scope.old.fragments?.[spec.fragment],
+  }));
+  for (const spec of entries)
+    if (spec.prior && (spec.prior.kind !== "hook" || !object(spec.prior.entry)))
+      throw new Error("invalid hook receipt");
+  if (entries.every((spec) => !spec.requested && !spec.prior)) return retained;
   if (cfg.hooks !== undefined && !object(cfg.hooks))
     throw new Error("settings.hooks must be an object");
-  if (cfg.hooks?.Stop !== undefined && !Array.isArray(cfg.hooks.Stop))
-    throw new Error("settings.hooks.Stop must be an array");
-  const entries = cfg.hooks?.Stop ?? [];
-  const command = "${CLAUDE_PROJECT_DIR}/.claude/hooks/squad-reentry.sh";
-  const desired = { matcher: "", hooks: [{ type: "command", command }] };
-  const matching = entries.findIndex((entry) => equal(entry, prior?.entry));
-  if (prior && matching === -1) {
-    scope.plan.conflict(`${path}: managed Stop hook was customized or removed`);
-    scope.next.fragments[rel] = prior;
-    return true;
-  }
-  if (removing) {
-    if (!prior)
-      return entries.some((entry) =>
-        entry.hooks?.some((h) => h.command === command),
+  for (const { event } of entries)
+    if (cfg.hooks?.[event] !== undefined && !Array.isArray(cfg.hooks[event]))
+      throw new Error(`settings.hooks.${event} must be an array`);
+  const createdFile = text === null;
+  const createdHooks = cfg.hooks === undefined;
+  const createdEvent = new Map(
+    entries.map(({ event }) => [event, cfg.hooks?.[event] === undefined]),
+  );
+  let changed = false;
+  for (const spec of entries) {
+    const live = cfg.hooks?.[spec.event];
+    const list = live ?? [];
+    const invoked = () =>
+      (cfg.hooks?.[spec.event] ?? []).some((entry) =>
+        entry.hooks?.some((h) => h.command === spec.command),
       );
-    entries.splice(matching, 1);
-    if (!entries.length && prior.createdStop) delete cfg.hooks.Stop;
-    if (cfg.hooks && !Object.keys(cfg.hooks).length && prior.createdHooks)
-      delete cfg.hooks;
+    const desired = {
+      matcher: "",
+      hooks: [{ type: "command", command: spec.command }],
+    };
+    const matching = list.findIndex((entry) => equal(entry, spec.prior?.entry));
+    if (spec.prior && matching === -1) {
+      scope.plan.conflict(
+        `${path}: managed ${spec.event} hook was customized or removed`,
+      );
+      scope.next.fragments[spec.fragment] = spec.prior;
+      retained.set(spec.fragment, true);
+      continue;
+    }
+    if (removing) {
+      if (spec.prior) {
+        live.splice(matching, 1);
+        changed = true;
+        if (!live.length && (spec.prior.createdEvent ?? spec.prior.createdStop))
+          delete cfg.hooks[spec.event];
+      }
+      retained.set(spec.fragment, invoked());
+      continue;
+    }
+    if (spec.prior) scope.next.fragments[spec.fragment] = spec.prior;
+    else if (!spec.requested) continue;
+    else if (invoked())
+      scope.plan.note(`preserved external ${spec.event} hook: ${path}`);
+    else {
+      cfg.hooks ??= {};
+      cfg.hooks[spec.event] ??= [];
+      cfg.hooks[spec.event].push(desired);
+      changed = true;
+      scope.next.fragments[spec.fragment] = {
+        kind: "hook",
+        entry: desired,
+        created: createdFile,
+        createdHooks,
+        createdEvent: createdEvent.get(spec.event),
+      };
+    }
+  }
+  if (
+    removing &&
+    cfg.hooks &&
+    !Object.keys(cfg.hooks).length &&
+    entries.some((spec) => spec.prior?.createdHooks)
+  ) {
+    delete cfg.hooks;
+    changed = true;
+  }
+  if (changed)
     scope.plan.change(
       path,
-      prior.created && !Object.keys(cfg).length ? null : json(cfg),
+      removing &&
+        !Object.keys(cfg).length &&
+        entries.some((spec) => spec.prior?.created)
+        ? null
+        : json(cfg),
     );
-    return entries.some((entry) =>
-      entry.hooks?.some((h) => h.command === command),
-    );
-  } else if (prior) scope.next.fragments[rel] = prior;
-  else if (
-    entries.some((entry) => entry.hooks?.some((h) => h.command === command))
-  )
-    scope.plan.note(`preserved external Stop hook: ${path}`);
-  else {
-    const receipt = {
-      kind: "hook",
-      entry: desired,
-      created: text === null,
-      createdHooks: cfg.hooks === undefined,
-      createdStop: cfg.hooks?.Stop === undefined,
-    };
-    cfg.hooks ??= {};
-    cfg.hooks.Stop ??= [];
-    cfg.hooks.Stop.push(desired);
-    scope.plan.change(path, json(cfg));
-    scope.next.fragments[rel] = receipt;
-  }
+  return retained;
 }
 function gitignore(scope) {
   const rel = ".gitignore",

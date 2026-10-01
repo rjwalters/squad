@@ -213,6 +213,10 @@ Environment:
                   'squad codex-reentry' (default 48)
   SQUAD_REENTRY_STOP   Set to 1 to stop re-entry immediately (or touch
                   .squad/reentry-stop / .squad/reentry/<persona>.stop)
+  SQUAD_INBOX_INTERVAL_SECONDS  Minimum seconds between room peeks by the
+                  opt-in mid-turn inbox hook (default 60); 0 peeks every call
+  SQUAD_INBOX_STOP     Set to 1 to silence the inbox hook (or touch
+                  .squad/inbox-stop / .squad/inbox/<persona>.stop)
   SQUAD_CODEX_BIN      The codex binary 'squad codex-reentry' supervises
                   (default 'codex')
   SQUAD_RELAY_ENDPOINT   OTLP/HTTP logs endpoint to relay room messages to,
