@@ -70,6 +70,15 @@
 # with a hint to pin it. REPO_REMOTE_NO_WRITEBACK=1 disables the write-back
 # entirely (the id is still logged).
 #
+# Linked-worktree warning (repo#538): when the checkout is a LINKED git
+# worktree (`git worktree add`, e.g. .loom/worktrees/issue-N -- detected by
+# `git rev-parse --git-dir` differing from `--git-common-dir`) and no
+# REPO_REMOTE_ENV_FILE is set, reading a pre-existing <git-root>/.env or writing
+# the instance id back into it prints a loud WARNING naming the file. The
+# read/write still happens (warn-then-proceed); the fix is to move the per-repo
+# settings out of the tree and set REPO_REMOTE_ENV_FILE. The primary checkout
+# is unaffected (no warning).
+#
 # Cost gate (repo#52 — the highest-cost-of-being-wrong element): `up` (with or
 # without --yes) REQUIRES the provider, that provider's credentials, and
 # REPO_REMOTE_INSTANCE_TYPE to be present in config. Instance type is the
@@ -240,10 +249,45 @@ apply_env_file_override() {
   fi
 }
 
+# is_linked_worktree -- true when the current checkout is a linked git worktree
+# (`git worktree add`), false in the primary checkout, a plain clone, or outside
+# git. The standard test: --git-dir differs from --git-common-dir only in a
+# linked worktree. Both are resolved physically, since git may print either one
+# relative to the cwd.
+is_linked_worktree() {
+  local gitdir commondir
+  gitdir="$(git rev-parse --git-dir 2>/dev/null)" || return 1
+  commondir="$(git rev-parse --git-common-dir 2>/dev/null)" || return 1
+  [[ -n "$gitdir" && -n "$commondir" ]] || return 1
+  gitdir="$(cd "$gitdir" 2>/dev/null && pwd -P)" || return 1
+  commondir="$(cd "$commondir" 2>/dev/null && pwd -P)" || return 1
+  [[ "$gitdir" != "$commondir" ]]
+}
+
+# warn_worktree_env <read|write> -- repo#538: loud warning when an in-tree
+# <git-root>/.env is about to be read or written from inside a linked worktree.
+# Callers gate on IN_LINKED_WORKTREE + !REPO_ENV_OVERRIDDEN; this only prints.
+warn_worktree_env() {
+  local verb
+  case "$1" in
+    read)  verb="loading per-repo config from" ;;
+    *)     verb="writing the instance id into" ;;
+  esac
+  log "WARNING: ${verb} ${REPO_ENV}, a .env inside a linked git worktree."
+  log "  Worktrees get copied/rsynced and a gitignored .env is one 'git add -f' from leaking;"
+  log "  move these settings out of the tree and set REPO_REMOTE_ENV_FILE=<absolute path>"
+  log "  (e.g. ~/.config/<repo>/remote.env) in your environment or the shared remote.env."
+}
+
+IN_LINKED_WORKTREE=false   # set by resolve_paths (repo#538)
+
 resolve_paths() {
   SHARED_ENV="${XDG_CONFIG_HOME:-$HOME/.config}/repo/remote.env"
   GIT_ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
   [[ -n "$GIT_ROOT" ]] && REPO_ENV="$GIT_ROOT/.env"
+  if [[ -n "$GIT_ROOT" ]] && is_linked_worktree; then
+    IN_LINKED_WORKTREE=true
+  fi
   apply_env_file_override
 }
 
@@ -254,6 +298,12 @@ load_config() {
   set +a
   # The shared file may itself name the per-repo file (repo#492).
   apply_env_file_override
+  # repo#538: one warning (not per key) when the per-repo layer is an in-tree
+  # .env inside a linked worktree. Still sourced -- warn, then proceed.
+  if [[ -n "$REPO_ENV" && -f "$REPO_ENV" && "$IN_LINKED_WORKTREE" == true \
+        && "$REPO_ENV_OVERRIDDEN" != true ]]; then
+    warn_worktree_env read
+  fi
   set -a
   # shellcheck disable=SC1090
   [[ -n "$REPO_ENV" && -f "$REPO_ENV" ]] && . "$REPO_ENV"
@@ -1797,7 +1847,9 @@ gcp_down() {
 #   REPO_REMOTE_NO_WRITEBACK=1       -> write nothing; log the id + pin hint
 #   REPO_REMOTE_ENV_FILE set         -> write there (created, with its parent
 #                                       dir, if missing)
-#   <git-root>/.env already exists   -> write there (unchanged behavior)
+#   <git-root>/.env already exists   -> write there (unchanged behavior; from
+#                                       a linked worktree it warns first,
+#                                       repo#538)
 #   otherwise                        -> write nothing; log the id + pin hint
 # Not writing is safe: the instance also carries the repo-remote=<name> tag, so
 # the next `up` still finds it; the pin is the stronger, recommended handle.
@@ -1820,6 +1872,11 @@ writeback_instance_id() {  # <instance-id>
   if [[ ! -f "$REPO_ENV" ]] && ! mkdir -p "$(dirname "$REPO_ENV")" 2>/dev/null; then
     log "WARNING: could not create the directory for ${REPO_ENV}; pin REPO_REMOTE_INSTANCE_ID=${id} yourself."
     return 0
+  fi
+  # repo#538: the pre-existing in-tree .env branch, from a linked worktree --
+  # warn loudly, then write (a repo that deliberately keeps one is not broken).
+  if [[ "$REPO_ENV_OVERRIDDEN" != true && "$IN_LINKED_WORKTREE" == true ]]; then
+    warn_worktree_env write
   fi
   if [[ -f "$REPO_ENV" ]] && grep -q '^REPO_REMOTE_INSTANCE_ID=' "$REPO_ENV"; then
     local tmp; tmp="$(mktemp)"

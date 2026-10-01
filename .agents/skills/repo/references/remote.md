@@ -119,6 +119,15 @@ nothing — the instance still carries its `repo-remote=<name>` tag, so the next
 `up` finds it. `REPO_REMOTE_NO_WRITEBACK=1` disables the write-back entirely
 (the id is still logged).
 
+**Linked worktrees warn about an in-tree `.env`.** When the checkout is a
+linked git worktree (`git worktree add`, e.g. `.loom/worktrees/issue-N` —
+`git rev-parse --git-dir` differs from `--git-common-dir`) and
+`REPO_REMOTE_ENV_FILE` is not set, loading a pre-existing `<repo>/.env` or
+writing the instance id back into it prints a loud warning naming the file and
+recommending `REPO_REMOTE_ENV_FILE`. The read/write still happens; the primary
+checkout never warns. When operating by hand from a linked worktree, say the
+same thing to the user rather than silently updating that file.
+
 Variables are namespaced `REPO_REMOTE_*` so they don't collide with the app's
 own vars; the provisioning credentials use their standard cloud names. Either
 file may set any variable — the split below is the recommended home for each,
