@@ -715,6 +715,89 @@ test("a co-named session whose lease expired is not a live collision", () => {
   );
 });
 
+// --- a caller-supplied session id is one logical session (#124) --------
+
+/** Session rows a persona holds, live ones first; `left_ts` included. */
+function sessionRows(persona) {
+  return db
+    .prepare("SELECT session_id, left_ts FROM sessions WHERE persona = ? ORDER BY joined_at ASC")
+    .all(persona);
+}
+
+const PINNED_SESSION = "f1f2f3f4-0124-4124-8124-000000000124";
+
+test("an explicit persona reuses the session id its caller supplied", () => {
+  claude.clear();
+  const first = new Squad(db, "cliguy", { sessionId: PINNED_SESSION });
+  assert.equal(first.sessionId, PINNED_SESSION, "the supplied id names the session from the start");
+  first.touch();
+
+  // Each of these stands for a separate short-lived process (a CLI call, an
+  // inbox-hook peek) of the same logical agent.
+  for (const _ of [1, 2]) new Squad(db, "cliguy", { sessionId: PINNED_SESSION }).touch();
+
+  const rows = sessionRows("cliguy");
+  assert.equal(rows.length, 1, "one logical session is one row, not one row per process");
+  assert.equal(rows[0].session_id, PINNED_SESSION);
+  assert.equal(rows[0].left_ts, null);
+
+  const member = first.members().find((m) => m.persona === "cliguy");
+  assert.equal(member.sessions, 1, "`squad who` reports the one session actually held");
+  assert.equal(member.state, "active");
+});
+
+test("re-entering a supplied session id is not an identity collision with itself", () => {
+  claude.clear();
+  new Squad(db, "cliguy", { sessionId: PINNED_SESSION }).join();
+  const next = new Squad(db, "cliguy", { sessionId: PINNED_SESSION });
+  assert.equal(
+    next.join().identity_collision,
+    undefined,
+    "a prior process of the same logical session is not a live twin",
+  );
+  assert.deepEqual(next.collidingSessions(), []);
+
+  // A genuinely different session under the same name still collides.
+  const twin = new Squad(db, "cliguy", { sessionId: "aaaaaaaa-0124-4124-8124-00000000beef" });
+  assert.deepEqual(twin.join().identity_collision?.session_ids, [PINNED_SESSION]);
+});
+
+test("an explicit persona given no session id still mints one per connection", () => {
+  claude.clear();
+  const first = new Squad(db, "unpinned");
+  const second = new Squad(db, "unpinned");
+  assert.equal(first.sessionId, null, "nothing is seeded before the first operation");
+  first.touch();
+  second.touch();
+  const ids = sessionRows("unpinned").map((r) => r.session_id);
+  assert.equal(ids.length, 2, "without a supplied id, each connection is its own session");
+  assert.notEqual(ids[0], ids[1]);
+  for (const id of ids) assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-/);
+});
+
+test("a supplied session id re-enters its own row after leave instead of piling up", () => {
+  claude.clear();
+  new Squad(db, "cliguy", { sessionId: PINNED_SESSION }).join();
+  const bye = new Squad(db, "cliguy", { sessionId: PINNED_SESSION }).leave();
+  assert.deepEqual(bye.sessions_ended, [PINNED_SESSION], "leave ends the one reused session");
+  assert.equal(sessionRows("cliguy").filter((r) => r.left_ts === null).length, 0);
+
+  new Squad(db, "cliguy", { sessionId: PINNED_SESSION }).touch();
+  const rows = sessionRows("cliguy");
+  assert.equal(rows.length, 1, "re-entry reopens the named row rather than adding another");
+  assert.equal(rows[0].left_ts, null, "…and presence is live again");
+});
+
+test("an automatic identity's resume token is not its presence session id", () => {
+  claude.clear();
+  const token = "bbbbbbbb-0124-4124-8124-000000000001";
+  const auto = new Squad(db, undefined, { model: "opus-5", sessionId: token });
+  assert.equal(auto.identityId, token, "the supplied id stays the resume token");
+  auto.touch();
+  assert.notEqual(auto.sessionId, token, "…and the presence lease keeps its own minted UUID");
+  assert.match(auto.persona, /^opus-5-[0-9a-f]{4}$/);
+});
+
 test("mcp.ts wires the refinement decision and the collision warning into squad_join", () => {
   const mcpSrc = readFileSync(new URL("../src/mcp.ts", import.meta.url), "utf8");
   const join = mcpSrc.slice(mcpSrc.indexOf('"squad_join"'), mcpSrc.indexOf('"squad_send"'));

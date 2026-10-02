@@ -84,3 +84,29 @@ test("a stale peer is visible as stale to a human at the terminal", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("repeated CLI calls sharing SQUAD_SESSION_ID hold one session, not one per process", () => {
+  const dir = freshDir();
+  const env = {
+    SQUAD_DIR: dir,
+    SQUAD_PERSONA: "cliguy",
+    SQUAD_SESSION_ID: "f1f2f3f4-0124-4124-8124-000000000124",
+  };
+  try {
+    // The issue #124 reproduction: three separate processes, same pinned
+    // persona, same logical session id.
+    for (const _ of [1, 2, 3]) {
+      const res = runCli(["read", "-n", "1"], env);
+      assert.equal(res.status, 0, res.stdout + res.stderr);
+    }
+    const who = runCli(["who"], { SQUAD_DIR: dir });
+    assert.match(who.stdout, /^cliguy\tactive\tlast seen [^\n]*$/m);
+    assert.doesNotMatch(who.stdout, /sessions\)/, "no phantom session rows to report");
+
+    // …and the one reused session is what `leave` ends.
+    assert.match(runCli(["leave"], env).stdout, /cliguy left the room/);
+    assert.match(runCli(["who"], { SQUAD_DIR: dir }).stdout, /nobody in the room/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -82,8 +82,11 @@ Names are frozen for the session: runtime model changes do not rename existing
 claims, reviews, or senders. A restarted MCP process gets a new identity unless
 the launcher supplies its previous `SQUAD_SESSION_ID`; with that token it restores
 the reserved name even if metadata (or the `model` argument) changed or the
-presence lease ended. Presence
-leases still use independent per-connection UUIDs. Keep the token in launcher
+presence lease ended. An automatic identity's presence
+lease still uses its own independent per-connection UUID; with an explicit
+`SQUAD_PERSONA`, a supplied `SQUAD_SESSION_ID` *is* the presence session, so every
+short-lived process of that agent (CLI call, hook peek) shares one lease row
+instead of opening another, and re-entering after `squad leave` reopens it. Keep the token in launcher
 state and pass it on resume. Room clear removes identity reservations too; connected agents restore their
 reservation on the next operation (resolving any new collision before sending). Exports
 include them (schema version 3). Rooms need no migration: reservations made under the

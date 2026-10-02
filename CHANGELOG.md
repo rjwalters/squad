@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.1
+
+- An explicit persona now honours the session id its caller supplies (#124).
+  `SQUAD_SESSION_ID` (or the `session_id` a hook receives on stdin) names the
+  presence session, so the many short-lived processes of one pinned agent — CLI
+  calls, `--inbox` hook peeks, `--reentry` wakes — share a single `sessions` row
+  instead of inserting a fresh live row each time. Previously `squad who`
+  over-reported a persona's session count and `squad_join` warned of an
+  `identity_collision` against that persona's own earlier processes, advising a
+  rename away from the pinned name for a twin that did not exist. Re-entering a
+  supplied session id after `squad leave` reopens that row rather than leaving
+  presence dead until the 24h retention sweep. A caller that supplies no session
+  id is unchanged (one minted UUID per connection, never resurrected after
+  `leave`), as is automatic `<label>-<hex>` identity resolution, whose
+  `SQUAD_SESSION_ID` remains a resume token distinct from the presence lease.
+
 ## 0.19.0
 
 - Mid-turn inbox delivery (#118): `./install.sh --inbox` (off by default, same
