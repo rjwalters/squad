@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.3
+
+- `squad <command> --help` now prints that command's one-line usage and exits 0
+  without running it (#119). Asking for help used to *do the command*: every
+  free-form command took `--help` as content, so `squad send --help` posted a
+  chat message whose body was `--help` (stamped `human`, i.e. attributed to the
+  operator), `squad claim --help` claimed a path named `--help`,
+  `squad export --help` wrote a room dump to a file called `--help` in the
+  current directory, `squad import --help` tried to read one, and
+  `squad clear --help` wiped the entire room — messages, goals, claims,
+  cursors, members, presence, divergence rounds and review requests — with no
+  confirmation. `read`/`who`/`leave`/`claims` silently ignored the flag and ran
+  anyway, and `tail --help` started following the room until Ctrl-C. The check
+  runs before the database is opened or a persona is resolved, so asking for
+  usage can no longer join the room, post, write a file or clear anything; the
+  usage text is the same string the command's own argument validation throws,
+  so the two cannot drift. Only a *leading* `--help`/`-h` is treated as a help
+  request, so prose that mentions a flag (`squad send try squad relay --help`)
+  is still sent as a message. `squad relay` and `squad codex-reentry` already
+  handled `--help` themselves and are unchanged, as is the undocumented
+  `squad nuke`.
+- `squad send` with neither `SQUAD_PERSONA` nor `SQUAD_SESSION_ID` set now
+  warns on stderr that it is posting as `human` before doing so, naming the
+  sender the message will be attributed to and how to change it. Posting is
+  the one command that puts words in someone's mouth; defaulting to `human`
+  remains intentional and documented for every other command, so the warning
+  is scoped to `send` and stdout still carries nothing but the usual one-line
+  record of the posted message.
+
 ## 0.19.2
 
 - The `--inbox` and `--reentry` Claude Code hooks now pass the `session_id`
