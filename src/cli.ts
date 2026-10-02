@@ -75,6 +75,54 @@ const CARD_EDIT_USAGE =
   "usage: squad card edit <id> --field value [--field value ...] " +
   `(fields: ${Object.keys(CARD_EDIT_FLAGS).join(", ")})`;
 
+/**
+ * One-line usage for every documented top-level command, keyed by command
+ * name. Two jobs, deliberately shared so they cannot drift apart:
+ *
+ *  1. `squad <cmd> --help` / `squad <cmd> -h` prints the matching line and
+ *     exits 0 *before* the database, the persona, or any side effect is
+ *     touched (#119). Every free-form command used to swallow `--help` as
+ *     content instead -- `squad send --help` posted a chat message whose body
+ *     was "--help" (attributed to `human`), `squad claim --help` claimed a
+ *     path named "--help", `squad export --help` wrote a file called
+ *     "--help", and `squad clear --help` wiped the whole room.
+ *  2. The same string is what the command's own argument validation throws on
+ *     bad input, so the usage a human reads from `--help` is exactly the usage
+ *     they get told off with.
+ *
+ * `relay` and `codex-reentry` are absent on purpose: both parse `--help`
+ * themselves (their own supervisors/parsers own the text). So is the
+ * deliberately undocumented `nuke`.
+ */
+const COMMAND_USAGE: Record<string, string> = {
+  bank: "usage: squad bank <attempt-id> [--build-timeout-ms N]",
+  card: "usage: squad card [create|list|show|transition|evidence|edit] ...",
+  claim: "usage: squad claim <path>",
+  claims: "usage: squad claims (show advisory file claims -- who is working on what)",
+  clear:
+    "usage: squad clear (wipe messages, goals, claims, cursors, members, presence " +
+    "sessions, divergence rounds/submissions, and review requests)",
+  diverge: "usage: squad diverge [open|submit|status|close] ...",
+  doctor: "usage: squad doctor [--room]",
+  export: "usage: squad export <path>",
+  goals: "usage: squad goals [add <text...> | done <id> | reopen <id>]",
+  import: "usage: squad import <path>",
+  integration:
+    "usage: squad integration show|check|set|unset|submit|attempt|attempts (see docs/integration.md)",
+  leave: "usage: squad leave (end this persona's presence lease(s) and announce the departure)",
+  node: "usage: squad node create|list|show|update|submit|claim|review (see squad help)",
+  outline:
+    "usage: squad outline render|status [path]|publish <request-key> [path] [--build-timeout-ms N]",
+  path: "usage: squad path (print the database path)",
+  read: "usage: squad read [-n N] (show the last N messages, default 30; stateless)",
+  release: "usage: squad release <path>",
+  review: "usage: squad review [open|list|show|claim|resolve|cancel] ...",
+  send: "usage: squad send <text...>",
+  steward: "usage: squad steward <status|tick>",
+  tail: "usage: squad tail (follow the room live; Ctrl-C to stop)",
+  who: "usage: squad who (presence state and last-seen times for everyone in the room)",
+};
+
 const HELP = `squad — local cross-agent chat room with shared goals
 
 With no subcommand (and stdin not a TTY) squad runs as a stdio MCP server.
@@ -191,6 +239,8 @@ Human CLI usage:
                                finding cites its evidence, age and a concrete
                                next command; never writes to the room.
   squad help                  Show this help
+  squad <command> --help      One-line usage for that command, printed without
+                               running it (no message sent, nothing cleared)
 
 The room is per-repo: data lives in <repo-root>/.squad/, found by walking up
 from the current directory (falling back to ~/.squad outside any repo). Inside
@@ -452,18 +502,35 @@ export async function runCli(argv: string[]): Promise<void> {
     process.stdout.write(HELP);
     return;
   }
+  // `squad <cmd> --help` is a request for usage, never content or a path, and
+  // it must be answered before openDb()/`new Squad` so that asking cannot
+  // join the room, post, claim, write a file or clear anything (#119).
+  //
+  // Deliberately only the *first* argument, not `rest.includes("--help")`: the
+  // free-form commands take prose ("squad send try squad relay --help"), and a
+  // flag check that scanned the whole tail would swallow that message and
+  // print usage instead of sending it. Trailing arguments are ignored, so
+  // `squad export --help ./room.db` still explains itself instead of writing.
+  if (rest[0] === "--help" || rest[0] === "-h") {
+    const usage = COMMAND_USAGE[cmd];
+    if (usage) {
+      console.log(usage);
+      console.log("(run 'squad help' for the full command reference)");
+      return;
+    }
+  }
   if (cmd === "path") {
     console.log(dbPath());
     return;
   }
   if (cmd === "doctor" && !rest.includes("--room")) {
-    if (rest.length) throw new Error("usage: squad doctor [--room]");
+    if (rest.length) throw new Error(COMMAND_USAGE.doctor);
     await runDoctor();
     return;
   }
   if (cmd === "doctor") {
     if (rest.length !== 1 || rest[0] !== "--room")
-      throw new Error("usage: squad doctor [--room]");
+      throw new Error(COMMAND_USAGE.doctor);
     const db = openDbReadOnly();
     try {
       // This observer does not join or reserve an identity, even when a
@@ -507,7 +574,7 @@ export async function runCli(argv: string[]): Promise<void> {
   switch (cmd) {
     case "steward": {
       if (rest.length !== 1 || !["status", "tick"].includes(rest[0]!))
-        throw new Error("usage: squad steward <status|tick>");
+        throw new Error(COMMAND_USAGE.steward);
       console.log(
         JSON.stringify(
           rest[0] === "status" ? squad.stewardStatus() : squad.stewardTick(),
@@ -560,9 +627,7 @@ export async function runCli(argv: string[]): Promise<void> {
           process.removeListener("SIGTERM", abort);
         }
       } else
-        throw new Error(
-          "usage: squad outline render|status [path]|publish <request-key> [path] [--build-timeout-ms N]",
-        );
+        throw new Error(COMMAND_USAGE.outline);
       break;
     }
     case "node": {
@@ -634,15 +699,13 @@ export async function runCli(argv: string[]): Promise<void> {
           Number(args[3]),
         );
       } else
-        throw new Error(
-          "usage: squad node create|list|show|update|submit|claim|review (see squad help)",
-        );
+        throw new Error(COMMAND_USAGE.node);
       console.log(JSON.stringify(result, null, 2));
       break;
     }
     case "bank": {
       if (!rest[0] || rest[0].startsWith("--") || (rest.length !== 1 && (rest.length !== 3 || rest[1] !== "--build-timeout-ms" || !/^[1-9][0-9]*$/.test(rest[2]!))))
-        throw new Error("usage: squad bank <attempt-id> [--build-timeout-ms N]");
+        throw new Error(COMMAND_USAGE.bank);
       const controller = new AbortController();
       const abort = () => controller.abort();
       process.once("SIGINT", abort); process.once("SIGTERM", abort);
@@ -708,7 +771,19 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     case "send": {
       const body = rest.join(" ").trim();
-      if (!body) throw new Error("usage: squad send <text...>");
+      if (!body) throw new Error(COMMAND_USAGE.send);
+      // Posting is the one command that puts words in somebody's mouth: with
+      // neither SQUAD_PERSONA nor SQUAD_SESSION_ID set, the shared default
+      // above stamps the message `human`, i.e. attributes it to the operator
+      // (#119). Defaulting to `human` is intentional and documented for every
+      // other command, so the warning is scoped to `send` -- but it says so
+      // out loud, on stderr, so the body still pipes cleanly from stdout.
+      if (!process.env.SQUAD_PERSONA && !process.env.SQUAD_SESSION_ID) {
+        process.stderr.write(
+          "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
+            "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
+        );
+      }
       const m = squad.send(body);
       console.log(fmt(m));
       break;
@@ -762,7 +837,7 @@ export async function runCli(argv: string[]): Promise<void> {
           console.log(`[${mark}] #${g.id} ${g.body} (${g.created_by})`);
         }
       } else {
-        throw new Error("usage: squad goals [add <text...> | done <id> | reopen <id>]");
+        throw new Error(COMMAND_USAGE.goals);
       }
       break;
     }
@@ -777,14 +852,14 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     case "claim": {
       const path = rest.join(" ").trim();
-      if (!path) throw new Error("usage: squad claim <path>");
+      if (!path) throw new Error(COMMAND_USAGE.claim);
       const c = squad.claim(path);
       console.log(`claimed ${c.path} (${c.persona})`);
       break;
     }
     case "release": {
       const path = rest.join(" ").trim();
-      if (!path) throw new Error("usage: squad release <path>");
+      if (!path) throw new Error(COMMAND_USAGE.release);
       const released = squad.release(path);
       if (released.length === 0) console.log(`no claim on ${path}`);
       else console.log(`released ${path} (was ${released.map((c) => c.persona).join(", ")})`);
@@ -842,7 +917,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const round = squad.divergeClose(id);
         console.log(`round #${round.id} closed`);
       } else {
-        throw new Error("usage: squad diverge [open|submit|status|close] ...");
+        throw new Error(COMMAND_USAGE.diverge);
       }
       break;
     }
@@ -976,7 +1051,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const r = squad.reviewCancel(id, reason);
         console.log(`cancelled review #${r.id}${r.cancel_reason ? `: ${r.cancel_reason}` : ""}`);
       } else {
-        throw new Error("usage: squad review [open|list|show|claim|resolve|cancel] ...");
+        throw new Error(COMMAND_USAGE.review);
       }
       break;
     }
@@ -1100,7 +1175,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const card = squad.cardUpdate(id, fields as CardUpdateFields);
         console.log(`card #${card.id} updated [${card.phase}]: ${card.title}`);
       } else {
-        throw new Error("usage: squad card [create|list|show|transition|evidence|edit] ...");
+        throw new Error(COMMAND_USAGE.card);
       }
       break;
     }
@@ -1129,7 +1204,7 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     case "export": {
       const destPath = rest[0];
-      if (!destPath) throw new Error("usage: squad export <path>");
+      if (!destPath) throw new Error(COMMAND_USAGE.export);
       const counts = await squad.exportRoom(destPath);
       const total = Object.values(counts).reduce((a, b) => a + b, 0);
       console.log(`exported ${total} row(s) across ${Object.keys(counts).length} tables to ${destPath}`);
@@ -1137,7 +1212,7 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     case "import": {
       const srcPath = rest[0];
-      if (!srcPath) throw new Error("usage: squad import <path>");
+      if (!srcPath) throw new Error(COMMAND_USAGE.import);
       const counts = squad.importRoom(srcPath);
       const total = Object.values(counts).reduce((a, b) => a + b, 0);
       console.log(`imported ${total} row(s) across ${Object.keys(counts).length} tables from ${srcPath} into ${dbPath()}`);
@@ -1191,4 +1266,4 @@ export function knownCommand(cmd: string | undefined): boolean {
   );
 }
 
-export { HELP };
+export { HELP, COMMAND_USAGE };
