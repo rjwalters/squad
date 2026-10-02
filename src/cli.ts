@@ -94,6 +94,21 @@ const CARD_EDIT_USAGE =
  * themselves (their own supervisors/parsers own the text). So is the
  * deliberately undocumented `nuke`.
  */
+const SUB_USAGE: Record<string, string> = {
+  "goals add": "usage: squad goals add <text...>",
+  "card create":
+    "usage: squad card create [--title <text>] [--claim-kind empirical|formal] <question...>",
+  "card evidence": "usage: squad card evidence <id> <type> <provenance> [body...]",
+  "card transition": "usage: squad card transition <id> <phase> [note...]",
+  "diverge open":
+    "usage: squad diverge open [--card <id>] [--expect <p1,p2,...>] <topic...>",
+  "diverge submit": "usage: squad diverge submit <round_id> <text...>",
+  "review open": REVIEW_OPEN_USAGE,
+  "review resolve": "usage: squad review resolve <id> [note...]",
+  "review cancel": "usage: squad review cancel <id> [reason...]",
+  "node create": "usage: squad node create --json '<fields>'",
+};
+
 const COMMAND_USAGE: Record<string, string> = {
   bank: "usage: squad bank <attempt-id> [--build-timeout-ms N]",
   card: "usage: squad card [create|list|show|transition|evidence|edit] ...",
@@ -511,6 +526,16 @@ export async function runCli(argv: string[]): Promise<void> {
   // flag check that scanned the whole tail would swallow that message and
   // print usage instead of sending it. Trailing arguments are ignored, so
   // `squad export --help ./room.db` still explains itself instead of writing.
+  // Same leading-token rule one level down for the free-text sub-actions
+  // (`squad goals add --help` must not add a goal named "--help"; #130).
+  if (rest[1] === "--help" || rest[1] === "-h") {
+    const subUsage = SUB_USAGE[`${cmd} ${rest[0]}`];
+    if (subUsage) {
+      console.log(subUsage);
+      console.log("(run 'squad help' for the full command reference)");
+      return;
+    }
+  }
   if (rest[0] === "--help" || rest[0] === "-h") {
     const usage = COMMAND_USAGE[cmd];
     if (usage) {
@@ -648,7 +673,7 @@ export async function runCli(argv: string[]): Promise<void> {
       else if (action === "create" && args.length) {
         if (args[0] === "--json") {
           if (args.length !== 2)
-            throw new Error("usage: squad node create --json '<fields>'");
+            throw new Error(SUB_USAGE["node create"]);
           result = squad.nodeCreate(JSON.parse(args[1]!));
         } else {
           if (args.some((arg) => arg.startsWith("--")))
@@ -814,7 +839,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const [sub, ...args] = rest;
       if (sub === "add") {
         const body = args.join(" ").trim();
-        if (!body) throw new Error("usage: squad goals add <text...>");
+        if (!body) throw new Error(SUB_USAGE["goals add"]);
         const g = squad.goalAdd(body);
         console.log(`added goal #${g.id}: ${g.body}`);
       } else if (sub === "done") {
@@ -886,9 +911,7 @@ export async function runCli(argv: string[]): Promise<void> {
         }
         const topic = tokens.join(" ").trim();
         if (!topic) {
-          throw new Error(
-            "usage: squad diverge open [--card <id>] [--expect <p1,p2,...>] <topic...>",
-          );
+          throw new Error(SUB_USAGE["diverge open"]);
         }
         const round = squad.divergeOpen(topic, { cardId, expectedParticipants });
         console.log(`opened divergence round #${round.id}: ${round.topic}`);
@@ -896,7 +919,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const id = parseInt(args[0] ?? "", 10);
         const body = args.slice(1).join(" ").trim();
         if (Number.isNaN(id) || !body) {
-          throw new Error("usage: squad diverge submit <round_id> <text...>");
+          throw new Error(SUB_USAGE["diverge submit"]);
         }
         const s = squad.divergeSubmit(id, body);
         console.log(`submitted to round #${id} (${s.persona})`);
@@ -957,7 +980,7 @@ export async function runCli(argv: string[]): Promise<void> {
           }
         }
         const body = tokens.join(" ").trim();
-        if (!target || !body) throw new Error(REVIEW_OPEN_USAGE);
+        if (!target || !body) throw new Error(SUB_USAGE["review open"]);
         const req = squad.reviewOpen(target, body, { refs, priority, expiresInMinutes });
         console.log(`opened review #${req.id} for ${req.target} [${req.priority}]: ${req.body}`);
       } else if (sub === "list" || sub === undefined) {
@@ -1040,13 +1063,13 @@ export async function runCli(argv: string[]): Promise<void> {
         console.log(`claimed review #${r.id} (${r.claimed_by})`);
       } else if (sub === "resolve") {
         const id = parseInt(args[0] ?? "", 10);
-        if (Number.isNaN(id)) throw new Error("usage: squad review resolve <id> [note...]");
+        if (Number.isNaN(id)) throw new Error(SUB_USAGE["review resolve"]);
         const resolution = args.slice(1).join(" ").trim() || undefined;
         const r = squad.reviewResolve(id, resolution);
         console.log(`resolved review #${r.id}${r.resolution ? `: ${r.resolution}` : ""}`);
       } else if (sub === "cancel") {
         const id = parseInt(args[0] ?? "", 10);
-        if (Number.isNaN(id)) throw new Error("usage: squad review cancel <id> [reason...]");
+        if (Number.isNaN(id)) throw new Error(SUB_USAGE["review cancel"]);
         const reason = args.slice(1).join(" ").trim() || undefined;
         const r = squad.reviewCancel(id, reason);
         console.log(`cancelled review #${r.id}${r.cancel_reason ? `: ${r.cancel_reason}` : ""}`);
@@ -1075,9 +1098,7 @@ export async function runCli(argv: string[]): Promise<void> {
         }
         const question = tokens.join(" ").trim();
         if (!question) {
-          throw new Error(
-            "usage: squad card create [--title <text>] [--claim-kind empirical|formal] <question...>",
-          );
+          throw new Error(SUB_USAGE["card create"]);
         }
         const card = squad.cardCreate({
           title: title || question,
@@ -1129,7 +1150,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const toPhase = args[1] as CardPhase | undefined;
         const note = args.slice(2).join(" ").trim() || undefined;
         if (Number.isNaN(id) || !toPhase) {
-          throw new Error("usage: squad card transition <id> <phase> [note...]");
+          throw new Error(SUB_USAGE["card transition"]);
         }
         const card = squad.cardTransition(id, toPhase, note);
         console.log(`card #${card.id} -> ${card.phase}`);
@@ -1139,7 +1160,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const provenance = args[2];
         const body = args.slice(3).join(" ").trim() || undefined;
         if (Number.isNaN(id) || !type || !provenance) {
-          throw new Error("usage: squad card evidence <id> <type> <provenance> [body...]");
+          throw new Error(SUB_USAGE["card evidence"]);
         }
         const ev = squad.cardEvidenceAdd(id, type, provenance, body);
         console.log(`added ${ev.type} evidence #${ev.id} to card #${id}: ${ev.provenance}`);
@@ -1266,4 +1287,4 @@ export function knownCommand(cmd: string | undefined): boolean {
   );
 }
 
-export { HELP, COMMAND_USAGE };
+export { HELP, COMMAND_USAGE, SUB_USAGE };

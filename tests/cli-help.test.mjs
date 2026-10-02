@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { COMMAND_USAGE, HELP, knownCommand } from "../dist/cli.js";
+import { COMMAND_USAGE, SUB_USAGE, HELP, knownCommand } from "../dist/cli.js";
 
 // Drives the CLI as a subprocess against dist/index.js (same harness pattern
 // as tests/cli-presence.test.mjs) to cover issue #119: `squad <cmd> --help`
@@ -259,4 +259,47 @@ test("COMMAND_USAGE covers every documented command exactly once", () => {
     assert.ok(COMMAND_USAGE[cmd], `'squad ${cmd}' is in squad help but has no usage line`);
   }
   assert.ok(documentedInHelp.size > 10, "HELP was parsed for command names");
+});
+
+const SUB_ACTIONS = [
+  ["goals", "add"],
+  ["card", "create"],
+  ["card", "evidence"],
+  ["card", "transition"],
+  ["diverge", "open"],
+  ["diverge", "submit"],
+  ["review", "open"],
+  ["review", "resolve"],
+  ["review", "cancel"],
+  ["node", "create"],
+];
+
+for (const [cmd, sub] of SUB_ACTIONS) {
+  test(`squad ${cmd} ${sub} --help/-h prints usage and has no side effect (#130)`, () => {
+    const dir = freshDir();
+    try {
+      for (const flag of ["--help", "-h"]) {
+        const res = runCli([cmd, sub, flag], { cwd: dir, env: { SQUAD_DIR: dir } });
+        assert.equal(res.status, 0, res.stdout + res.stderr);
+        assert.ok(res.stdout.startsWith(`usage: squad ${cmd} ${sub}`), res.stdout);
+        assert.ok(res.stdout.startsWith(SUB_USAGE[`${cmd} ${sub}`]));
+        assert.equal(diagnostics(res.stderr), "");
+        assert.deepEqual(readdirSync(dir), [], "touched the data dir / cwd");
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("a non-leading --help in goals add text is still content (#130)", () => {
+  const dir = freshDir();
+  const env = { SQUAD_DIR: dir, SQUAD_PERSONA: "codex" };
+  try {
+    const res = runCli(["goals", "add", "remember", "to", "try", "squad", "relay", "--help"], { env });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /added goal #1: remember to try squad relay --help/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
