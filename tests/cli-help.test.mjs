@@ -70,6 +70,30 @@ function freshDir() {
   return mkdtempSync(join(tmpdir(), "squad-cli-help-"));
 }
 
+/**
+ * squad's own diagnostics on stderr, with the runtime's removed. Node 22
+ * prints `ExperimentalWarning: SQLite is an experimental feature ...` on every
+ * invocation (db.ts imports node:sqlite at module load, so even a command that
+ * never opens the database pays it); Node 24 does not. Both are supported in
+ * CI, so "squad said nothing on stderr" has to mean squad, not the runtime.
+ */
+function diagnostics(stderr) {
+  return stderr
+    .split("\n")
+    .filter((line) => line.trim() !== "" && !/ExperimentalWarning|trace-warnings/.test(line))
+    .join("\n");
+}
+
+test("the stderr filter strips the runtime's own warnings and nothing else", () => {
+  // Verbatim from the Node 22 CI run, which is not reproducible on Node 24.
+  const node22 =
+    "(node:6819) ExperimentalWarning: SQLite is an experimental feature and might change at any time\n" +
+    "(Use `node --trace-warnings ...` to show where the warning was created)\n";
+  assert.equal(diagnostics(node22), "");
+  assert.equal(diagnostics(""), "");
+  assert.equal(diagnostics(`${node22}squad: something squad said\n`), "squad: something squad said");
+});
+
 test("every documented command answers --help/-h with usage and no side effect", () => {
   for (const cmd of DOCUMENTED) {
     const dir = freshDir();
@@ -83,7 +107,11 @@ test("every documented command answers --help/-h with usage and no side effect",
           new RegExp(`^usage: squad ${cmd}\\b`),
           `squad ${cmd} ${flag} must print its usage line`,
         );
-        assert.equal(res.stderr, "", `squad ${cmd} ${flag} must not report an error`);
+        assert.equal(
+          diagnostics(res.stderr),
+          "",
+          `squad ${cmd} ${flag} must not report an error`,
+        );
         // Asking for help is answered before the database is opened, the
         // persona is resolved, or any path is written: a room that never
         // existed must still not exist, and no file named after the flag may
@@ -192,7 +220,7 @@ test("squad send names the sender when the persona implicitly defaults to human"
     // Scoped to the implicit default: a pinned persona warns about nothing.
     const pinned = runCli(["send", "pinned"], { env: { SQUAD_DIR: dir, SQUAD_PERSONA: "codex" } });
     assert.equal(pinned.status, 0, pinned.stdout + pinned.stderr);
-    assert.equal(pinned.stderr, "", "a pinned persona needs no warning");
+    assert.equal(diagnostics(pinned.stderr), "", "a pinned persona needs no warning");
 
     // A session token resolves an identity of its own, so it is not implicit
     // either — the warning is about nobody having said who is speaking.
@@ -200,7 +228,7 @@ test("squad send names the sender when the persona implicitly defaults to human"
       env: { SQUAD_DIR: dir, SQUAD_SESSION_ID: "bbbbbbbb-2222-4222-8222-222222222222" },
     });
     assert.equal(session.status, 0, session.stdout + session.stderr);
-    assert.equal(session.stderr, "", "a session identity needs no warning");
+    assert.equal(diagnostics(session.stderr), "", "a session identity needs no warning");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
