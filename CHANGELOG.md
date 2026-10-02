@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.4
+
+- Sub-action `--help`/`-h` now prints usage instead of being taken as content
+  (#130): `squad goals add`, `card create|evidence|transition`,
+  `diverge open|submit`, `review open|resolve|cancel` and `node create` answer
+  `--help`/`-h` in the leading position with their one-line usage and exit 0
+  rather than running the sub-action.
+
 ## 0.19.3
 
 - `squad <command> --help` now prints that command's one-line usage and exits 0
