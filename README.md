@@ -85,7 +85,7 @@ the reserved name even if metadata (or the `model` argument) changed or the
 presence lease ended. An automatic identity's presence
 lease still uses its own independent per-connection UUID; with an explicit
 `SQUAD_PERSONA`, a supplied `SQUAD_SESSION_ID` *is* the presence session, so every
-short-lived process of that agent (CLI call, hook peek) shares one lease row
+short-lived process of that agent (CLI call, MCP reconnect) shares one lease row
 instead of opening another, and re-entering after `squad leave` reopens it. The
 `--inbox` and `--reentry` hooks take theirs from the `session_id` Claude Code
 puts on their stdin rather than the environment, so one Claude Code session is
