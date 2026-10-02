@@ -721,6 +721,19 @@ export class Squad {
   /** This connection's session, created lazily on first touch. */
   private _sessionId: string | null = null;
 
+  /**
+   * The session id the caller supplied (`SQUAD_SESSION_ID`, or the `session_id`
+   * a hook receives on stdin) — the stable name of one *logical* session across
+   * the many short-lived processes an agent runs (#124). Null when the caller
+   * gave nothing, in which case every connection mints its own on first touch,
+   * exactly as before.
+   *
+   * Only meaningful for an explicit persona: an automatic identity's
+   * `sessionId` is its *resume token* (it keys `agent_identities`, see
+   * `identityId`), a different thing from a presence session row.
+   */
+  private readonly pinnedSessionId: string | null;
+
   constructor(
     private db: DatabaseSync,
     persona?: string,
@@ -729,6 +742,13 @@ export class Squad {
     this.automaticIdentity = persona === undefined
       ? { ...identity, sessionId: identity.sessionId ?? randomUUID() }
       : null;
+    const supplied = identity.sessionId?.trim();
+    this.pinnedSessionId = persona !== undefined && supplied ? supplied : null;
+    // Seed the session *before* the first touch(), so a pinned caller reuses
+    // its one row instead of inserting a phantom live row per process — which
+    // over-reported `squad who` session counts and made join() warn a pinned
+    // persona about an `identity_collision` with its own earlier CLI calls.
+    this._sessionId = this.pinnedSessionId;
     if (persona !== undefined) {
       // An explicit identity (a `SQUAD_PERSONA` pin, a CLI default, an
       // already-resolved rename) must not be a reserved room-wide target.
@@ -1700,7 +1720,9 @@ export class Squad {
    * Update presence and renew this connection's lease. Called by every
    * operation, so "the lease renews on any tool call" needs no separate
    * heartbeat. Creates the session on first call; a session ended by leave()
-   * is never resurrected — the next operation opens a fresh one.
+   * is never resurrected — the next operation opens a fresh one, unless the
+   * caller named the session itself (see `pinnedSessionId`), in which case the
+   * name *is* the session and re-entering under it reopens that one row.
    */
   touch(): void {
     // A room clear removes reservations. Restore this still-connected agent
@@ -1718,7 +1740,7 @@ export class Squad {
          ON CONFLICT(persona) DO UPDATE SET last_seen = excluded.last_seen`,
       )
       .run(this.persona, ts, ts);
-    if (!this._sessionId) this._sessionId = randomUUID();
+    if (!this._sessionId) this._sessionId = this.pinnedSessionId ?? randomUUID();
     const expires = new Date(Date.parse(ts) + staleMinutes() * 60_000).toISOString();
     this.db
       .prepare(
@@ -1730,6 +1752,16 @@ export class Squad {
            lease_expires_at = excluded.lease_expires_at`,
       )
       .run(this._sessionId, this.persona, ts, ts, expires);
+    // A caller-supplied session id outlives the process that first used it, so
+    // a later operation under that id is the same logical session re-entering
+    // after a `leave()` — reopen its row rather than leaving presence dead
+    // until the retention sweep. The upsert above deliberately leaves `left_ts`
+    // alone, so a *minted* id is still never resurrected: leave() nulls
+    // `_sessionId` and the next touch() draws a new one.
+    if (this.pinnedSessionId && this._sessionId === this.pinnedSessionId)
+      this.db
+        .prepare("UPDATE sessions SET left_ts = NULL WHERE session_id = ? AND left_ts IS NOT NULL")
+        .run(this._sessionId);
   }
 
   /** This connection's session row, or null before its first operation. */
