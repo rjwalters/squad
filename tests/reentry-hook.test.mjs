@@ -1,10 +1,91 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
+import { fileURLToPath } from "node:url";
 
-// Pure-function tests only — the actual Claude Code Stop hook invocation
-// protocol (stdin/stdout, `stop_hook_active` loop-guard semantics, the
-// filesystem/db side effects in reentry-hook.ts) is not exercised here; see
-// its module doc for the manual verification steps that cover that part.
+// Two harnesses, mirroring tests/inbox-hook.test.mjs: the pure decision logic
+// from dist/reentry.js, plus the real hook process (dist/reentry-hook.js)
+// driven over its actual stdin/stdout protocol against a real room, which is
+// where the presence-identity guarantees actually have to hold. The
+// `stop_hook_active` loop-guard semantics and the backoff-sleep timing are
+// still covered by the pure tests and by the manual verification steps in
+// reentry-hook.ts's module doc rather than here.
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
+const cli = join(repoRoot, "dist", "index.js");
+const hook = join(repoRoot, "dist", "reentry-hook.js");
+
+/**
+ * The `session_id` Claude Code puts on stdin for every Stop firing of one
+ * logical session — what the hook pins its presence row to.
+ */
+const HOOK_SESSION_ID = "11111111-2222-3333-4444-555555555555";
+/** A second Claude Code session in the same room — a genuinely different id. */
+const OTHER_SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+function freshDir() {
+  return mkdtempSync(join(tmpdir(), "squad-reentry-"));
+}
+
+function runCli(args, env = {}) {
+  const result = spawnSync(process.execPath, [cli, ...args], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    env: { ...process.env, ...env },
+  });
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  return result;
+}
+
+/** Invoke the Stop hook with an arbitrary stdin payload; returns trimmed stdout. */
+function callHook(dir, persona, payload, env = {}) {
+  const result = spawnSync(process.execPath, [hook], {
+    cwd: repoRoot,
+    encoding: "utf8",
+    input: JSON.stringify(payload),
+    env: { ...process.env, SQUAD_DIR: dir, SQUAD_PERSONA: persona, ...env },
+  });
+  // Fail-open invariant: the hook never exits non-zero, which Claude Code
+  // would read as a hook failure rather than "allow the stop".
+  assert.equal(result.status, 0, result.stderr);
+  return result.stdout.trim();
+}
+
+/**
+ * Invoke the hook exactly as Claude Code does. Every test that uses this
+ * keeps directed work pending in the room, so `decide()` blocks immediately
+ * with no backoff sleep and the hook returns promptly.
+ */
+function runHook(dir, persona, sessionId = HOOK_SESSION_ID, env = {}) {
+  return callHook(
+    dir,
+    persona,
+    {
+      session_id: sessionId,
+      transcript_path: join(dir, "transcript.jsonl"),
+      stop_hook_active: false,
+      cwd: repoRoot,
+    },
+    env,
+  );
+}
+
+/** The presence rows a persona holds in the room, oldest first. */
+function sessionIds(dir, persona) {
+  const db = new DatabaseSync(join(dir, "squad.db"));
+  try {
+    return db
+      .prepare("SELECT session_id FROM sessions WHERE persona = ? ORDER BY joined_at ASC")
+      .all(persona)
+      .map((row) => row.session_id);
+  } finally {
+    db.close();
+  }
+}
+
 const {
   DEFAULT_BACKOFF,
   DEFAULT_SLEEP_CAP_MS,
@@ -201,6 +282,85 @@ test("decide: quiet with an elapsed window fires — lifetime count increments, 
   assert.equal(result.nextState.attempt, 0);
   assert.equal(result.nextState.totalFired, 3);
   assert.equal(result.nextState.nextFireAt, null);
+});
+
+// --- the real hook process: one Claude session is one presence row (#126) ---
+
+test("every wake of one Claude session shares that session's single presence row", () => {
+  const dir = freshDir();
+  try {
+    runCli(["send", "@claude-worker please pick this up"], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "codex",
+    });
+    // Three stop events of ONE Claude Code session: three separate OS
+    // processes, all carrying the same stdin `session_id`. Before #126 each
+    // minted its own live `sessions` row.
+    for (const _ of [1, 2, 3])
+      assert.match(runHook(dir, "claude-worker"), /"decision":"block"/);
+    assert.deepEqual(
+      sessionIds(dir, "claude-worker"),
+      [HOOK_SESSION_ID],
+      "one logical Claude session is one presence row, not one per wake",
+    );
+
+    // A genuinely different Claude session is still its own presence row.
+    runHook(dir, "claude-worker", OTHER_SESSION_ID);
+    assert.deepEqual(sessionIds(dir, "claude-worker"), [HOOK_SESSION_ID, OTHER_SESSION_ID]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the permanent-stop announcement posts from the same session row", () => {
+  const dir = freshDir();
+  try {
+    runCli(["send", "@claude-worker please pick this up"], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "codex",
+    });
+    assert.match(runHook(dir, "claude-worker"), /"decision":"block"/);
+
+    // Operator stop: the hook allows the stop and announces it into the room
+    // through a second `Squad` (the `announceStopOnce` callback), which must
+    // post as the same logical session rather than opening another row.
+    assert.equal(runHook(dir, "claude-worker", HOOK_SESSION_ID, { SQUAD_REENTRY_STOP: "1" }), "");
+    const posted = runCli(["read"], { SQUAD_DIR: dir, SQUAD_PERSONA: "codex" }).stdout;
+    assert.match(posted, /stopping permanently/);
+    assert.deepEqual(sessionIds(dir, "claude-worker"), [HOOK_SESSION_ID]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a missing or non-string session_id still fails open, minting its own row", () => {
+  const dir = freshDir();
+  try {
+    runCli(["send", "@claude-worker please pick this up"], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "codex",
+    });
+    const base = {
+      transcript_path: join(dir, "transcript.jsonl"),
+      stop_hook_active: false,
+      cwd: repoRoot,
+    };
+    // No `session_id` key at all, then a non-string one, then blank: each
+    // must still decide normally (exit 0 asserted inside callHook) and fall
+    // back to today's behavior — a freshly minted session per process.
+    assert.match(callHook(dir, "claude-worker", base), /"decision":"block"/);
+    assert.match(callHook(dir, "claude-worker", { ...base, session_id: 42 }), /"decision":"block"/);
+    assert.match(
+      callHook(dir, "claude-worker", { ...base, session_id: "   " }),
+      /"decision":"block"/,
+    );
+
+    const ids = sessionIds(dir, "claude-worker");
+    assert.equal(ids.length, 3, "nothing to pin to — each process keeps its own row");
+    for (const id of ids) assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("DEFAULT_BACKOFF and DEFAULT_SLEEP_CAP_MS are sane (documented in README)", () => {

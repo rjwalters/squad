@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.2
+
+- The `--inbox` and `--reentry` Claude Code hooks now pass the `session_id`
+  they already receive on stdin to `Squad` (#126), so the fix in 0.19.1 finally
+  reaches the two high-cadence hook processes. Each tool call (`--inbox`) and
+  each stop event (`--reentry`) runs in its own short-lived OS process; because
+  they constructed `Squad` with no identity at all, every firing minted its own
+  live `sessions` row, which is exactly the phantom-row behaviour #124 fixed
+  for CLI calls. One Claude Code session is now one presence row no matter how
+  often its hooks fire, including the `--reentry` hook's permanent-stop
+  announcement. A payload with a missing, blank, or non-string `session_id`
+  degrades to the previous behaviour (one minted row per process) rather than
+  failing the tool call or the stop, preserving both hooks' fail-open contract.
+  The long-lived Codex re-entry supervisor and the MCP startup-failure
+  breadcrumb are deliberately unchanged: neither is a per-event process and
+  neither has a session id to thread.
+
 ## 0.19.1
 
 - An explicit persona now honours the session id its caller supplies (#124).

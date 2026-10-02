@@ -37,6 +37,13 @@
  * separate hook process cannot discover an automatically generated
  * `<label>-<hex>` session identity, so without a pin there is nothing to match
  * `@mentions` against and the hook stays silent.
+ *
+ * The *session* half of that identity comes from stdin: `session_id` names the
+ * one logical Claude Code session all these short-lived hook processes belong
+ * to, so passing it to `Squad` keeps them on one `sessions` row instead of
+ * minting a live row per tool call (#126, completing #124 for the hooks). A
+ * missing or non-string `session_id` simply falls back to the old behavior —
+ * a row per process — rather than failing the tool call (invariant 1).
  */
 import { join } from "node:path";
 import { existsSync } from "node:fs";
@@ -78,6 +85,10 @@ async function main(): Promise<void> {
   const persona = (process.env.SQUAD_PERSONA ?? "").trim();
   if (!persona) return; // no pinned identity — see module doc
 
+  // Narrowed, never coerced: a payload without a usable `session_id` leaves
+  // this undefined, which `Squad` treats as "mint your own" (see module doc).
+  const sessionId = typeof input.session_id === "string" ? input.session_id : undefined;
+
   let dir: string;
   try {
     const { squadDir } = await import("./db.js");
@@ -113,7 +124,7 @@ async function main(): Promise<void> {
     const { Squad } = await import("./core.js");
     const db = openDb();
     try {
-      const room = new Squad(db, persona);
+      const room = new Squad(db, persona, { sessionId });
       const decision = decideInbox(
         observeDirectedItems(room, persona, [REPO_BROADCAST]),
         state,

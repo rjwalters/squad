@@ -21,6 +21,13 @@
  * JSON, an unreadable database, a corrupt state file) fails OPEN (allows the
  * stop) rather than wedging the session. That is the same fail-open
  * philosophy `guard-background-subagents.sh` documents for the same reason.
+ *
+ * `session_id` from that stdin payload names the one logical Claude Code
+ * session all these short-lived hook processes belong to, so it is passed to
+ * every `Squad` opened below — keeping them on one `sessions` row instead of
+ * minting a live row per wake (#126, completing #124 for the hooks). A
+ * missing or non-string `session_id` falls back to the old behavior (a row
+ * per process) rather than failing the stop, same fail-open rule as above.
  */
 import { envMinutes } from "./db.js";
 import { DEFAULT_REENTRY_TTL_MINUTES, DEFAULT_REENTRY_MAX_ATTEMPTS, ttlExceeded, decide } from "./reentry.js";
@@ -46,6 +53,18 @@ function sameSequenceReblock(input: unknown): boolean {
   );
 }
 
+/**
+ * Narrow a string field out of the stdin payload — `undefined` when the
+ * payload is not an object, the key is absent, or the value is not a string.
+ * Never coerces: a non-string `session_id` must degrade to "no id supplied",
+ * not reach `Squad` as something that is not one.
+ */
+function stringField(input: unknown, name: string): string | undefined {
+  if (typeof input !== "object" || input === null) return undefined;
+  const value = (input as Record<string, unknown>)[name];
+  return typeof value === "string" ? value : undefined;
+}
+
 async function readStdin(): Promise<string> {
   const chunks: Buffer[] = [];
   for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
@@ -63,11 +82,8 @@ async function main(): Promise<void> {
 
   if (sameSequenceReblock(input)) return; // loop guard — see sameSequenceReblock doc
 
-  const cwd =
-    typeof input === "object" && input !== null
-      ? (input as Record<string, unknown>).cwd
-      : undefined;
-  if (typeof cwd === "string") {
+  const cwd = stringField(input, "cwd");
+  if (cwd !== undefined) {
     try {
       process.chdir(cwd);
     } catch {
@@ -76,6 +92,8 @@ async function main(): Promise<void> {
   }
 
   const persona = process.env.SQUAD_PERSONA || "claude";
+  // The logical session every Squad below belongs to — see module doc.
+  const sessionId = stringField(input, "session_id");
 
   let dir: string;
   try {
@@ -96,7 +114,7 @@ async function main(): Promise<void> {
     const { Squad } = await import("./core.js");
     const db = openDb();
     try {
-      const work = observeWakeWork(new Squad(db, persona), persona);
+      const work = observeWakeWork(new Squad(db, persona, { sessionId }), persona);
       directed = work.directed;
       held = work.held;
     } finally { db.close(); }
@@ -144,7 +162,7 @@ async function main(): Promise<void> {
         (message) => {
           // The permanent-stop latch must survive even when opening the room fails.
           const db = openDb();
-          try { new Squad(db, persona).send(message, "system"); }
+          try { new Squad(db, persona, { sessionId }).send(message, "system"); }
           finally { db.close(); }
         }, body, result.reason);
     } catch { /* terminal stop reason above remains available */ }

@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 
 // Two harnesses, mirroring tests/reentry-hook.test.mjs plus what that suite
@@ -47,17 +48,21 @@ function runCli(args, env = {}) {
   return result;
 }
 
-/** Invoke the hook exactly as Claude Code does, and parse what it emitted. */
-function runHook(dir, persona, env = {}, event = "PostToolUse") {
+/**
+ * The `session_id` Claude Code puts on stdin for every hook firing of one
+ * logical session. Every `runHook()` below sends this same id, exactly as
+ * Claude Code does, because that is what the hook pins its presence row to.
+ */
+const HOOK_SESSION_ID = "11111111-2222-3333-4444-555555555555";
+/** A second Claude Code session in the same room — a genuinely different id. */
+const OTHER_SESSION_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+/** Invoke the hook with an arbitrary stdin payload; returns its trimmed stdout. */
+function callHook(dir, persona, payload, env = {}) {
   const result = spawnSync(process.execPath, [hook], {
     cwd: repoRoot,
     encoding: "utf8",
-    input: JSON.stringify({
-      session_id: "11111111-2222-3333-4444-555555555555",
-      hook_event_name: event,
-      cwd: repoRoot,
-      tool_name: "Bash",
-    }),
+    input: JSON.stringify(payload),
     env: {
       ...process.env,
       SQUAD_DIR: dir,
@@ -68,12 +73,35 @@ function runHook(dir, persona, env = {}, event = "PostToolUse") {
   });
   // Invariant 1: the hook must never fail the tool call it rides on.
   assert.equal(result.status, 0, result.stderr);
-  const text = result.stdout.trim();
+  return result.stdout.trim();
+}
+
+/** Invoke the hook exactly as Claude Code does, and parse what it emitted. */
+function runHook(dir, persona, env = {}, event = "PostToolUse", sessionId = HOOK_SESSION_ID) {
+  const text = callHook(
+    dir,
+    persona,
+    { session_id: sessionId, hook_event_name: event, cwd: repoRoot, tool_name: "Bash" },
+    env,
+  );
   return {
     raw: text,
     context: text ? JSON.parse(text).hookSpecificOutput.additionalContext : null,
     event: text ? JSON.parse(text).hookSpecificOutput.hookEventName : null,
   };
+}
+
+/** The presence rows a persona holds in the room, oldest first. */
+function sessionIds(dir, persona) {
+  const db = new DatabaseSync(join(dir, "squad.db"));
+  try {
+    return db
+      .prepare("SELECT session_id FROM sessions WHERE persona = ? ORDER BY joined_at ASC")
+      .all(persona)
+      .map((row) => row.session_id);
+  } finally {
+    db.close();
+  }
 }
 
 test("peekDue enforces the rate limit, and fails toward peeking", () => {
@@ -206,6 +234,57 @@ test("a directed message reaches a busy session's next tool call exactly once", 
     const prompt = runHook(dir, "claude-worker", {}, "UserPromptSubmit");
     assert.equal(prompt.event, "UserPromptSubmit");
     assert.match(prompt.context, /second ask/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("every peek of one Claude session shares that session's single presence row", () => {
+  const dir = freshDir();
+  try {
+    runCli(["send", "@claude-worker disk triage"], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "opus-5-3f2a",
+    });
+    // Three tool calls of ONE Claude Code session: three separate OS
+    // processes, all carrying the same stdin `session_id`. Before #126 each
+    // minted its own live `sessions` row, so `squad who` over-reported the
+    // persona's session count once per tool call (the phantom rows #124/#125
+    // fixed for CLI calls but not for the hooks).
+    assert.match(runHook(dir, "claude-worker").context, /disk triage/);
+    runHook(dir, "claude-worker");
+    runHook(dir, "claude-worker", {}, "UserPromptSubmit");
+    assert.deepEqual(
+      sessionIds(dir, "claude-worker"),
+      [HOOK_SESSION_ID],
+      "one logical Claude session is one presence row, not one per hook process",
+    );
+
+    // A genuinely different Claude session is still its own presence row.
+    runHook(dir, "claude-worker", {}, "PostToolUse", OTHER_SESSION_ID);
+    assert.deepEqual(sessionIds(dir, "claude-worker"), [HOOK_SESSION_ID, OTHER_SESSION_ID]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a missing or non-string session_id degrades to a per-process row, never a throw", () => {
+  const dir = freshDir();
+  try {
+    runCli(["send", "@claude-worker ping"], { SQUAD_DIR: dir, SQUAD_PERSONA: "opus-5-3f2a" });
+    const base = { hook_event_name: "PostToolUse", cwd: repoRoot };
+    // No `session_id` key at all, then a non-string one. Both must still
+    // deliver (exit 0 is asserted inside callHook) and simply fall back to
+    // today's behavior — a freshly minted session per process.
+    assert.match(callHook(dir, "claude-worker", base), /ping/);
+    rmSync(join(dir, "inbox", "claude-worker.json"));
+    assert.match(callHook(dir, "claude-worker", { ...base, session_id: 42 }), /ping/);
+    rmSync(join(dir, "inbox", "claude-worker.json"));
+    assert.match(callHook(dir, "claude-worker", { ...base, session_id: "   " }), /ping/);
+
+    const ids = sessionIds(dir, "claude-worker");
+    assert.equal(ids.length, 3, "nothing to pin to — each process keeps its own row");
+    for (const id of ids) assert.match(id, /^[0-9a-f]{8}-[0-9a-f]{4}-/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
