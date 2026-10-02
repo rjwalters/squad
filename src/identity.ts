@@ -21,6 +21,34 @@ export function identityFromEnv(env: NodeJS.ProcessEnv = process.env): AgentIden
   };
 }
 
+/**
+ * Names no agent may hold, because the room already uses them to mean
+ * something else. `repo` is the `@repo` broadcast target — "every agent
+ * working in this repo", which the mid-turn inbox hook (`src/inbox.ts`)
+ * delivers to every session regardless of its name. A persona called `repo`
+ * would make `@repo` ambiguous between one agent and all of them, so the name
+ * is refused at every entry point: automatic minting, a `squad_join` rename,
+ * and a `SQUAD_PERSONA` pin.
+ *
+ * Compared case-insensitively, matching `PERSONA_PATTERN`'s own
+ * case-insensitivity. Refinements are *not* reserved: `repo-doctor` is an
+ * ordinary name, exactly as `@repo-doctor` is an ordinary mention.
+ */
+export const RESERVED_PERSONAS: readonly string[] = ["repo"];
+
+export function isReservedPersona(name: string): boolean {
+  const wanted = name.trim().toLowerCase();
+  return RESERVED_PERSONAS.includes(wanted);
+}
+
+/** The refusal text shared by every entry point that rejects a reserved name. */
+export function reservedPersonaReason(name: string): string {
+  return (
+    `'${name}' is a reserved name: @${name.trim().toLowerCase()} addresses every agent ` +
+    `working in this repo, so no single agent may answer to it. Choose another persona.`
+  );
+}
+
 /** Visible suffix length: 4 hex characters (65536 values) for rooms of a handful of agents. */
 export const AUTOMATIC_SUFFIX_LENGTH = 4;
 /** Collisions reroll a fresh suffix this many times before failing explicitly. */
@@ -103,6 +131,11 @@ export function reserveAutomaticPersona(
     for (let attempt = 0; attempt < AUTOMATIC_SUFFIX_ATTEMPTS; attempt++) {
       candidates.push(`${label}-${next()}`);
       const persona = candidates.shift()!;
+      // A reserved name is treated exactly like an occupied one: `prefer` can
+      // carry an arbitrary restored name, and a label could in principle
+      // render one, so the guard belongs on the candidate rather than on the
+      // caller.
+      if (isReservedPersona(persona)) continue;
       const occupied = db
         .prepare(
           "SELECT persona FROM agent_identities WHERE persona = ? UNION SELECT persona FROM members WHERE persona = ?",

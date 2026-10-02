@@ -14,7 +14,9 @@ import { resolveIntegration, validateIntegration, type IntegrationInput, type In
 import {
   automaticLabel,
   automaticPersona,
+  isReservedPersona,
   reserveAutomaticPersona,
+  reservedPersonaReason,
   type AgentIdentity,
 } from "./identity.js";
 import { randomUUID } from "node:crypto";
@@ -728,6 +730,11 @@ export class Squad {
       ? { ...identity, sessionId: identity.sessionId ?? randomUUID() }
       : null;
     if (persona !== undefined) {
+      // An explicit identity (a `SQUAD_PERSONA` pin, a CLI default, an
+      // already-resolved rename) must not be a reserved room-wide target.
+      // This is the loud entry point: a misconfigured pin fails at open time
+      // rather than silently shadowing `@repo` for every other agent.
+      if (isReservedPersona(persona)) throw new Error(reservedPersonaReason(persona));
       this._persona = persona;
     } else {
       const reserved = reserveAutomaticPersona(db, this.automaticIdentity!);
@@ -1667,6 +1674,13 @@ export class Squad {
    */
   requestPersona(requested: string, pinned?: string | null): PersonaRequestResult {
     if (requested === this._persona) return { persona: this._persona, applied: false };
+    if (isReservedPersona(requested)) {
+      return {
+        persona: this._persona,
+        applied: false,
+        note: `${reservedPersonaReason(requested)} Rename ignored.`,
+      };
+    }
     if (pinned && !isPersonaRefinement(pinned, requested)) {
       return {
         persona: this._persona,

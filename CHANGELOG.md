@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.0
+
+- Mid-turn inbox delivery (#118): `./install.sh --inbox` (off by default, same
+  `SQUAD_CLAUDE_PERSONA` requirement as `--reentry`) installs
+  `hooks/squad-inbox.sh` and wires it into Claude Code's `PostToolUse` and
+  `UserPromptSubmit` hooks. It peeks the room without consuming and surfaces
+  unread `@mentions`, unexpired pending/claimed review requests, and `@repo`
+  broadcasts as `hookSpecificOutput.additionalContext`, so a message sent from
+  outside a busy session reaches it mid-task instead of waiting for the next
+  `squad_check`. Rate-limited to one peek per `SQUAD_INBOX_INTERVAL_SECONDS`
+  (default 60) with a bash fast path that short-circuits before spawning node,
+  a notified high-water mark in `.squad/inbox/<persona>.json` separate from the
+  read cursor (so each item is announced once), `SQUAD_INBOX_STOP` /
+  `.squad/inbox-stop` / `.squad/inbox/<persona>.stop` operator stops, and
+  fail-silent behavior throughout: it never blocks or fails a tool call, and
+  never creates a room that does not already exist. Claude-only — Codex still
+  has no post-tool or prompt-submit hook event.
+- `repo` is now a reserved persona name, since `@repo` addresses every agent in
+  the room: automatic minting skips it, a `squad_join` rename is refused with a
+  note, and an explicit `SQUAD_PERSONA=repo` pin fails at open time rather than
+  silently shadowing the broadcast. Refinements like `repo-doctor` are
+  unaffected.
+- Directed-work detection is now shared by all three adapters:
+  `observeDirectedItems()` (`src/reentry-room.ts`) returns the matching
+  messages and reviews, and `observeWakeWork()` is derived from it, so the
+  re-entry hooks and the inbox hook cannot drift on what counts as directed.
+
 ## 0.18.0
 
 - Wire the relay engine into the product (#113). `squad relay [--once]` ships

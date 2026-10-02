@@ -244,6 +244,65 @@ test("customized hook entries retain the script they still invoke", () => {
   assert.ok(existsSync(join(f.repo, ".claude/hooks/squad-reentry.sh")));
   assert.deepEqual(JSON.parse(readFileSync(path)), cfg);
 });
+test("--inbox wires both of its events, survives refresh, and unwinds cleanly", () => {
+  const f = fixture("inbox-hook");
+  f.env.SQUAD_CLAUDE_PERSONA = "inbox-worker";
+  mkdirSync(join(f.repo, ".claude"));
+  const original = {
+    hooks: {
+      PostToolUse: [{ hooks: [{ type: "command", command: "echo mine" }] }],
+    },
+  };
+  const path = join(f.repo, ".claude/settings.json");
+  writeFileSync(path, JSON.stringify(original));
+  f.run("install.sh", ["--inbox", "--reentry"]);
+  const script = join(f.repo, ".claude/hooks/squad-inbox.sh");
+  assert.match(readFileSync(script, "utf8"), /inbox-worker/);
+  assert.match(readFileSync(script, "utf8"), /dist\/inbox-hook\.js/);
+  const wired = JSON.parse(readFileSync(path));
+  const command = "${CLAUDE_PROJECT_DIR}/.claude/hooks/squad-inbox.sh";
+  for (const event of ["PostToolUse", "UserPromptSubmit"])
+    assert.ok(
+      wired.hooks[event].some((entry) =>
+        entry.hooks.some((h) => h.command === command),
+      ),
+      `${event} should invoke the inbox hook`,
+    );
+  // Both opt-in hooks coexist, and the user's own PostToolUse entry is intact.
+  assert.equal(wired.hooks.Stop.length, 1);
+  assert.deepEqual(wired.hooks.PostToolUse[0], original.hooks.PostToolUse[0]);
+
+  // An ordinary refresh without the flags keeps what was opted into.
+  delete f.env.SQUAD_CLAUDE_PERSONA;
+  f.run();
+  f.run("install.sh", ["--check"]);
+  assert.deepEqual(JSON.parse(readFileSync(path)), wired);
+
+  f.run("uninstall.sh");
+  assert.equal(existsSync(script), false);
+  assert.equal(existsSync(join(f.repo, ".claude/hooks/squad-reentry.sh")), false);
+  assert.deepEqual(JSON.parse(readFileSync(path)), original);
+});
+test("--inbox requires an explicit persona", () => {
+  const f = fixture("inbox-no-persona");
+  assert.match(f.run("install.sh", ["--inbox"], 1), /--inbox requires SQUAD_CLAUDE_PERSONA/);
+  assert.equal(existsSync(join(f.repo, ".claude/hooks/squad-inbox.sh")), false);
+});
+test("a customized inbox hook entry retains the script it still invokes", () => {
+  const f = fixture("custom-inbox-hook");
+  f.env.SQUAD_CLAUDE_PERSONA = "inbox-worker";
+  f.run("install.sh", ["--inbox"]);
+  const path = join(f.repo, ".claude/settings.json");
+  const cfg = JSON.parse(readFileSync(path));
+  cfg.hooks.UserPromptSubmit[0].hooks[0].timeout = 5;
+  writeFileSync(path, JSON.stringify(cfg));
+  f.run("uninstall.sh", [], 1);
+  assert.ok(existsSync(join(f.repo, ".claude/hooks/squad-inbox.sh")));
+  // The untouched PostToolUse entry is removed; the customized one survives.
+  const after = JSON.parse(readFileSync(path));
+  assert.equal(after.hooks.PostToolUse, undefined);
+  assert.deepEqual(after.hooks.UserPromptSubmit, cfg.hooks.UserPromptSubmit);
+});
 test("customized MCP launcher retains its command and argument pair", () => {
   const f = fixture("custom-installed-launcher");
   f.run();

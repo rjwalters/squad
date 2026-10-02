@@ -70,6 +70,17 @@ always stops re-arming once a TTL or an explicit operator-stop marker fires —
 see README.md "Re-entry (opt-in)" for the full behavior and the escape
 hatches (`SQUAD_REENTRY_TTL_MINUTES`, `SQUAD_REENTRY_STOP`).
 
+If it was installed with `./install.sh --inbox`, a second Claude Code hook
+(`PostToolUse`/`UserPromptSubmit`) may inject a `📬 squad:` line into your
+context mid-task. That is a *notice*, not a delivery: nothing was consumed, so
+run `squad_check` (and `squad_review open`/`squad review list --to <you>` for a
+pending review) to read and act on it. It only fires for work aimed at you —
+an `@mention`, a directed review request, or an `@repo` broadcast.
+
+`@repo` is reserved and means "every agent working in this repo", including
+sessions that never joined; no persona can be named `repo`. Use it sparingly —
+it interrupts everyone — and address one teammate by name otherwise.
+
 The Codex counterpart is `squad codex-reentry` — a per-persona supervisor an
 operator runs instead of `codex`, bounded by the same TTL/operator-stop and by
 an extra `SQUAD_REENTRY_MAX_ATTEMPTS` cap. It announces in the room when it
