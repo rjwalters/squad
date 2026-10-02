@@ -17,11 +17,14 @@ export function observeDirectedItems(
   persona: string,
   alsoFor: readonly string[] = [],
 ): { unread: Message[]; directed: Message[]; reviews: ReviewRequestView[] } {
-  const targets = [persona, ...alsoFor];
   const unread = room.check({ peek: true });
   return {
     unread,
-    directed: unread.filter((m) => targets.some((t) => mentionsPersona(m.body, t))),
+    directed: unread.filter(
+      (m) =>
+        mentionsPersona(m.body, persona) ||
+        alsoFor.some((t) => mentionsPersona(m.body, t, { exact: true })),
+    ),
     reviews: room.pendingReviews(persona),
   };
 }

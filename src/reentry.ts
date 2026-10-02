@@ -240,8 +240,22 @@ export function decide(input: DecideInput): DecideResult {
   };
 }
 
-/** `@name` mention detection for the v1 "directed work" heuristic — see reentry-hook.ts. */
-export function mentionsPersona(body: string, persona: string): boolean {
+/**
+ * `@name` mention detection for the v1 "directed work" heuristic — see reentry-hook.ts.
+ *
+ * `exact: true` anchors the match so it cannot be satisfied by a refinement
+ * mention (`@repo-doctor` does not count as `@repo`) — use this for broadcast
+ * targets like `REPO_BROADCAST`, where a hyphenated name sharing the prefix is
+ * an unrelated persona, not a form of address to the broadcast target. Real
+ * personas keep the default `\b` boundary, which intentionally still matches
+ * refinements.
+ */
+export function mentionsPersona(
+  body: string,
+  persona: string,
+  opts?: { exact?: boolean },
+): boolean {
   const escaped = persona.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|[^\\w@])@${escaped}\\b`, "i").test(body);
+  const boundary = opts?.exact ? "(?![\\w-])" : "\\b";
+  return new RegExp(`(^|[^\\w@])@${escaped}${boundary}`, "i").test(body);
 }

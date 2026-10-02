@@ -81,6 +81,17 @@ test("mentionsPersona matches @name mentions, case-insensitively, word-bounded",
   assert.equal(mentionsPersona("@claudette are you around?", "claude"), false);
 });
 
+test("mentionsPersona default boundary matches hyphenated refinements, exact does not", () => {
+  // Default (no opts): a refinement mention counts, e.g. "@repo-doctor" names
+  // a persona built on top of "repo".
+  assert.equal(mentionsPersona("@repo-doctor can you look at this?", "repo"), true);
+  // exact: true anchors the match so a refinement no longer counts — for
+  // broadcast targets, "repo-doctor" is an unrelated persona, not a form of
+  // address to "repo".
+  assert.equal(mentionsPersona("@repo-doctor can you look at this?", "repo", { exact: true }), false);
+  assert.equal(mentionsPersona("@repo stop writing to disk", "repo", { exact: true }), true);
+});
+
 test("decide: operator-stop wins over everything, including directed work", () => {
   const state = initialState("2026-01-01T00:00:00.000Z");
   const result = decide({

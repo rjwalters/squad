@@ -230,6 +230,28 @@ test("an @repo broadcast reaches a session whose persona was never mentioned", (
   }
 });
 
+test("@repo-doctor is an ordinary mention, not an @repo broadcast", () => {
+  const dir = freshDir();
+  try {
+    runCli(["send", "@repo-doctor can you look at the schema drift?"], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "human",
+    });
+    // "repo-doctor" is an ordinary name sharing the broadcast target's
+    // prefix. An unrelated session must stay silent.
+    assert.equal(runHook(dir, "opus-5-3f2a").raw, "");
+
+    // The real @repo broadcast still reaches everyone.
+    runCli(["send", `@${REPO_BROADCAST} stop writing to disk, we are at 99%`], {
+      SQUAD_DIR: dir,
+      SQUAD_PERSONA: "human",
+    });
+    assert.match(runHook(dir, "opus-5-3f2a").context, /stop writing to disk/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("ordinary chatter never interrupts", () => {
   const dir = freshDir();
   try {
