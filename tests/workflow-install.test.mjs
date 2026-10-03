@@ -10,7 +10,8 @@ test("both installed skill bundles resolve all six workflow adapters across rein
   const repo = join(scratch, "repo");
   mkdirSync(repo);
   try {
-    const env = { ...process.env, HOME: scratch };
+    // SQUAD_HEAL_ROOT keeps install's room heal (#132) inside the fixture.
+    const env = { ...process.env, HOME: scratch, SQUAD_HEAL_ROOT: scratch };
     for (let i = 0; i < 2; i++) {
       const result = spawnSync("bash", ["install.sh", "-y", "--no-link", repo], { env, encoding: "utf8" });
       assert.equal(result.status, 0, result.stderr);

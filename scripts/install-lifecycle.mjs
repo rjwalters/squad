@@ -70,7 +70,11 @@ unowned files are preserved and reported; resolve conflicts and rerun.
 Global Codex home: CODEX_HOME, or ~/.codex. Repo uninstall leaves globals alone.
 Runtime stays in this checkout; build it and rerun install to refresh adapters.
 Local metadata: both runtime skill directories. Global receipt: .squad-install.json.
-CLI npm links are machine-wide and are never removed by repo uninstall.`);
+CLI npm links are machine-wide and are never removed by repo uninstall.
+An actual install/update also runs 'squad heal' once over the parent of this
+source checkout (SQUAD_HEAL_ROOT overrides it), so rooms earlier versions left
+untracked get a local .git/info/exclude entry. --check, --dry-run and
+uninstall never heal.`);
       process.exit(0);
     } else if (arg.startsWith("-")) throw new Error(`unknown option: ${arg}`);
     else if (targetSeen)
@@ -903,12 +907,51 @@ async function main() {
         `npm link unavailable; use node ${shellQuote(join(source, "dist/index.js"))} <command>`,
       );
   }
+  if (opts.action === "install") healDormantRooms();
   console.log(
     opts.action === "install"
       ? "installed both runtime workflows; start Claude or Codex inside the target repository"
       : "removed unchanged managed artifacts; room data and machine-wide CLI links remain",
   );
   process.exitCode = plan.conflicts.length ? 1 : 0;
+}
+
+/**
+ * Run `squad heal` once after an actual install/update (#132), so updating
+ * squad clears `.squad/` rooms that earlier versions left untracked in sibling
+ * checkouts that squad may never run in again. Same bounded scan as the
+ * command: the root's own room and each immediate child's, no recursion. Root
+ * is the parent of this source checkout, or SQUAD_HEAL_ROOT when set.
+ *
+ * Only ever reached after plan.apply() on install (never for --check,
+ * --dry-run or uninstall), and after the runtime availability check passed.
+ * A failure is a warning, not a rollback: the adapters installed fine, and
+ * the rooms named here can be healed later with the printed command.
+ */
+function healDormantRooms() {
+  const root = process.env.SQUAD_HEAL_ROOT || dirname(source);
+  const cli = join(source, "dist/index.js");
+  const result = spawnSync(process.execPath, [cli, "heal", "--root", root], {
+    cwd: source,
+    encoding: "utf8",
+  });
+  const out = (result.stdout || "").split("\n");
+  // Writes and the count; already-ignored rooms are routine and stay quiet.
+  for (const line of out)
+    if (/^(wrote: |heal: \d)/.test(line)) console.log(line);
+  if (result.status !== 0) {
+    const failed = out.filter((line) => line.startsWith("FAILED: "));
+    const detail = failed.length
+      ? failed
+      : [(result.stderr || result.error?.message || "").trim()].filter(Boolean);
+    console.error(
+      [
+        "warning: room healing did not finish; installation itself succeeded",
+        ...detail.map((line) => `  ${line}`),
+        `  rerun after fixing: node ${shellQuote(cli)} heal --root ${shellQuote(root)}`,
+      ].join("\n"),
+    );
+  }
 }
 
 /**

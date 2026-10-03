@@ -5,6 +5,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -17,7 +18,10 @@ import { join } from "node:path";
 // for the openDb() cases (the individual tests set it only where they mean to).
 delete process.env.SQUAD_DIR;
 
-const { ensureRoomIgnored, openDb } = await import("../dist/db.js");
+const { ensureRoomIgnored, ensureRoomIgnoredStrict, roomIgnoreState, openDb } = await import(
+  "../dist/db.js"
+);
+const { healRooms } = await import("../dist/room-heal.js");
 
 /** Run git in `cwd`, or return null when git is unavailable/fails. */
 function git(cwd, ...args) {
@@ -206,4 +210,48 @@ test("a nested room is excluded by its repo-relative path", { skip: !hasGit }, (
   assert.equal(ensureRoomIgnored(room), excludeOf(root));
   assert.match(excludeText(root), /^\/sub\/dir\/\.squad\/$/m);
   assert.equal(git(root, "status", "--porcelain"), "");
+});
+
+test("one heal run fixes a pre-#111 room without opening it; a second run writes nothing (#132)", { skip: !hasGit }, () => {
+  const parent = join(scratch, "heal-parent");
+  const root = repo(join("heal-parent", "dormant"));
+  const room = join(root, ".squad");
+  mkdirSync(room, { recursive: true });
+  writeFileSync(join(room, "squad.db"), "untouched");
+  assert.match(git(root, "status", "--porcelain") ?? "", /\.squad/);
+  assert.deepEqual(roomIgnoreState(room), { state: "not-ignored", root, exclude: excludeOf(root) });
+
+  const first = healRooms(parent);
+  assert.deepEqual(first.written, [{ room, exclude: excludeOf(root) }]);
+  assert.deepEqual(first.failed, []);
+  assert.equal(git(root, "status", "--porcelain"), "");
+  assert.equal(roomEntries(excludeText(root)), 1);
+  assert.deepEqual(roomIgnoreState(room), { state: "ignored", root });
+  const after = excludeText(root);
+
+  const second = healRooms(parent);
+  assert.deepEqual(second.written, []);
+  assert.deepEqual(second.covered, [room]);
+  assert.equal(excludeText(root), after);
+  // The room was never opened: no WAL sidecars, contents byte-identical.
+  assert.deepEqual(readdirSync(room), ["squad.db"]);
+  assert.equal(readFileSync(join(room, "squad.db"), "utf8"), "untouched");
+});
+
+test("the strict helper surfaces the failure the safe one swallows", { skip: !hasGit }, () => {
+  const root = repo("strict-fail");
+  const room = join(root, ".squad");
+  mkdirSync(room, { recursive: true });
+  rmSync(join(root, ".git", "info"), { recursive: true, force: true });
+  writeFileSync(join(root, ".git", "info"), "not a directory");
+
+  assert.equal(ensureRoomIgnored(room), null);
+  assert.throws(() => ensureRoomIgnoredStrict(room));
+  assert.equal(roomIgnoreState(room).state, "not-ignored");
+});
+
+test("roomIgnoreState reports a room outside any repo", () => {
+  const lone = join(scratch, "state-no-repo", ".squad");
+  mkdirSync(lone, { recursive: true });
+  assert.deepEqual(roomIgnoreState(lone), { state: "outside-repo" });
 });

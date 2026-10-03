@@ -558,38 +558,85 @@ const IGNORE_NOTE =
  *
  * Returns the exclude file written, or null when nothing needed writing.
  * Never throws: a read-only or exotic checkout must not block opening a room.
+ * (So null means "no-op" *or* "failed"; `squad heal` tells those apart with
+ * roomIgnoreState() and the throwing ensureRoomIgnoredStrict().)
  */
 export function ensureRoomIgnored(roomDir: string): string | null {
   try {
-    const room = resolve(roomDir);
-    const root = findGitRoot(dirname(room));
-    if (!root) return null; // not inside a working tree (~/.squad, /tmp, …)
-    const rel = relative(root, room).split(sep).join("/");
-    if (!rel || rel === "." || rel.startsWith("../") || isAbsolute(rel)) return null;
-    const common = gitCommonDir(root);
-    if (!common) return null;
-    const exclude = join(common, "info", "exclude");
-    const variants = ignoreVariants(rel);
-    // Cheap textual checks first, so the steady state costs two small reads.
-    if (hasIgnoreLine(join(root, ".gitignore"), variants)) return null;
-    if (hasIgnoreLine(exclude, variants)) return null;
-    // Then the authoritative one, which also catches broader patterns, nested
-    // .gitignore files and a global core.excludesFile.
-    if (gitIgnores(root, room)) return null;
-    const entry = rel.includes("/") ? `/${rel}/` : `${rel}/`;
-    mkdirSync(dirname(exclude), { recursive: true });
-    let text = "";
-    try {
-      text = readFileSync(exclude, "utf8");
-    } catch {
-      // No exclude file yet (or unreadable): start one.
-    }
-    const separator = text && !text.endsWith("\n") ? "\n" : "";
-    writeFileSync(exclude, `${text}${separator}${IGNORE_NOTE}\n${entry}\n`);
-    return exclude;
+    return ensureRoomIgnoredStrict(roomDir);
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether git would currently see `roomDir` as dirt, without writing anything.
+ *
+ * - `outside-repo`: not inside a git working tree (or the room *is* the
+ *   tree's root), so there is nothing to ignore it in.
+ * - `ignored`: `.gitignore`, the exclude file, or any broader pattern covers it.
+ * - `not-ignored`: it would show as untracked; `exclude` is where the fix goes
+ *   (null when the git directory itself cannot be resolved).
+ */
+export type RoomIgnoreState =
+  | { state: "outside-repo" }
+  | { state: "ignored"; root: string }
+  | { state: "not-ignored"; root: string; exclude: string | null };
+
+interface RoomIgnoreProbe {
+  room: string;
+  root: string;
+  rel: string;
+  exclude: string | null;
+  ignored: boolean;
+}
+
+function probeRoomIgnore(roomDir: string): RoomIgnoreProbe | null {
+  const room = resolve(roomDir);
+  const root = findGitRoot(dirname(room));
+  if (!root) return null; // not inside a working tree (~/.squad, /tmp, …)
+  const rel = relative(root, room).split(sep).join("/");
+  if (!rel || rel === "." || rel.startsWith("../") || isAbsolute(rel)) return null;
+  const common = gitCommonDir(root);
+  const exclude = common ? join(common, "info", "exclude") : null;
+  const variants = ignoreVariants(rel);
+  // Cheap textual checks first, so the steady state costs two small reads.
+  // Then the authoritative one, which also catches broader patterns, nested
+  // .gitignore files and a global core.excludesFile.
+  const ignored =
+    hasIgnoreLine(join(root, ".gitignore"), variants) ||
+    (exclude !== null && hasIgnoreLine(exclude, variants)) ||
+    gitIgnores(root, room);
+  return { room, root, rel, exclude, ignored };
+}
+
+export function roomIgnoreState(roomDir: string): RoomIgnoreState {
+  const probe = probeRoomIgnore(roomDir);
+  if (!probe) return { state: "outside-repo" };
+  if (probe.ignored) return { state: "ignored", root: probe.root };
+  return { state: "not-ignored", root: probe.root, exclude: probe.exclude };
+}
+
+/**
+ * ensureRoomIgnored() without the safety net: same checks, same single
+ * additive write, but a failure to write throws instead of returning null.
+ */
+export function ensureRoomIgnoredStrict(roomDir: string): string | null {
+  const probe = probeRoomIgnore(roomDir);
+  if (!probe || probe.ignored) return null;
+  if (!probe.exclude) throw new Error(`cannot resolve the git directory for ${probe.root}`);
+  const { exclude, rel } = probe;
+  const entry = rel.includes("/") ? `/${rel}/` : `${rel}/`;
+  mkdirSync(dirname(exclude), { recursive: true });
+  let text = "";
+  try {
+    text = readFileSync(exclude, "utf8");
+  } catch {
+    // No exclude file yet (or unreadable): start one.
+  }
+  const separator = text && !text.endsWith("\n") ? "\n" : "";
+  writeFileSync(exclude, `${text}${separator}${IGNORE_NOTE}\n${entry}\n`);
+  return exclude;
 }
 
 /** Rooms this process has already checked, so openDb() stays cheap to re-call. */
