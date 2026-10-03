@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.7
+
+- Messages now record the posting connection's `session_id` (#135), so two
+  sessions sharing one persona can be told apart even though `sender` is the
+  same. Schema version 9 -> 10: existing rooms gain a nullable
+  `messages.session_id` column on open (older rows stay NULL), and
+  `export`/`import` round-trip it. Exports from schema v9 are rejected with
+  the usual version-mismatch error. A pinned persona (`SQUAD_PERSONA`) that
+  resumes via `SQUAD_SESSION_ID` keeps the same stored value. An automatic
+  identity stores a per-process id instead, because its `SQUAD_SESSION_ID` is
+  a resume token and is never written to the room.
+
 ## 0.19.6
 
 - Docs: an agent outside a room's intended cast must not reuse another seat's

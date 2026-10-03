@@ -44,6 +44,19 @@ export interface Message {
    * notice) occupies one row/slot no matter how many times it recurs.
    */
   occurrences: number;
+  /**
+   * The posting connection's session id (#135, Option B of #120) -- what
+   * distinguishes two sessions sharing one persona, since `sender` alone
+   * cannot. For a pinned persona (`SQUAD_PERSONA`), a session resumed via
+   * `SQUAD_SESSION_ID` keeps the same stored value. For an automatic
+   * identity, `SQUAD_SESSION_ID` is the resume token and must never be
+   * readable in the room, so each process stores its own per-process presence
+   * id instead; the persona, which is unique per automatic identity, already
+   * tells them apart. Each non-resuming session gets a fresh id. NULL for
+   * rows written before the column existed. A collapsed `"system"` repeat keeps the session id
+   * of the row it collapsed into.
+   */
+  session_id: string | null;
 }
 
 export interface Goal {
@@ -1477,11 +1490,15 @@ export class Squad {
             now - prior.last_sent_ms < status.reminder_policy.cadence_ms)
         )
           continue;
+        // Every message row carries its posting session (#135). A tick from a
+        // fresh process has not opened one yet; open it here, inside the
+        // transaction, only once a reminder is actually going out.
+        if (!this._sessionId) this.touch();
         const message = this.db
           .prepare(
-            "INSERT INTO messages(sender, kind, body, ts) VALUES (?, 'chat', ?, ?)",
+            "INSERT INTO messages(sender, kind, body, ts, session_id) VALUES (?, 'chat', ?, ?, ?)",
           )
-          .run(this.persona, condition.body, new Date(now).toISOString());
+          .run(this.persona, condition.body, new Date(now).toISOString(), this._sessionId);
         const message_id = Number(message.lastInsertRowid);
         this.db
           .prepare(
@@ -1878,14 +1895,32 @@ export class Squad {
         this.db
           .prepare("UPDATE messages SET ts = ?, occurrences = ? WHERE id = ?")
           .run(ts, occurrences, last.id);
-        return { id: last.id, sender: this.persona, kind, body, ts, occurrences };
+        return {
+          id: last.id,
+          sender: this.persona,
+          kind,
+          body,
+          ts,
+          occurrences,
+          session_id: last.session_id ?? null,
+        };
       }
     }
     const { lastInsertRowid } = this.db
-      .prepare("INSERT INTO messages (sender, kind, body, ts, occurrences) VALUES (?, ?, ?, ?, 1)")
-      .run(this.persona, kind, body, ts);
+      .prepare(
+        "INSERT INTO messages (sender, kind, body, ts, occurrences, session_id) VALUES (?, ?, ?, ?, 1, ?)",
+      )
+      .run(this.persona, kind, body, ts, this._sessionId);
     this.messageInserted();
-    return { id: Number(lastInsertRowid), sender: this.persona, kind, body, ts, occurrences: 1 };
+    return {
+      id: Number(lastInsertRowid),
+      sender: this.persona,
+      kind,
+      body,
+      ts,
+      occurrences: 1,
+      session_id: this._sessionId,
+    };
   }
 
   /** Stateless recent-history replay. Never touches any cursor. */

@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { openDb, ROOM_TABLES } from "../dist/db.js";
+import { openDb, ROOM_TABLES, SCHEMA_VERSION } from "../dist/db.js";
 import { Squad } from "../dist/core.js";
 
 function fixture(t) {
@@ -141,7 +141,7 @@ test("schema 8 room adopts reminder history without losing prior user records", 
   const migrated = openDb();
   try {
     const keeper = new Squad(migrated, "keeper");
-    assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, 9);
+    assert.equal(migrated.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
     assert.equal(keeper.nodeGet(node.id).question, "Prior user work");
     assert.equal(keeper.stewardStatus().claims[0].path, "manual/path");
     assert.deepEqual(keeper.stewardStatus().reminders, []);
@@ -149,4 +149,13 @@ test("schema 8 room adopts reminder history without losing prior user records", 
   } finally {
     migrated.close();
   }
+});
+
+test("steward reminders stamp the posting session id on their message rows (#135)", (t) => {
+  const { db, squad } = fixture(t);
+  const { sent } = squad.stewardTick();
+  assert.ok(sent.length > 0);
+  const row = db.prepare("SELECT session_id FROM messages WHERE id = ?").get(sent[0].message_id);
+  assert.ok(row.session_id, "steward reminder carries a session id");
+  assert.equal(row.session_id, squad.sessionId);
 });

@@ -26,7 +26,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
  * move this number: bumping it for such a table would reject every previously
  * produced export for no compatibility gain.
  */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
 /**
  * Parses an env var as a non-negative minute count, falling back to
@@ -189,13 +189,21 @@ CREATE TABLE IF NOT EXISTS agent_identities (
   identity_id TEXT PRIMARY KEY,
   persona TEXT NOT NULL UNIQUE
 );
+-- messages.session_id is the posting connection's session id (#135, Option B
+-- of #120): it tells apart two sessions sharing one persona. NULL for rows
+-- written before the column existed. It must stay the last column so that a
+-- migrated db has the same column order as this DDL. Keep comments out of the
+-- column list: SQLite stores this text verbatim, and older SQLite versions
+-- (Node 22's) mis-splice the stored DDL when altering a column that follows
+-- an inline comment containing a comma.
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sender TEXT NOT NULL,
   kind TEXT NOT NULL DEFAULT 'chat',
   body TEXT NOT NULL,
   ts TEXT NOT NULL,
-  occurrences INTEGER NOT NULL DEFAULT 1
+  occurrences INTEGER NOT NULL DEFAULT 1,
+  session_id TEXT
 );
 -- The persona's durable read high-water mark. No longer the cursor check()
 -- reads (session_cursors below is, since #41), but still written on every
@@ -645,6 +653,24 @@ function ensureMessagesOccurrencesColumn(db: DatabaseSync): void {
 }
 
 /**
+ * Same idea for `messages.session_id` (#135): the posting session's id, so two
+ * unrelated sessions sharing one pinned persona stay distinguishable in the
+ * transcript. Nullable with no default -- history written before the column
+ * existed keeps NULL. Must run after ensureMessagesOccurrencesColumn() so the
+ * migrated column order (`..., occurrences, session_id`) matches SCHEMA's
+ * fresh-create DDL, which `Squad.importRoom()`'s positional
+ * `INSERT INTO t SELECT * FROM t2` depends on. messages is in ROOM_TABLES, so
+ * adding this column moved SCHEMA_VERSION 9 -> 10.
+ */
+function ensureMessagesSessionIdColumn(db: DatabaseSync): void {
+  const cols = db.prepare("PRAGMA table_info(messages)").all() as unknown as Array<{
+    name: string;
+  }>;
+  if (!cols.some((c) => c.name === "session_id"))
+    db.exec("ALTER TABLE messages ADD COLUMN session_id TEXT");
+}
+
+/**
  * Same idea for `relay_cursors.last_error`/`last_error_at` (#113), added after
  * the table first shipped (#112). relay_cursors is outside ROOM_TABLES, so this
  * does not move SCHEMA_VERSION.
@@ -680,6 +706,7 @@ export function openDb(): DatabaseSync {
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
   ensureMessagesOccurrencesColumn(db);
+  ensureMessagesSessionIdColumn(db);
   ensureRelayErrorColumns(db);
   adoptNodes(db);
   // Every open of a db by the current build stamps it current: SCHEMA's

@@ -128,6 +128,12 @@ test("round-trip export -> import preserves row counts and content across every 
     assert.ok(beforeCounts[t] > 0, `expected ${t} to be non-empty before export`);
   }
   const beforeMessages = src.db.prepare("SELECT * FROM messages ORDER BY id").all();
+  // Every message carries its posting session (#135), and two personas'
+  // sessions are distinct, so the round-trip below exercises real values.
+  for (const m of beforeMessages) assert.ok(m.session_id, `message ${m.id} has a session_id`);
+  const claudeMsg = beforeMessages.find((m) => m.body === "hello from claude");
+  const codexMsg = beforeMessages.find((m) => m.body === "hi back from codex");
+  assert.notEqual(claudeMsg.session_id, codexMsg.session_id);
   const beforeCards = src.db.prepare("SELECT * FROM science_cards ORDER BY id").all();
 
   const exportDir = mkdtempSync(join(tmpdir(), "squad-export-file-"));
@@ -153,6 +159,11 @@ test("round-trip export -> import preserves row counts and content across every 
   assert.deepEqual(dest.squad.integrationAttempts(), beforeAttempts);
   const afterMessages = dest.db.prepare("SELECT * FROM messages ORDER BY id").all();
   assert.deepEqual(afterMessages, beforeMessages, "message content (including ids) preserved verbatim");
+  assert.deepEqual(
+    afterMessages.map((m) => m.session_id),
+    beforeMessages.map((m) => m.session_id),
+    "messages.session_id round-trips through export/import (#135)",
+  );
   const afterCards = dest.db.prepare("SELECT * FROM science_cards ORDER BY id").all();
   assert.deepEqual(afterCards, beforeCards, "science card content preserved verbatim");
 
@@ -212,6 +223,53 @@ test("import rejects a source with an incompatible schema version", async () => 
   const dest = freshRoom("claude");
   assert.throws(() => dest.squad.importRoom(exportPath), /schema version mismatch/);
   // Rejected cleanly -- no partial writes.
+  for (const t of ROOM_TABLES) {
+    assert.equal(dest.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n, 0, `${t} untouched after rejected import`);
+  }
+});
+
+test("SCHEMA_VERSION is 10: messages.session_id (#135) moved it past 9", () => {
+  assert.equal(SCHEMA_VERSION, 10);
+  const { db } = freshRoom("claude");
+  const cols = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name);
+  assert.equal(cols[cols.length - 1], "session_id", "session_id is the last messages column");
+});
+
+test("import rejects a schema-9 export (pre-session_id messages) with the clear version error", async () => {
+  const src = freshRoom("claude");
+  src.squad.send("hi");
+  const exportDir = mkdtempSync(join(tmpdir(), "squad-export-file-"));
+  tmpDirs.push(exportDir);
+  const exportPath = join(exportDir, "room.db");
+  await src.squad.exportRoom(exportPath);
+
+  // Reshape the artifact into what a schema-9 build produced: no
+  // messages.session_id column, stamped user_version 9. Rebuild the table with
+  // the v9 DDL rather than dropping the column in place: an in-place column drop
+  // depends on how each SQLite version rewrites the stored schema text.
+  const old = new DatabaseSync(exportPath);
+  old.exec(`
+    CREATE TABLE messages_v9 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sender TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'chat',
+      body TEXT NOT NULL,
+      ts TEXT NOT NULL,
+      occurrences INTEGER NOT NULL DEFAULT 1
+    );
+    INSERT INTO messages_v9 (id, sender, kind, body, ts, occurrences)
+      SELECT id, sender, kind, body, ts, occurrences FROM messages;
+  `);
+  old.exec("DROP TABLE messages");
+  old.exec("ALTER TABLE messages_v9 RENAME TO messages");
+  old.exec("PRAGMA user_version = 9");
+  old.close();
+
+  const dest = freshRoom("claude");
+  assert.throws(
+    () => dest.squad.importRoom(exportPath),
+    /schema version mismatch \(export is v9, this squad build expects v10\)/,
+  );
   for (const t of ROOM_TABLES) {
     assert.equal(dest.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n, 0, `${t} untouched after rejected import`);
   }
