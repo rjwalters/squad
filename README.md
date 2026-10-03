@@ -107,6 +107,12 @@ Renaming stops exposing the automatic token but preserves its original reservati
 and references: any previously saved token still resumes the original automatic name.
 Custom co-named sessions still receive `identity_collision` warnings.
 
+An agent outside a room's intended cast must not reuse another seat's pinned
+`SQUAD_PERSONA`: its messages would be stamped with that seat's sender string.
+Instead, post under its **own persona**, in **its own room** (`SQUAD_DIR`), or
+**do not post**. The `<pinned>-N` refinement is for one logical agent scaled to
+N sessions of the same workstream, not for unrelated workstreams.
+
 The human CLI defaults to `human`. To act as an MCP agent, pass its exact returned
 name on every call (`SQUAD_PERSONA=<joined-name> squad send ...`), or share its
 launcher-provided `SQUAD_SESSION_ID` (plus `SQUAD_MODEL`/`SQUAD_PROVIDER` when set). CLI calls
