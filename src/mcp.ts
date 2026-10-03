@@ -38,7 +38,7 @@ export async function runMcpServer(): Promise<void> {
   // never able to block or fail the tool call that inserted the message.
   squad.onMessageInserted = opportunisticRelay(db);
 
-  const server = new McpServer({ name: "squad", version: "0.19.7" });
+  const server = new McpServer({ name: "squad", version: "0.19.8" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
@@ -329,7 +329,8 @@ export async function runMcpServer(): Promise<void> {
         "persona as SQUAD_PERSONA instead), " +
         "and opens a presence lease (returning your session_id and " +
         "lease_expires_at) and returns who else is here — each member annotated active/idle/" +
-        "stale — plus the current open goals, the advisory file claims, any directed review " +
+        "stale, with a per-session sessions_detail list when a persona holds more than one " +
+        "live session — plus the current open goals, the advisory file claims, any directed review " +
         "requests still gating you (pending_reviews, most urgent first), and recent chat " +
         "history. Your lease renews on every squad_* call, so nothing extra is needed to stay " +
         "active; call squad_leave when you are done. Advances your read cursor past the " +

@@ -126,3 +126,55 @@ test("real MCP sessions and CLI calls retain server-stamped identities", async (
     rmSync(room, { recursive: true, force: true });
   }
 });
+
+test("squad_join and squad_check expose per-session detail for a shared persona (#136)", async () => {
+  const room = mkdtempSync(join(tmpdir(), "squad-mcp-sessions-"));
+  const clients = [];
+  async function connect(persona) {
+    const env = { ...process.env, SQUAD_DIR: room, SQUAD_PERSONA: persona };
+    delete env.SQUAD_SESSION_ID;
+    const client = new Client({ name: "sessions-test", version: "1" });
+    clients.push(client);
+    await client.connect(
+      new StdioClientTransport({
+        command: process.execPath,
+        args: [resolve("dist/index.js")],
+        env,
+        stderr: "pipe",
+      }),
+    );
+    return client;
+  }
+  const call = async (client, name, args = {}) =>
+    JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+  try {
+    const seatA = await connect("codex");
+    const seatB = await connect("codex");
+    const observer = await connect("claude");
+    const a = await call(seatA, "squad_join");
+    const b = await call(seatB, "squad_join");
+    // The #50 same-name warning is unchanged.
+    assert.deepEqual(b.identity_collision.session_ids, [a.session_id]);
+
+    const joined = await call(observer, "squad_join");
+    const codex = joined.members.find((m) => m.persona === "codex");
+    assert.equal(codex.sessions, 2, "the count field is kept");
+    assert.deepEqual(
+      codex.sessions_detail.map((s) => s.session_id).sort(),
+      [a.session_id, b.session_id].sort(),
+    );
+    assert.ok(codex.sessions_detail.every((s) => s.state === "active" && s.last_seen));
+    const self = joined.members.find((m) => m.persona === "claude");
+    assert.equal(self.sessions, 1);
+    assert.equal("sessions_detail" in self, false, "single-session member payload unchanged");
+
+    const peers = (await call(observer, "squad_check")).peers;
+    const peer = peers.find((m) => m.persona === "codex");
+    assert.equal(peer.sessions, 2);
+    assert.equal(peer.sessions_detail.length, 2);
+    assert.ok(!peers.some((m) => m.persona === "claude"), "peers() still excludes yourself");
+  } finally {
+    await Promise.all(clients.map((client) => client.close()));
+    rmSync(room, { recursive: true, force: true });
+  }
+});
