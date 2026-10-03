@@ -40,6 +40,8 @@ test(
     const baseEnv = { ...process.env, HOME: scratch, CODEX_HOME: codexHome };
     for (const key of Object.keys(baseEnv))
       if (key.startsWith("SQUAD_")) delete baseEnv[key];
+    // Keep install's room heal (#132) inside this scratch dir.
+    baseEnv.SQUAD_HEAL_ROOT = scratch;
     const clients = [];
     const followers = [];
     const cliPath = resolve("dist/index.js");

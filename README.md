@@ -44,7 +44,7 @@ you         ──run─────► squad CLI ──────────
 
 **Room resolution:** an explicit `SQUAD_DIR` env wins (fresh installs set it to `.squad` in the repo's `.mcp.json`); otherwise the server walks up from its working directory to the nearest repo root (`.squad`, `.git`, or `.mcp.json`) — which is how Codex's single global MCP entry serves every squad-enabled repo, as long as you start `codex` inside the repo. A linked **git worktree** resolves to the primary clone's room (via `git rev-parse --git-common-dir`), so a fleet running each agent in its own worktree still shares one room. Outside any repo, the fallback is `~/.squad`.
 
-**The room is local state, and squad keeps it out of git itself.** `.squad/` holds `squad.db` and its live `-wal`/`-shm` sidecars — never something to commit. `install.sh` adds `.squad/` to the repo's `.gitignore` (shared with the team, in a tracked file), but the room is created lazily by the server, so any checkout that never ran a current installer — an install predating that step, a partial install, a bare `npx squad` — used to end up with an untracked, non-ignored `.squad/` dirtying `git status`. Squad now closes that gap where the directory is actually created: on every room open it appends `.squad/` to the repo's **`.git/info/exclude`** unless something already ignores the room. `.git/info/exclude` rather than `.gitignore` because it is local-only, needs no commit, and cannot surprise a repo by mutating a tracked file. The write is idempotent and additive — it never removes or rewrites your lines, and it is skipped entirely when `.gitignore`, an existing exclude entry, or any broader pattern (checked with `git check-ignore`) already covers the room. An already-affected checkout heals itself the next time squad runs there. Because `info/` lives in the shared common git dir, one entry covers every linked worktree. To opt out, ignore the room yourself (e.g. `.squad/` in `.gitignore`) — squad then leaves the exclude file alone. To relocate the room entirely, set `SQUAD_DIR` to a path outside the working tree; outside any repo nothing is written. To clean up, `squad nuke` drops the room, or just delete `.squad/` while no server is running (and remove the `# squad:` line from `.git/info/exclude` if you want it gone).
+**The room is local state, and squad keeps it out of git itself.** `.squad/` holds `squad.db` and its live `-wal`/`-shm` sidecars — never something to commit. `install.sh` adds `.squad/` to the repo's `.gitignore` (shared with the team, in a tracked file), but the room is created lazily by the server, so any checkout that never ran a current installer — an install predating that step, a partial install, a bare `npx squad` — used to end up with an untracked, non-ignored `.squad/` dirtying `git status`. Squad now closes that gap where the directory is actually created: on every room open it appends `.squad/` to the repo's **`.git/info/exclude`** unless something already ignores the room. `.git/info/exclude` rather than `.gitignore` because it is local-only, needs no commit, and cannot surprise a repo by mutating a tracked file. The write is idempotent and additive — it never removes or rewrites your lines, and it is skipped entirely when `.gitignore`, an existing exclude entry, or any broader pattern (checked with `git check-ignore`) already covers the room. Two things trigger that heal: **opening the room** (an MCP server, or any CLI command that reads or writes the room, started in that checkout), and **`squad heal`**, which reaches rooms nobody opens any more. An actual `install.sh` install/update runs `squad heal` once for you (see below), so updating squad clears rooms that earlier versions left behind in sibling checkouts. Because `info/` lives in the shared common git dir, one entry covers every linked worktree. To opt out, ignore the room yourself (e.g. `.squad/` in `.gitignore`) — squad then leaves the exclude file alone. To relocate the room entirely, set `SQUAD_DIR` to a path outside the working tree; outside any repo nothing is written. To clean up, `squad nuke` drops the room, or just delete `.squad/` while no server is running (and remove the `# squad:` line from `.git/info/exclude` if you want it gone).
 
 **Worktree sessions** are supported for the Claude runtime as long as the installed `.claude/hooks/squad-mcp.mjs` launcher and `.mcp.json` are committed — a linked worktree only contains tracked files. `.mcp.json` names that in-repo launcher rather than the runtime itself, because a path relative to the project working directory would resolve beside the worktree, where no squad checkout exists; the launcher then resolves both the runtime (`SQUAD_RUNTIME`) and a relative `SQUAD_DIR` against the primary clone, so a worktree session spawns the server from the same checkout and joins the same room as the primary clone. A worktree that wants its own room can still opt in by creating its own `.squad/`. Codex's global registration already uses an absolute source path and is unaffected.
 
@@ -249,6 +249,34 @@ no destination symlinks. Keep that checkout and its dependencies available.
 Before installing from a clean checkout run
 `CI=true pnpm install --frozen-lockfile && pnpm build`; missing dependencies or a
 broken runtime fail clearly before any target configuration is written.
+
+### Healing rooms earlier versions left untracked
+
+Rooms created before squad wrote its own ignore entry stay untracked dirt in any
+checkout squad never runs in again. `squad heal` fixes them without opening them:
+
+```bash
+squad heal                       # default root: the parent of this squad checkout
+squad heal --root ~/src/my-org   # an explicit root, e.g. for a nested layout
+```
+
+Scope is bounded and fixed: `<root>/.squad` itself plus `<child>/.squad` for each
+**immediate** subdirectory of the root. There is no deeper recursion, and neither a
+symlinked subdirectory nor a symlinked `.squad` is followed — for checkouts nested
+further down (`~/src/org/repo`), point `--root` at their parent. The default root is
+resolved from where this squad checkout lives, not from your working directory.
+For each room found, heal adds the same `.git/info/exclude` entry as the runtime,
+unless something already ignores it. It never opens the database, never registers
+presence, never creates a `.squad/` where none exists, and never touches tracked
+files. Output lists each exclude file written (`wrote:`), rooms skipped (`skip:` —
+not in a git working tree, or a symlink) and failures (`FAILED:`), then a count;
+a second run writes nothing. Any room left unhealed makes the command exit nonzero.
+
+An actual `install.sh` install/update (not `--check`, not `--dry-run`, not
+uninstall) runs `squad heal` once, after writing its own files, over the parent of
+the squad source checkout (set `SQUAD_HEAL_ROOT` to use a different root). A heal
+failure is printed as a warning naming the affected rooms and the command to
+rerun; it does not undo the installation.
 
 If CLI linking is declined or unavailable, use
 `node /absolute/path/to/squad/dist/index.js <command>` instead of `squad`.

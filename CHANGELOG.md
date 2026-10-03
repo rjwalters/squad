@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.9
+
+- `squad heal [--root <dir>]` (#132) keeps rooms that earlier versions left
+  untracked out of `git status` without opening them: for `<root>/.squad` and
+  each immediate subdirectory's `.squad` (no recursion, symlinks not followed;
+  default root is the parent of the squad source checkout) it adds the room to
+  that repo's `.git/info/exclude` unless already ignored. It never opens a
+  database, registers presence or creates a room, reports writes, skips and
+  failures with a count, writes nothing on a second run, and exits nonzero if
+  a room is left unhealed. An actual `install.sh` install/update runs it once
+  (`SQUAD_HEAL_ROOT` overrides the root); `--check`, `--dry-run` and uninstall
+  never do, and a heal failure warns without undoing the install.
+
 ## 0.19.8
 
 - `squad who`, `squad_join` and `squad_check` now tell apart the live

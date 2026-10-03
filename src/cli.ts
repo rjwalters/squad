@@ -16,6 +16,7 @@ import {
 import { existsSync, statSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { formatRoomDoctorReport } from "./room-doctor.js";
+import { HEAL_USAGE, formatHealReport, healRooms, parseHealArgs } from "./room-heal.js";
 import {
   relayConfigFromEnv,
   relayKnownTargets,
@@ -122,6 +123,7 @@ const COMMAND_USAGE: Record<string, string> = {
   diverge: "usage: squad diverge [open|submit|status|close] ...",
   doctor: "usage: squad doctor [--room]",
   export: "usage: squad export <path>",
+  heal: HEAL_USAGE,
   goals: "usage: squad goals [add <text...> | done <id> | reopen <id>]",
   import: "usage: squad import <path>",
   integration:
@@ -260,6 +262,13 @@ Human CLI usage:
                                with the verified integration ledger. Every
                                finding cites its evidence, age and a concrete
                                next command; never writes to the room.
+  squad heal [--root <dir>]   Keep dormant rooms out of git: for <root>/.squad
+                               and each immediate subdirectory's .squad (no
+                               recursion, symlinks not followed), add the room
+                               to that repo's .git/info/exclude unless already
+                               ignored. Default root: the parent of this squad
+                               checkout. Never opens a room or creates one;
+                               exits nonzero if any room is left unhealed
   squad help                  Show this help
   squad <command> --help      One-line usage for that command, printed without
                                running it (no message sent, nothing cleared)
@@ -605,6 +614,14 @@ export async function runCli(argv: string[]): Promise<void> {
     } finally {
       db.close();
     }
+    return;
+  }
+  if (cmd === "heal") {
+    // Handled before the shared openDb()/`new Squad` below (#132): healing
+    // reaches rooms nobody has open, so it must not open, join or create one.
+    const report = healRooms(parseHealArgs(rest).root);
+    process.stdout.write(formatHealReport(report));
+    if (report.failed.length) process.exitCode = 1;
     return;
   }
   if (cmd === "codex-reentry") {
@@ -1324,6 +1341,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "nuke",
       "path",
       "doctor",
+      "heal",
       "codex-reentry",
       "relay",
       "help",

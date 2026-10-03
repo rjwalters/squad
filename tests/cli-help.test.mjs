@@ -46,6 +46,7 @@ const DOCUMENTED = [
   "bank",
   "integration",
   "doctor",
+  "heal",
   "path",
 ];
 

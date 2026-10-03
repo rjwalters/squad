@@ -26,6 +26,9 @@ function fixture(name) {
     ...process.env,
     HOME: home,
     CODEX_HOME: join(home, "custom-codex"),
+    // Install heals dormant rooms under the source checkout's parent (#132);
+    // keep every fixture's heal inside its own scratch home.
+    SQUAD_HEAL_ROOT: home,
   };
   delete env.SQUAD_CLAUDE_PERSONA;
   delete env.SQUAD_CODEX_PERSONA;
@@ -648,3 +651,61 @@ test("relative global Codex launchers remain preserved and require cwd verificat
   assert.match(output, /relative global Codex runtime path depends on each project's working directory/);
   assert.equal(readFileSync(configPath, "utf8"), config);
 });
+/** A git checkout beside the target holding a pre-#111 room nobody ignores. */
+function dormantRoom(home, name) {
+  const checkout = join(home, name);
+  mkdirSync(join(checkout, ".squad"), { recursive: true });
+  assert.equal(spawnSync("git", ["init", "-q", checkout]).status, 0);
+  writeFileSync(join(checkout, ".squad", "squad.db"), "room");
+  const exclude = join(checkout, ".git", "info", "exclude");
+  return {
+    exclude,
+    healed: () =>
+      existsSync(exclude) &&
+      readFileSync(exclude, "utf8").split("\n").includes(".squad/"),
+    status: () =>
+      spawnSync("git", ["-C", checkout, "status", "--porcelain"], {
+        encoding: "utf8",
+      }).stdout,
+  };
+}
+test("install/update heals dormant rooms once; check, dry-run and uninstall never do (#132)", () => {
+  const { home, run } = fixture("heal-modes");
+  const room = dormantRoom(home, "old checkout");
+  run("install.sh", ["--dry-run"]);
+  assert.equal(room.healed(), false, "--dry-run must not heal");
+  run("install.sh", ["--check"], 1);
+  assert.equal(room.healed(), false, "--check must not heal");
+  const installed = run();
+  assert.ok(room.healed(), installed);
+  assert.equal(room.status(), "");
+  assert.equal(installed.match(/^heal: \d+ exclude/gm)?.length, 1, installed);
+  assert.match(installed, new RegExp(`wrote: ${escapeForRe(room.exclude)}`));
+  const once = readFileSync(room.exclude, "utf8");
+  // An update run: still exactly one heal, and nothing left to write.
+  const updated = run();
+  assert.match(updated, /^heal: 0 exclude file\(s\) written/m);
+  assert.equal(readFileSync(room.exclude, "utf8"), once);
+  // A fresh dormant room appearing later is untouched by uninstall.
+  const later = dormantRoom(home, "later");
+  run("uninstall.sh");
+  assert.equal(later.healed(), false, "uninstall must not heal");
+});
+test("a heal failure warns without undoing a successful install (#132)", () => {
+  const { home, repo, run } = fixture("heal-failure");
+  const broken = dormantRoom(home, "broken");
+  rmSync(join(home, "broken", ".git", "info"), { recursive: true, force: true });
+  writeFileSync(join(home, "broken", ".git", "info"), "not a directory");
+  const fine = dormantRoom(home, "fine");
+  const output = run();
+  assert.match(output, /warning: room healing did not finish; installation itself succeeded/);
+  assert.match(output, /FAILED: .*broken/);
+  assert.match(output, /rerun after fixing: node .* heal --root /);
+  assert.ok(fine.healed(), "the healable sibling is still healed");
+  assert.equal(broken.healed(), false);
+  assert.ok(existsSync(join(repo, ".agents/skills/squad/SKILL.md")));
+  run("install.sh", ["--check"]);
+});
+function escapeForRe(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}

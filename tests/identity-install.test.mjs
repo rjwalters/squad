@@ -17,7 +17,8 @@ function install(name, config, claudeEnv) {
       join(repo, ".mcp.json"),
       JSON.stringify({ mcpServers: { squad: { env: claudeEnv } } }),
     );
-  const env = { ...process.env, HOME: home };
+  // SQUAD_HEAL_ROOT keeps install's room heal (#132) inside the fixture.
+  const env = { ...process.env, HOME: home, SQUAD_HEAL_ROOT: home };
   delete env.SQUAD_CLAUDE_PERSONA;
   delete env.SQUAD_CODEX_PERSONA;
   const result = spawnSync("bash", ["install.sh", "-y", "--no-link", repo], {
