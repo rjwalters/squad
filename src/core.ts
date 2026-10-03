@@ -47,9 +47,13 @@ export interface Message {
   /**
    * The posting connection's session id (#135, Option B of #120) -- what
    * distinguishes two sessions sharing one persona, since `sender` alone
-   * cannot. Stable across calls for a session resumed via `SQUAD_SESSION_ID`;
-   * a fresh id for each non-resuming session. NULL for rows written before
-   * the column existed. A collapsed `"system"` repeat keeps the session id
+   * cannot. For a pinned persona (`SQUAD_PERSONA`), a session resumed via
+   * `SQUAD_SESSION_ID` keeps the same stored value. For an automatic
+   * identity, `SQUAD_SESSION_ID` is the resume token and must never be
+   * readable in the room, so each process stores its own per-process presence
+   * id instead; the persona, which is unique per automatic identity, already
+   * tells them apart. Each non-resuming session gets a fresh id. NULL for
+   * rows written before the column existed. A collapsed `"system"` repeat keeps the session id
    * of the row it collapsed into.
    */
   session_id: string | null;
