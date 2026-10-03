@@ -715,6 +715,85 @@ test("a co-named session whose lease expired is not a live collision", () => {
   );
 });
 
+// --- per-session presence for a shared persona (#136) ---------------------
+
+test("members() lists each live session of a shared persona in sessions_detail", () => {
+  claude.clear();
+  const seatA = new Squad(db, "codex");
+  const seatB = new Squad(db, "codex");
+  seatA.join();
+  const joined = seatB.join();
+  // The #50 collision note is unchanged by the per-session breakdown.
+  assert.deepEqual(joined.identity_collision.session_ids, [seatA.sessionId]);
+
+  const member = claude.members().find((m) => m.persona === "codex");
+  assert.equal(member.sessions, 2, "the rollup count is kept");
+  assert.equal(member.sessions_detail.length, 2);
+  assert.deepEqual(
+    new Set(member.sessions_detail.map((s) => s.session_id)),
+    new Set([seatA.sessionId, seatB.sessionId]),
+  );
+  for (const s of member.sessions_detail) {
+    assert.deepEqual(Object.keys(s).sort(), [
+      "joined_at",
+      "last_seen",
+      "lease_expires_at",
+      "session_id",
+      "state",
+    ]);
+    assert.equal(s.state, "active");
+  }
+  // Freshest first, like members() itself.
+  const seen = member.sessions_detail.map((s) => s.last_seen);
+  assert.deepEqual(seen, [...seen].sort().reverse());
+  // peers() carries the same breakdown; a persona still excludes itself.
+  assert.equal(claude.peers().find((m) => m.persona === "codex").sessions_detail.length, 2);
+  assert.ok(!seatA.peers().some((m) => m.persona === "codex"));
+});
+
+test("a single-session persona has no sessions_detail", () => {
+  claude.clear();
+  new Squad(db, "fable").join();
+  const member = claude.members().find((m) => m.persona === "fable");
+  assert.equal(member.sessions, 1);
+  assert.equal("sessions_detail" in member, false, "single-session payload is unchanged");
+});
+
+test("sessions_detail uses members()' liveness: left sessions out, expired ones stale", () => {
+  claude.clear();
+  const leaver = new Squad(db, "codex");
+  leaver.join();
+  const stayer = new Squad(db, "codex");
+  stayer.join();
+  db.prepare("UPDATE sessions SET left_ts = ? WHERE session_id = ?").run(
+    new Date().toISOString(),
+    leaver.sessionId,
+  );
+  const one = claude.members().find((m) => m.persona === "codex");
+  assert.equal(one.sessions, 1, "one live + one left counts as one live session");
+  assert.equal("sessions_detail" in one, false);
+
+  // A third seat whose lease has expired is still listed — as stale — exactly
+  // as members() keeps a lease-expired persona listed as stale.
+  const expired = new Squad(db, "codex");
+  expired.join();
+  const past = new Date(Date.now() - (DEFAULT_STALE_MINUTES + 1) * 60_000).toISOString();
+  db.prepare("UPDATE sessions SET last_seen = ?, lease_expires_at = ? WHERE session_id = ?").run(
+    past,
+    past,
+    expired.sessionId,
+  );
+  const two = claude.members().find((m) => m.persona === "codex");
+  assert.equal(two.sessions, 2);
+  assert.deepEqual(
+    two.sessions_detail.map((s) => [s.session_id, s.state]),
+    [
+      [stayer.sessionId, "active"],
+      [expired.sessionId, "stale"],
+    ],
+  );
+});
+
 // --- a caller-supplied session id is one logical session (#124) --------
 
 /** Session rows a persona holds, live ones first; `left_ts` included. */

@@ -110,3 +110,33 @@ test("repeated CLI calls sharing SQUAD_SESSION_ID hold one session, not one per 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("squad who lists each live session of a shared persona by short id (#136)", () => {
+  const dir = freshDir();
+  const seat = (id) => ({ SQUAD_DIR: dir, SQUAD_PERSONA: "codex", SQUAD_SESSION_ID: id });
+  const idA = "aaaa1111-0136-4136-8136-000000000001";
+  const idB = "bbbb2222-0136-4136-8136-000000000002";
+  try {
+    // A single-session persona renders exactly as before: one line, no count.
+    runCli(["send", "solo"], { SQUAD_DIR: dir, SQUAD_PERSONA: "claude" });
+    for (const id of [idA, idB]) {
+      const res = runCli(["read", "-n", "1"], seat(id));
+      assert.equal(res.status, 0, res.stdout + res.stderr);
+    }
+    const out = runCli(["who"], { SQUAD_DIR: dir }).stdout;
+    const lines = out.trimEnd().split("\n");
+    const head = lines.findIndex((l) => l.startsWith("codex\t"));
+    assert.match(lines[head], /^codex\tactive\tlast seen \S+ \(2 sessions\)$/);
+    // Freshest first: seat B touched the room last.
+    assert.match(lines[head + 1], /^ {2}session bbbb2222\tactive\tlast seen \S+$/);
+    assert.match(lines[head + 2], /^ {2}session aaaa1111\tactive\tlast seen \S+$/);
+    assert.match(out, /^claude\tactive\tlast seen \S+$/m);
+    assert.equal(
+      lines.filter((l) => l.startsWith("  session ")).length,
+      2,
+      "only the shared persona gets per-session lines",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.8
+
+- `squad who`, `squad_join` and `squad_check` now tell apart the live
+  sessions of a shared persona (#136). When a persona holds more than one
+  live session, `Member` gains an optional `sessions_detail` array (one
+  `{session_id, joined_at, last_seen, lease_expires_at, state}` per session,
+  freshest first) alongside the existing `sessions` count, and `squad who`
+  prints one indented `  session <first 8 chars of id>\t<state>\tlast seen
+  <ts>` line per session under the persona's usual line. A single-session
+  persona is reported exactly as before. Liveness matches `members()`: left
+  sessions are excluded, lease-expired ones are listed as `stale`.
+
 ## 0.19.7
 
 - Messages now record the posting connection's `session_id` (#135), so two

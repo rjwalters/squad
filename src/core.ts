@@ -108,6 +108,40 @@ export interface Member {
   state: PresenceState;
   /** How many live sessions this persona holds (usually 1). */
   sessions: number;
+  /**
+   * One entry per live session, freshest first — present only when
+   * `sessions > 1`, i.e. when unrelated agents share this persona and the
+   * rolled-up presence cannot say which of them is active (#120, #136).
+   * Omitted for a single-session persona, whose payload is unchanged.
+   */
+  sessions_detail?: MemberSession[];
+}
+
+/**
+ * One live session of a shared persona, as listed in
+ * `Member.sessions_detail`. `session_id` is the full presence-session id —
+ * the same value `Message.session_id` records — so a message can be matched
+ * to the seat that posted it; `shortSessionId()` gives its display form.
+ */
+export interface MemberSession {
+  session_id: string;
+  joined_at: string;
+  last_seen: string;
+  lease_expires_at: string;
+  state: PresenceState;
+}
+
+/** Characters of a session id shown wherever a session is displayed. */
+export const SHORT_SESSION_ID_LENGTH = 8;
+
+/**
+ * The display form of a presence-session id (its first
+ * SHORT_SESSION_ID_LENGTH characters), used by `squad who` to tell apart
+ * the sessions of a shared persona. Full ids are stored and returned in
+ * payloads; this is only how they are rendered for a human.
+ */
+export function shortSessionId(sessionId: string): string {
+  return sessionId.slice(0, SHORT_SESSION_ID_LENGTH);
 }
 
 /** An advisory claim on a file path (or freeform label). Never a lock. */
@@ -2197,14 +2231,52 @@ export class Squad {
       member_first_seen: string | null;
     }>;
     const nowMs = Date.now();
-    return rows.map((r) => ({
-      persona: r.persona,
-      first_seen: r.member_first_seen ?? r.session_first_seen,
-      last_seen: r.last_seen,
-      lease_expires_at: r.lease_expires_at,
-      state: presenceState(r.last_seen, r.lease_expires_at, nowMs),
-      sessions: r.sessions,
-    }));
+    // Per-session breakdown for shared personas only (#136). Same liveness
+    // filter as the rollup above (left_ts IS NULL), so a left session is
+    // gone from both and a lease-expired one is in both, as `stale`.
+    const shared = rows.filter((r) => r.sessions > 1).map((r) => r.persona);
+    const detail = new Map<string, MemberSession[]>();
+    if (shared.length > 0) {
+      const sessionRows = this.db
+        .prepare(
+          `SELECT session_id, persona, joined_at, last_seen, lease_expires_at
+             FROM sessions
+            WHERE left_ts IS NULL
+              AND persona IN (${shared.map(() => "?").join(", ")})
+            ORDER BY last_seen DESC, session_id ASC`,
+        )
+        .all(...shared) as unknown as Array<{
+        session_id: string;
+        persona: string;
+        joined_at: string;
+        last_seen: string;
+        lease_expires_at: string;
+      }>;
+      for (const s of sessionRows) {
+        const list = detail.get(s.persona) ?? [];
+        list.push({
+          session_id: s.session_id,
+          joined_at: s.joined_at,
+          last_seen: s.last_seen,
+          lease_expires_at: s.lease_expires_at,
+          state: presenceState(s.last_seen, s.lease_expires_at, nowMs),
+        });
+        detail.set(s.persona, list);
+      }
+    }
+    return rows.map((r) => {
+      const member: Member = {
+        persona: r.persona,
+        first_seen: r.member_first_seen ?? r.session_first_seen,
+        last_seen: r.last_seen,
+        lease_expires_at: r.lease_expires_at,
+        state: presenceState(r.last_seen, r.lease_expires_at, nowMs),
+        sessions: r.sessions,
+      };
+      const sessions = detail.get(r.persona);
+      if (sessions) member.sessions_detail = sessions;
+      return member;
+    });
   }
 
   /** members() minus yourself: the peers whose presence you actually need. */

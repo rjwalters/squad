@@ -5,6 +5,7 @@ import {
   CARD_TERMINAL_PHASES,
   REVIEW_PRIORITIES,
   REVIEW_STATUSES,
+  shortSessionId,
   type CardPhase,
   type CardUpdateFields,
   type EvidenceType,
@@ -136,7 +137,7 @@ const COMMAND_USAGE: Record<string, string> = {
   send: "usage: squad send [--room <repo-path>] <text...>",
   steward: "usage: squad steward <status|tick>",
   tail: "usage: squad tail (follow the room live; Ctrl-C to stop)",
-  who: "usage: squad who (presence state and last-seen times for everyone in the room)",
+  who: "usage: squad who (presence state and last-seen times for everyone in the room, per session for a shared persona)",
 };
 
 const HELP = `squad — local cross-agent chat room with shared goals
@@ -212,7 +213,9 @@ Human CLI usage:
                                fields (e.g. --insights) take a comma-separated
                                value.
   squad who                   Show who is in the room: presence (active/idle/
-                               stale) and last-seen times
+                               stale) and last-seen times; a persona with
+                               several live sessions also lists each one,
+                               indented, by short (8-char) session id
   squad leave                 End this persona's presence lease(s) and announce
                                the departure in chat
   squad clear                 Wipe messages, goals, claims, cursors, members,
@@ -1243,6 +1246,12 @@ export async function runCli(argv: string[]): Promise<void> {
       for (const m of members) {
         const extra = m.sessions > 1 ? ` (${m.sessions} sessions)` : "";
         console.log(`${m.persona}\t${m.state}\tlast seen ${m.last_seen}${extra}`);
+        // A shared persona (#136): one indented line per live session, so
+        // which seat is active is answerable. Single-session personas print
+        // only the line above, exactly as before.
+        for (const s of m.sessions_detail ?? []) {
+          console.log(`  session ${shortSessionId(s.session_id)}\t${s.state}\tlast seen ${s.last_seen}`);
+        }
       }
       break;
     }
