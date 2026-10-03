@@ -244,9 +244,24 @@ test("import rejects a schema-9 export (pre-session_id messages) with the clear 
   await src.squad.exportRoom(exportPath);
 
   // Reshape the artifact into what a schema-9 build produced: no
-  // messages.session_id column, stamped user_version 9.
+  // messages.session_id column, stamped user_version 9. Rebuild the table with
+  // the v9 DDL rather than dropping the column in place: an in-place column drop
+  // depends on how each SQLite version rewrites the stored schema text.
   const old = new DatabaseSync(exportPath);
-  old.exec("ALTER TABLE messages DROP COLUMN session_id");
+  old.exec(`
+    CREATE TABLE messages_v9 (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sender TEXT NOT NULL,
+      kind TEXT NOT NULL DEFAULT 'chat',
+      body TEXT NOT NULL,
+      ts TEXT NOT NULL,
+      occurrences INTEGER NOT NULL DEFAULT 1
+    );
+    INSERT INTO messages_v9 (id, sender, kind, body, ts, occurrences)
+      SELECT id, sender, kind, body, ts, occurrences FROM messages;
+  `);
+  old.exec("DROP TABLE messages");
+  old.exec("ALTER TABLE messages_v9 RENAME TO messages");
   old.exec("PRAGMA user_version = 9");
   old.close();
 

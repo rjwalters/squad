@@ -189,6 +189,13 @@ CREATE TABLE IF NOT EXISTS agent_identities (
   identity_id TEXT PRIMARY KEY,
   persona TEXT NOT NULL UNIQUE
 );
+-- messages.session_id is the posting connection's session id (#135, Option B
+-- of #120): it tells apart two sessions sharing one persona. NULL for rows
+-- written before the column existed. It must stay the last column so that a
+-- migrated db has the same column order as this DDL. Keep comments out of the
+-- column list: SQLite stores this text verbatim, and older SQLite versions
+-- (Node 22's) mis-splice the stored DDL when altering a column that follows
+-- an inline comment containing a comma.
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   sender TEXT NOT NULL,
@@ -196,9 +203,6 @@ CREATE TABLE IF NOT EXISTS messages (
   body TEXT NOT NULL,
   ts TEXT NOT NULL,
   occurrences INTEGER NOT NULL DEFAULT 1,
-  -- The posting connection's session id (#135, Option B of #120): tells apart
-  -- two sessions sharing one persona. NULL for rows written before the column
-  -- existed. Must stay last so a migrated db's column order matches this DDL.
   session_id TEXT
 );
 -- The persona's durable read high-water mark. No longer the cursor check()
