@@ -1,5 +1,5 @@
 import { identityFromEnv } from "./identity.js";
-import { openDb, openDbReadOnly, dbPath, squadDir } from "./db.js";
+import { openDb, openDbReadOnly, dbPath, squadDir, findRepoRoot } from "./db.js";
 import {
   Squad,
   CARD_TERMINAL_PHASES,
@@ -12,7 +12,8 @@ import {
   type ReviewPriority,
   type ReviewStatus,
 } from "./core.js";
-import { rmSync } from "node:fs";
+import { existsSync, statSync, rmSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { formatRoomDoctorReport } from "./room-doctor.js";
 import {
   relayConfigFromEnv,
@@ -132,7 +133,7 @@ const COMMAND_USAGE: Record<string, string> = {
   read: "usage: squad read [-n N] (show the last N messages, default 30; stateless)",
   release: "usage: squad release <path>",
   review: "usage: squad review [open|list|show|claim|resolve|cancel] ...",
-  send: "usage: squad send <text...>",
+  send: "usage: squad send [--room <repo-path>] <text...>",
   steward: "usage: squad steward <status|tick>",
   tail: "usage: squad tail (follow the room live; Ctrl-C to stop)",
   who: "usage: squad who (presence state and last-seen times for everyone in the room)",
@@ -146,6 +147,9 @@ Human CLI usage:
   squad bank <attempt-id> [--build-timeout-ms N]  Integrate exact committed work; selected paths must be clean against configured HEAD
   squad integration show|check|set|unset|submit|attempt|attempts (see docs/integration.md)
   squad send <text...>        Post a message to the room
+  squad send --room <repo-path> <text...>
+                               Post into another repo's existing room (leading
+                               args only; fails if that repo has no room yet)
   squad read [-n N]           Show the last N messages (default 30; stateless)
   squad tail                  Follow the room live (Ctrl-C to stop)
   squad goals                 Show the goal board (open + done)
@@ -511,8 +515,41 @@ async function runRelay(command: RelayCommand): Promise<void> {
   }
 }
 
+/**
+ * `squad send --room <repo-path> <text...>` (#123): address another repo's room
+ * without spelling out SQUAD_DIR. Only the *leading* args are parsed (send takes
+ * prose), and only for `send` (`doctor --room` is an unrelated boolean flag).
+ * Strips the flag and path from `rest` and points SQUAD_DIR at the resolved
+ * room. Fails loudly, creating nothing, if the path is not in a repo or that
+ * repo has no squad.db: an explicitly addressed foreign room must already
+ * exist, or a typo would mint a room nobody watches.
+ */
+function applySendRoom(rest: string[]): void {
+  const path = rest[1];
+  if (!path) throw new Error(COMMAND_USAGE.send);
+  const abs = resolve(path);
+  let isDir = false;
+  try {
+    isDir = statSync(abs).isDirectory();
+  } catch {
+    // fall through
+  }
+  if (!isDir) throw new Error(`--room path is not a directory: ${abs}\n${COMMAND_USAGE.send}`);
+  const root = findRepoRoot(abs);
+  if (!root) throw new Error(`--room path is not inside a repo: ${abs}\n${COMMAND_USAGE.send}`);
+  const dir = join(root, ".squad");
+  if (!existsSync(join(dir, "squad.db"))) {
+    throw new Error(
+      `no squad room at ${dir}; run install there or create it by running squad inside that repo`,
+    );
+  }
+  process.env.SQUAD_DIR = dir;
+  rest.splice(0, 2);
+}
+
 export async function runCli(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
+  if (cmd === "send" && rest[0] === "--room") applySendRoom(rest);
   if (cmd === "help" || cmd === "--help" || cmd === "-h" || cmd === undefined) {
     process.stdout.write(HELP);
     return;

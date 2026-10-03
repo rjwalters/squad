@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.5
+
+- `squad send --room <repo-path> <text...>` posts into another repo's room
+  without spelling out `SQUAD_DIR=<repo>/.squad` (#123). The path resolves to
+  its repo root (a linked worktree maps to the primary clone, same as plain
+  `squad`), `--room` is honored only as the leading argument so message prose
+  is never parsed, and it fails loudly, creating nothing, if the path is not a
+  directory, not inside a repo, or that repo has no room yet, so a typo cannot
+  mint a room nobody watches. `squad doctor --room` and plain `squad send` are
+  unchanged.
+
 ## 0.19.4
 
 - Sub-action `--help`/`-h` now prints usage instead of being taken as content

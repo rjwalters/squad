@@ -306,8 +306,9 @@ The `Stop` hook above covers an agent that is *finishing* a turn. The common
 case it cannot reach is an agent **in the middle of a long task** in its own
 repo — one that may never have run `/squad:join`, and will not call
 `squad_check` for another hour. Squad is pull-only, so a directed message sent
-from outside that session (`SQUAD_DIR=<repo>/.squad squad send "@<persona>
-…"`) sits unread with nothing to put it in front of the agent.
+from outside that session (`squad send --room <repo> "@<persona> …"`, which
+refuses to create a room that does not exist) sits unread with nothing to put
+it in front of the agent.
 
 `./install.sh --inbox` (off by default; same `SQUAD_CLAUDE_PERSONA`
 requirement as `--reentry`, for the same reason) installs

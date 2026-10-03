@@ -38,7 +38,7 @@ export async function runMcpServer(): Promise<void> {
   // never able to block or fail the tool call that inserted the message.
   squad.onMessageInserted = opportunisticRelay(db);
 
-  const server = new McpServer({ name: "squad", version: "0.19.4" });
+  const server = new McpServer({ name: "squad", version: "0.19.5" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
