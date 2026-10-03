@@ -283,6 +283,69 @@ test("opening a squad.db whose messages table predates occurrences adds the colu
   }
 });
 
+// --- messages.session_id column migration (#135) -------------------------
+
+test("opening a schema-9 squad.db adds a nullable messages.session_id, NULL history, column order matching fresh DDL", () => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-migration-session-id-"));
+  const dbFile = join(dir, "squad.db");
+  try {
+    // messages exactly as a schema-9 build created it (post-#59, pre-#135).
+    const seed = new DatabaseSync(dbFile);
+    seed.exec(`
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'chat',
+        body TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        occurrences INTEGER NOT NULL DEFAULT 1
+      );
+      PRAGMA user_version = 9;
+    `);
+    seed
+      .prepare("INSERT INTO messages (sender, kind, body, ts) VALUES (?, ?, ?, ?)")
+      .run("claude", "chat", "pre-#135 message", "2026-01-01T00:00:00.000Z");
+    seed.close();
+
+    process.env.SQUAD_DIR = dir;
+    const db = openDb();
+    assert.deepEqual(
+      messageColumnNames(db),
+      ["id", "sender", "kind", "body", "ts", "occurrences", "session_id"],
+      "migrated column order matches the fresh-create DDL",
+    );
+    const col = db.prepare("PRAGMA table_info(messages)").all().find((c) => c.name === "session_id");
+    assert.equal(col.notnull, 0, "session_id is nullable");
+    assert.equal(col.dflt_value, null, "session_id has no default");
+    const old = db.prepare("SELECT * FROM messages WHERE body = 'pre-#135 message'").get();
+    assert.equal(old.session_id, null, "pre-existing history keeps NULL");
+    db.close();
+
+    // A fresh room has the identical column list.
+    const freshDir = mkdtempSync(join(tmpdir(), "squad-migration-session-id-fresh-"));
+    try {
+      process.env.SQUAD_DIR = freshDir;
+      const fresh = openDb();
+      assert.deepEqual(messageColumnNames(fresh), ["id", "sender", "kind", "body", "ts", "occurrences", "session_id"]);
+      fresh.close();
+    } finally {
+      rmSync(freshDir, { recursive: true, force: true });
+    }
+
+    // Idempotent re-open; the old row stays NULL.
+    process.env.SQUAD_DIR = dir;
+    const reopened = openDb();
+    assert.equal(
+      reopened.prepare("SELECT session_id FROM messages WHERE body = 'pre-#135 message'").get().session_id,
+      null,
+    );
+    reopened.close();
+  } finally {
+    delete process.env.SQUAD_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // --- relay_cursors (#112) --------------------------------------------------
 
 test("opening a pre-relay squad.db adds relay_cursors without disturbing the room", () => {

@@ -211,3 +211,65 @@ test("clear followed by reuse restores an automatic reservation", () => {
     name,
   );
 });
+
+// --- messages.session_id (#135, Option B of #120) --------------------------
+
+function storedSessionId(id) {
+  return db.prepare("SELECT session_id FROM messages WHERE id = ?").get(id).session_id;
+}
+
+test("two non-resuming sessions sharing one persona store distinct message session_ids", () => {
+  const first = new Squad(db, "shared-pin-135");
+  const second = new Squad(db, "shared-pin-135");
+  const a = first.send("from the first session");
+  const b = second.send("from the second session");
+  assert.equal(a.session_id, first.sessionId);
+  assert.equal(b.session_id, second.sessionId);
+  assert.ok(storedSessionId(a.id));
+  assert.ok(storedSessionId(b.id));
+  assert.notEqual(storedSessionId(a.id), storedSessionId(b.id));
+  // `sender` alone cannot tell them apart -- that is the gap this closes.
+  const rows = db
+    .prepare("SELECT sender, session_id FROM messages WHERE id IN (?, ?) ORDER BY id")
+    .all(a.id, b.id);
+  assert.deepEqual(rows.map((r) => r.sender), ["shared-pin-135", "shared-pin-135"]);
+  assert.deepEqual(rows.map((r) => r.session_id), [first.sessionId, second.sessionId]);
+  // A later send from the same connection keeps its session id.
+  assert.equal(storedSessionId(first.send("again from the first").id), storedSessionId(a.id));
+});
+
+test("a pinned persona resuming via SQUAD_SESSION_ID keeps the same message session_id", () => {
+  const token = "13513513-5135-4135-8135-135135135135";
+  // Each Squad stands in for one short-lived CLI process of one logical session.
+  const m1 = new Squad(db, "resuming-pin-135", { sessionId: token }).send("first process");
+  const m2 = new Squad(db, "resuming-pin-135", { sessionId: token }).send("second process");
+  assert.equal(storedSessionId(m1.id), token);
+  assert.equal(storedSessionId(m2.id), token);
+  // A non-resuming session on the same persona is still distinguishable.
+  const other = new Squad(db, "resuming-pin-135").send("unrelated agent");
+  assert.notEqual(storedSessionId(other.id), token);
+});
+
+test("identity_collision and the #50 refinement convention are unchanged by session_id stamping", () => {
+  const first = new Squad(db, "collide-135");
+  first.join();
+  first.send("before the twin");
+  const twin = new Squad(db, "collide-135");
+  const joined = twin.join();
+  assert.ok(joined.identity_collision, "same-named live session still collides");
+  assert.deepEqual(joined.identity_collision.session_ids, [first.sessionId]);
+  assert.match(joined.identity_collision.note, /re-join with a refined persona like 'collide-135/);
+  // Same-named sessions remain mutually invisible in check(), session_id or not.
+  twin.send("from the twin");
+  assert.equal(first.check().some((m) => m.body === "from the twin"), false);
+});
+
+test("a system repeat collapsed into a prior row keeps that row's session_id", () => {
+  const s = new Squad(db, "collapse-135");
+  const one = s.send("repeating notice 135", "system");
+  const two = s.send("repeating notice 135", "system");
+  assert.equal(two.id, one.id);
+  assert.equal(two.occurrences, 2);
+  assert.equal(two.session_id, one.session_id);
+  assert.equal(storedSessionId(one.id), s.sessionId);
+});
