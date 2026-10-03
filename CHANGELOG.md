@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.6
+
+- Docs: an agent outside a room's intended cast must not reuse another seat's
+  pinned `SQUAD_PERSONA` (#134) — its messages would be stamped with that
+  seat's sender string. It posts under its own persona, in its own room
+  (`SQUAD_DIR`), or does not post. `conventions.md` and `fanout.md` now scope
+  the `<pinned>-N` refinement to sessions of the same workstream, and the
+  README states the rule.
+
 ## 0.19.5
 
 - `squad send --room <repo-path> <text...>` posts into another repo's room

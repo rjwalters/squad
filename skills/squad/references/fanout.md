@@ -36,6 +36,8 @@ optionally `SQUAD_PROVIDER`) when known. Each worker gets an automatic
 
 Identities are `<base>-1 … <base>-N`, where `<base>` is this session's own persona (the pinned `SQUAD_PERSONA`, e.g. `codex` → `codex-1`, `codex-2`, `codex-3`).
 
+Scope: refinement (`<pinned>-N`) is only for sessions of the *same* workstream as the pinned seat. An unrelated agent outside the room's cast must not borrow the pin; it posts under its own persona, in its own room (`SQUAD_DIR`), or does not post (see `conventions.md`).
+
 A pinned identity is a **namespace**, not a fixed name: `codex-2` is accepted because it refines `codex`; `fable` is refused, so the pin still prevents impersonation. The separator is `-` only. If you rename an MCP connection this way (`squad_join` with `persona: "codex-2"` — the multi-session case below, not the subagent case), a refusal comes back as a `note` saying the name is not a refinement of your pinned identity.
 
 ## Steps
