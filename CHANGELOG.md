@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.10
+
+- Instructions now say the squad room is the default channel in a squad repo,
+  including Claude-to-Claude (#141). Claude's built-in cross-session messaging
+  is only a pointer/wake-up for a session not watching the room, or a fallback
+  where squad is not installed; received substance and replies are mirrored
+  into the room, and `join` asks for one concise catch-up summary. Guidance
+  only: no bridge, no tool or schema changes.
+
 ## 0.19.9
 
 - `squad heal [--root <dir>]` (#132) keeps rooms that earlier versions left

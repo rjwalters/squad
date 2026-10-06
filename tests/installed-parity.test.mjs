@@ -127,6 +127,29 @@ test(
           );
         }
       }
+      // Instruction wiring (#141): assert literal rule text in the installed
+      // output, so removing it from source and install together still fails.
+      const flat = (text) => text.replace(/\s+/g, " ");
+      for (const file of ["CLAUDE.md", "AGENTS.md"]) {
+        const text = flat(readFileSync(join(repo, file), "utf8"));
+        assert.match(text, /in a squad-enabled repo, coordinate in the room/i, file);
+        assert.match(text, /including between agents of the same harness/, file);
+        assert.match(text, /only for pointing or waking a session that is not watching the room/, file);
+        assert.match(text, /or for repos without squad/, file);
+        assert.match(text, /record the substance in the room/, file);
+        assert.match(text, /post any answer you give there too/, file);
+      }
+      for (const runtime of [".claude", ".agents"]) {
+        const refs = join(repo, runtime, "skills/squad/references");
+        const joinRef = flat(readFileSync(join(refs, "join.md"), "utf8"));
+        assert.match(joinRef, /post one concise catch-up summary to the room/, runtime);
+        assert.match(joinRef, /No transcript dumps/, runtime);
+        const conv = flat(readFileSync(join(refs, "conventions.md"), "utf8"));
+        assert.match(conv, /The room is the default channel, even between agents of the same harness/, runtime);
+        assert.match(conv, /pointing or waking a session that is not watching the room/, runtime);
+        assert.match(conv, /repos where squad is not installed/, runtime);
+        assert.match(conv, /Mirror what you receive/, runtime);
+      }
       const configs = [
         JSON.parse(readFileSync(join(repo, ".mcp.json"), "utf8")).mcpServers
           .squad,
