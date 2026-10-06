@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import type { Message, Squad } from "./core.js";
+import type { CrossRoomRequestView, Message, PendingDeliveryView, Squad } from "./core.js";
 import type { IntegrationEvidence } from "./integration-ledger.js";
 
 /**
@@ -53,7 +53,9 @@ export type FindingCategory =
   | "overdue_review"
   | "missing_review"
   | "banking_claim_mismatch"
-  | "claim_hygiene";
+  | "claim_hygiene"
+  | "cross_room_request"
+  | "undelivered_reply";
 
 /** One evidence-backed observation. Never a bare conclusion: `evidence` names
  * the durable record behind `summary`, `age_ms` is null only when no
@@ -121,6 +123,10 @@ export interface RoomDoctorInput {
   /** Injected so tests can avoid shelling out to git; defaults to a real,
    * best-effort local object-existence check when omitted. */
   checkCommitExists?: (repository: string, commit: string) => boolean;
+  /** Inbound cross-room requests with no delivered reply (#144), from this room's own routing state. */
+  crossRoomRequests?: CrossRoomRequestView[];
+  /** Stored cross-room replies whose delivery is still pending (#144). */
+  pendingDeliveries?: PendingDeliveryView[];
 }
 
 export interface RoomDoctorReport {
@@ -483,6 +489,32 @@ export function buildRoomDoctorReport(input: RoomDoctorInput): RoomDoctorReport 
     }
   }
 
+  // Cross-room requests (#144): read from durable routing state, never from
+  // the bounded chat scan above and never from the asking room's database.
+  for (const request of input.crossRoomRequests ?? []) {
+    const pending = request.pending_deliveries.length;
+    findings.push({
+      category: "cross_room_request",
+      severity: request.age_ms >= OVERDUE_MS ? "warning" : "info",
+      summary: `Cross-room request #${request.message_id} from ${request.origin_persona} (${request.origin_room}) has no delivered reply${pending ? ` (${pending} reply delivery pending)` : ""}.`,
+      evidence: `request ${request.request_id}, message #${request.message_id} from ${request.sender} at ${request.created_ts}: "${truncate(request.body)}".`,
+      age_ms: request.age_ms,
+      next_step: pending
+        ? `Retry the pending delivery with 'squad send --retry ${request.pending_deliveries[0]!.delivery_id}'.`
+        : `Answer it with 'squad send --reply ${request.message_id} <text...>' (delivered to ${request.origin_persona} in the asking room).`,
+    });
+  }
+  for (const delivery of input.pendingDeliveries ?? []) {
+    findings.push({
+      category: "undelivered_reply",
+      severity: delivery.last_error ? "warning" : "info",
+      summary: `Reply #${delivery.message_id} to ${delivery.recipient} has not been delivered to ${delivery.dest_room}.`,
+      evidence: `delivery ${delivery.delivery_id} for request ${delivery.request_id}, ${delivery.attempts} attempt(s)${delivery.last_error ? `, last error: ${truncate(delivery.last_error)}` : ""}.`,
+      age_ms: delivery.age_ms,
+      next_step: `Retry with 'squad send --retry ${delivery.delivery_id}'; a retry never duplicates a copy that already arrived.`,
+    });
+  }
+
   const by_category: Partial<Record<FindingCategory, number>> = {};
   const by_severity: Record<FindingSeverity, number> = { info: 0, warning: 0, critical: 0 };
   for (const finding of findings) {
@@ -536,6 +568,7 @@ export function formatRoomDoctorReport(report: RoomDoctorReport): string {
     { title: "Reviews", categories: ["overdue_review", "missing_review"] },
     { title: "Banking claim mismatches", categories: ["banking_claim_mismatch"] },
     { title: "Claim hygiene", categories: ["claim_hygiene"] },
+    { title: "Cross-room requests", categories: ["cross_room_request", "undelivered_reply"] },
   ];
   for (const section of sections) {
     const items = report.findings.filter((f) => section.categories.includes(f.category));

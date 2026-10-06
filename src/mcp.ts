@@ -38,7 +38,7 @@ export async function runMcpServer(): Promise<void> {
   // never able to block or fail the tool call that inserted the message.
   squad.onMessageInserted = opportunisticRelay(db);
 
-  const server = new McpServer({ name: "squad", version: "0.19.10" });
+  const server = new McpServer({ name: "squad", version: "0.19.11" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
@@ -130,7 +130,7 @@ export async function runMcpServer(): Promise<void> {
     "squad_room_doctor",
     {
       description:
-        "Read-only room drift report: known unbanked work, integration/outline divergence, overdue/missing independent reviews, claim hygiene, and possible chat 'banked' claims requiring verification against the integration ledger (heuristic warnings, not proven contradictions). Every finding cites its evidence, age and a concrete next command. Declared artifact commits are classified verified-clean, observed-unbanked, unreachable (absent from the configured integration repository) or unobserved (no integration target configured, or the check itself failed) -- an unreachable branch is never conflated with a verified-clean one. Any identity; never mutates the room.",
+        "Read-only room drift report: known unbanked work, integration/outline divergence, overdue/missing independent reviews, claim hygiene, unanswered cross-room requests and undelivered cross-room replies (with age and origin, from durable routing state -- never another room's database), and possible chat 'banked' claims requiring verification against the integration ledger (heuristic warnings, not proven contradictions). Every finding cites its evidence, age and a concrete next command. Declared artifact commits are classified verified-clean, observed-unbanked, unreachable (absent from the configured integration repository) or unobserved (no integration target configured, or the check itself failed) -- an unreachable branch is never conflated with a verified-clean one. Any identity; never mutates the room.",
       inputSchema: z
         .object({
           message_limit: z
@@ -332,7 +332,9 @@ export async function runMcpServer(): Promise<void> {
         "stale, with a per-session sessions_detail list when a persona holds more than one " +
         "live session — plus the current open goals, the advisory file claims, any directed review " +
         "requests still gating you (pending_reviews, most urgent first), and recent chat " +
-        "history. Your lease renews on every squad_* call, so nothing extra is needed to stay " +
+        "history, plus cross_room_requests (requests sent here from other repos' rooms with no " +
+        "delivered reply yet, oldest first, with age_ms and origin -- answer one with squad_send " +
+        "reply_to) and pending_deliveries (stored replies still awaiting delivery). Your lease renews on every squad_* call, so nothing extra is needed to stay " +
         "active; call squad_leave when you are done. Advances your read cursor past the " +
         "returned history, so squad_check afterwards yields only new messages. Idempotent — " +
         "call again anytime to re-sync. Unpinned, your identity is '<label>-<4 random hex>' (e.g. " +
@@ -401,10 +403,42 @@ export async function runMcpServer(): Promise<void> {
     {
       description:
         "Post a message to the squad room. Everyone in the room sees it on their next check. " +
-        "Address a specific teammate with an @mention in the body (e.g. '@codex can you take #2?').",
-      inputSchema: { body: z.string().min(1).describe("The message text") },
+        "Address a specific teammate with an @mention in the body (e.g. '@codex can you take #2?'). " +
+        "Pass reply_to (a message id from this room) to reply explicitly. Replying to a cross-room " +
+        "request -- a message whose route.direction is 'inbound', sent here from another repo's room " +
+        "with 'squad send --room' -- stores the reply here and delivers one copy, @addressed to the " +
+        "original asker, into the asking room (route metadata in this room decides where; you cannot " +
+        "supply a return path). The asker's whole room can read that copy, as with any room message. " +
+        "Any other reply stays local. Either room's routing.json policy can refuse the reply (nothing is " +
+        "stored then). If delivery fails after the reply is stored, the error names a delivery id: the " +
+        "request stays outstanding and squad_retry_delivery retries it without risk of a duplicate.",
+      inputSchema: {
+        body: z.string().min(1).describe("The message text"),
+        reply_to: z
+          .number()
+          .int()
+          .positive()
+          .optional()
+          .describe("Id of the message in this room you are replying to"),
+      },
     },
-    async ({ body }) => json(squad.send(body)),
+    async ({ body, reply_to }) => json(reply_to === undefined ? squad.send(body) : squad.reply(reply_to, body)),
+  );
+
+  server.registerTool(
+    "squad_retry_delivery",
+    {
+      description:
+        "Retry delivering a stored cross-room reply whose delivery failed (the delivery_id from the " +
+        "failure, or from pending_deliveries in squad_join / squad_room_doctor). Idempotent: a copy " +
+        "that already arrived in the asking room is never duplicated, and an already-delivered id " +
+        "returns status 'already-delivered'. Marks the request answered only once delivery succeeds.",
+      inputSchema: { delivery_id: z.string().min(1).describe("The delivery id to retry") },
+    },
+    async ({ delivery_id }) => {
+      squad.touch();
+      return json(squad.retryDelivery(delivery_id));
+    },
   );
 
   server.registerTool(
@@ -417,6 +451,9 @@ export async function runMcpServer(): Promise<void> {
         "tell a pause from a dead session without re-joining, plus your own renewed lease. " +
         "Also returns integration configuration, known pending/failed/verified submission counts, and local_work_visibility=unobserved. Also returns pending_review_count/pending_reviews: the directed review requests still " +
         "gating you, most urgent first, so you can work by priority instead of by chat order. " +
+        "Also returns cross_room_request_count/cross_room_requests: requests from other rooms with no " +
+        "delivered reply yet. A message routed across rooms carries a route object (direction " +
+        "inbound/reply/delivered/local-reply, request_id, remote_room, remote_persona). " +
         "Pass wait_seconds to long-poll: the call blocks until a new message " +
         "arrives or the wait expires, which is how to hold a live conversation without busy-" +
         "polling. Keep wait_seconds at 25 or below unless the MCP tool timeout has been raised. " +

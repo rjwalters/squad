@@ -1,7 +1,7 @@
 import { adoptNodes } from "./nodes.js";
 import { DatabaseSync } from "node:sqlite";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -25,8 +25,12 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
  * is invisible to clear()/exportRoom()/importRoom() and therefore does not
  * move this number: bumping it for such a table would reject every previously
  * produced export for no compatibility gain.
+ *
+ * 10 -> 11 (#144): the cross-room routing tables message_routes and
+ * route_deliveries joined ROOM_TABLES. Room state, so they travel with an
+ * export; a v10 export is refused by import like any other version mismatch.
  */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 /**
  * Parses an env var as a non-negative minute count, falling back to
@@ -84,6 +88,8 @@ export const ROOM_TABLES = [
   "science_cards",
   "science_card_transitions",
   "science_card_evidence",
+  "message_routes",
+  "route_deliveries",
 ] as const;
 
 const SCHEMA = `
@@ -370,6 +376,57 @@ CREATE INDEX IF NOT EXISTS review_requests_target_status ON review_requests (tar
 -- for 'squad relay status', cleared by the next pass that reaches the end of
 -- the outbox. The reason quotes relayTarget(), never the raw endpoint or any
 -- header, so this is no more sensitive than target itself.
+-- Cross-room request/reply routing (#144). Kept out of the messages table so
+-- that table's positional column order (which importRoom() depends on) and
+-- every legacy row stay untouched: a message with no row here is an ordinary
+-- local message. One row per *routed* message, keyed by the local message id:
+--
+--   inbound     a request that arrived through 'squad send --room'. remote_*
+--               name the asking room/persona; answered_ts is set once the
+--               first explicit reply is delivered back to that room.
+--   reply       a reply stored in this room to an inbound request; recipient is
+--               the original asker; delivery_id names its route_deliveries row.
+--   delivered   the copy of a reply that arrived here from the answering room;
+--               delivery_id is UNIQUE, so a retried delivery can never insert a
+--               second copy. A delivered copy is never itself forwarded again.
+--   local-reply an explicit reply to an ordinary local message; stays local.
+--
+-- request_id is a UUID minted with the inbound request -- room-local integer
+-- message ids cannot identify one thread across two databases. No resume
+-- token (SQUAD_SESSION_ID of an automatic identity) is ever stored here.
+CREATE TABLE IF NOT EXISTS message_routes (
+  message_id INTEGER PRIMARY KEY,
+  direction TEXT NOT NULL CHECK (direction IN ('inbound', 'reply', 'delivered', 'local-reply')),
+  request_id TEXT,
+  remote_room TEXT,
+  remote_persona TEXT,
+  remote_message_id INTEGER,
+  recipient TEXT,
+  reply_to INTEGER,
+  delivery_id TEXT UNIQUE,
+  created_ts TEXT NOT NULL,
+  answered_ts TEXT,
+  answered_by TEXT
+);
+CREATE INDEX IF NOT EXISTS message_routes_request ON message_routes (request_id, direction);
+-- Durable delivery state for a cross-room reply (#144). Two room databases
+-- cannot share one SQLite transaction, so the answering room records the
+-- delivery here as 'pending' in the same transaction as the local reply, then
+-- writes the copy into the origin room (deduplicated there by delivery_id),
+-- and only then marks this row 'delivered' and the request answered. A crash
+-- or failure anywhere in between leaves it 'pending' and safely retryable.
+CREATE TABLE IF NOT EXISTS route_deliveries (
+  delivery_id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL,
+  message_id INTEGER NOT NULL,
+  dest_room TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'delivered')),
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT,
+  created_ts TEXT NOT NULL,
+  delivered_ts TEXT
+);
 CREATE TABLE IF NOT EXISTS relay_cursors (
   target TEXT PRIMARY KEY,
   last_message_id INTEGER NOT NULL DEFAULT 0,
@@ -749,6 +806,21 @@ export function openDb(): DatabaseSync {
     ensureRoomIgnored(dir);
   }
   const db = new DatabaseSync(dbPath());
+  migrateDb(db);
+  return db;
+}
+
+/**
+ * Bring an open room database up to this build's schema. Every open of a db by
+ * the current build stamps it current: SCHEMA's migration strategy is
+ * additive-only (CREATE TABLE IF NOT EXISTS, plus the narrow ALTER TABLE ADD
+ * COLUMN migrations like ensureMessagesOccurrencesColumn() for columns added to
+ * an existing table), so once this build has opened a db it *is*
+ * SCHEMA_VERSION, regardless of what it was stamped as before. The pragma
+ * exists for export/import compatibility checks (Squad.importRoom(),
+ * src/core.ts), not to gate opening a db directly.
+ */
+function migrateDb(db: DatabaseSync): void {
   db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
@@ -756,16 +828,74 @@ export function openDb(): DatabaseSync {
   ensureMessagesSessionIdColumn(db);
   ensureRelayErrorColumns(db);
   adoptNodes(db);
-  // Every open of a db by the current build stamps it current: SCHEMA's
-  // migration strategy is additive-only (CREATE TABLE IF NOT EXISTS above,
-  // plus the narrow ALTER TABLE ADD COLUMN migrations like
-  // ensureMessagesOccurrencesColumn() for columns added to an existing
-  // table), so once this build has opened a db it *is* SCHEMA_VERSION,
-  // regardless of what it was stamped as before. This pragma exists for
-  // export/import compatibility checks (Squad.importRoom(), src/core.ts), not
-  // to gate opening a db directly.
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-  return db;
+}
+
+/**
+ * Canonical identity of a room directory (#144): the real path, so a symlink
+ * or a differently-spelled path to the same room compares equal. A path that
+ * does not exist yet canonicalizes through its nearest existing ancestor.
+ */
+export function canonicalRoomDir(dir: string): string {
+  const abs = resolve(dir);
+  try {
+    return realpathSync(abs);
+  } catch {
+    const parent = dirname(abs);
+    if (parent === abs) return abs;
+    return join(canonicalRoomDir(parent), basename(abs));
+  }
+}
+
+/**
+ * The canonical room a path refers to, using the same resolution as
+ * `squad send --room` (#123): the repo root containing `path` (a linked
+ * worktree resolves to its primary clone, a `.squad` dir to its repo), then
+ * that root's `.squad`. Returns null when `path` is not inside any repo.
+ * Symlinks are resolved first, so an alias cannot name a different room.
+ */
+export function roomDirForPath(path: string): string | null {
+  const abs = canonicalRoomDir(path);
+  const root = findRepoRoot(abs);
+  if (!root) return null;
+  return canonicalRoomDir(join(root, ".squad"));
+}
+
+/**
+ * Open another, *already existing* room by its directory (#144) -- the origin
+ * room a cross-room reply is delivered into. Never creates a room: a missing
+ * squad.db is an error, so a moved or deleted origin cannot be silently
+ * replaced by a fresh empty room nobody watches. A database stamped by a
+ * newer, incompatible squad build is refused rather than written to; an older
+ * one is migrated additively exactly as openDb() would on its own next open.
+ */
+export function openExistingRoom(dir: string): DatabaseSync {
+  const file = join(dir, "squad.db");
+  if (!existsSync(file))
+    throw new Error(`no squad room at ${dir} (it may have moved or been removed); no room was created`);
+  let db: DatabaseSync;
+  try {
+    db = new DatabaseSync(file);
+  } catch (err) {
+    throw new Error(`cannot open the squad room at ${dir}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  try {
+    db.exec("PRAGMA busy_timeout = 5000");
+    const version = (db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version;
+    if (version > SCHEMA_VERSION)
+      throw new Error(
+        `the squad room at ${dir} uses schema v${version}, newer than this build's v${SCHEMA_VERSION}; ` +
+          "upgrade squad before routing into it",
+      );
+    migrateDb(db);
+    return db;
+  } catch (err) {
+    db.close();
+    if (err instanceof Error && /schema v\d+, newer/.test(err.message)) throw err;
+    throw new Error(
+      `the squad room at ${dir} is not a compatible squad database: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
 }
 
 /** Observe an existing room without creating, adopting, or migrating its state. */

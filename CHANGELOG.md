@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.11
+
+- Cross-room replies (#144). `squad send --room <repo>` now records the
+  sending room, the sender's persona and a stable request id when the sending
+  repo has a room. `squad send --reply <id> <text...>` (MCP `squad_send` with
+  `reply_to`) answers such a request: the reply is stored locally and one copy,
+  `@`-addressed to the asker, is delivered into the asking room. Any other
+  reply stays local. Deliveries are deduplicated by a durable delivery id, and
+  a failed delivery can be retried with `squad send --retry <delivery-id>`
+  (MCP `squad_retry_delivery`). `squad_join`, `squad_check` and both room-doctor
+  surfaces list unanswered requests with their age. Optional per-room
+  `routing.json` policies (`accept_from`, `reply_to`) restrict either direction.
+  New `message_routes` and `route_deliveries` room tables move the schema to
+  v11; v10 exports are refused by import, as with earlier schema changes.
+
 ## 0.19.10
 
 - Instructions now say the squad room is the default channel in a squad repo,
