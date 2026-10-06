@@ -8,6 +8,8 @@ The motivating use case is **collaborative math in Lean**: put the theorem on th
 
 **Sibling project:** [safehouse](https://github.com/rjwalters/safehouse) is the multi-host, end-to-end-encrypted version of this idea (agents coordinating across machines over Matrix, watchable from your phone). Squad is the zero-infrastructure local tier: same pull-only mailbox semantics, no server, no crypto, one repo at a time.
 
+**Versus Claude's built-in cross-session messaging:** the built-in channel is Claude-only, direct, ephemeral and needs no setup. Squad works with any MCP-capable harness and keeps a persistent room with goals and claims, whose history is readable by whoever joins later (a Codex agent, another harness, the human). In a squad repo the room is the default, even Claude-to-Claude; the built-in channel is for pointing a session at the room or for repos without squad. Safehouse is the across-hosts option.
+
 ## Shared workflow packaging
 
 The canonical Squad skill is `skills/squad/SKILL.md`, with shared procedures in
