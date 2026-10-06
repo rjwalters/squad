@@ -408,3 +408,55 @@ test("opening a pre-relay squad.db adds relay_cursors without disturbing the roo
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// --- cross-room routing tables (#144) ---------------------------------------
+
+test("opening a schema-10 squad.db adds the routing tables; legacy messages stay local and unrouted", async () => {
+  const { Squad } = await import("../dist/core.js");
+  const { SCHEMA_VERSION } = await import("../dist/db.js");
+  const dir = mkdtempSync(join(tmpdir(), "squad-migration-routing-"));
+  const dbFile = join(dir, "squad.db");
+  try {
+    // messages exactly as a schema-10 build created it (post-#135, pre-#144).
+    const seed = new DatabaseSync(dbFile);
+    seed.exec(`
+      CREATE TABLE messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        sender TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'chat',
+        body TEXT NOT NULL,
+        ts TEXT NOT NULL,
+        occurrences INTEGER NOT NULL DEFAULT 1,
+        session_id TEXT
+      );
+      PRAGMA user_version = 10;
+    `);
+    seed
+      .prepare("INSERT INTO messages (sender, kind, body, ts) VALUES (?, ?, ?, ?)")
+      .run("claude", "chat", "pre-#144 message", "2026-01-01T00:00:00.000Z");
+    seed.close();
+
+    process.env.SQUAD_DIR = dir;
+    const db = openDb();
+    assert.ok(tableNames(db).includes("message_routes"));
+    assert.ok(tableNames(db).includes("route_deliveries"));
+    assert.equal(db.prepare("PRAGMA user_version").get().user_version, SCHEMA_VERSION);
+    assert.deepEqual(messageColumnNames(db), ["id", "sender", "kind", "body", "ts", "occurrences", "session_id"]);
+    const squad = new Squad(db, "codex");
+    const [legacy] = squad.read(10);
+    assert.equal(legacy.body, "pre-#144 message", "content retained");
+    assert.ok(!("route" in legacy), "a legacy message is local: no fabricated route");
+    const joined = squad.join();
+    assert.deepEqual(joined.cross_room_requests, [], "legacy history is never an unanswered request");
+    assert.deepEqual(joined.pending_deliveries, []);
+    // Replying to a legacy message is a local reply only.
+    const reply = squad.reply(legacy.id, "local answer");
+    assert.equal(reply.routed, false);
+    assert.equal(reply.message.route.direction, "local-reply");
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM route_deliveries").get().n, 0);
+    db.close();
+  } finally {
+    delete process.env.SQUAD_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

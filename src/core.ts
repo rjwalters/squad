@@ -22,7 +22,9 @@ import {
 import { randomUUID } from "node:crypto";
 import { DatabaseSync, backup } from "node:sqlite";
 import { existsSync } from "node:fs";
-import { envMinutes, ROOM_TABLES, SCHEMA_VERSION } from "./db.js";
+import { dirname } from "node:path";
+import { canonicalRoomDir, envMinutes, openExistingRoom, ROOM_TABLES, SCHEMA_VERSION } from "./db.js";
+import { assertInboundAllowed, assertReplyAllowed, roomLabel } from "./routing.js";
 
 export interface Message {
   id: number;
@@ -57,6 +59,207 @@ export interface Message {
    * of the row it collapsed into.
    */
   session_id: string | null;
+  /**
+   * Cross-room routing metadata (#144) -- present only on a message that
+   * arrived through `squad send --room`, a reply to one, a delivered copy of
+   * such a reply, or an explicit local reply. Absent for every ordinary
+   * message, so their payloads are unchanged.
+   */
+  route?: MessageRoute;
+}
+
+/** How a routed message relates to its thread (see `message_routes`, src/db.ts). */
+export type RouteDirection = "inbound" | "reply" | "delivered" | "local-reply";
+
+/**
+ * A message's place in a cross-room request/reply thread (#144). Rooms are
+ * identified by canonical `.squad` directory paths; `request_id` is the
+ * thread's stable identifier across both rooms' databases.
+ */
+export interface MessageRoute {
+  direction: RouteDirection;
+  /** Thread id shared by the request and every reply/copy; null for a local reply. */
+  request_id: string | null;
+  /** inbound: the asking room. reply: the room the reply is delivered to. delivered: the answering room. */
+  remote_room: string | null;
+  /** inbound: the asker. reply: the asker (recipient). delivered: the replier. */
+  remote_persona: string | null;
+  /** delivered: the reply's message id in the answering room. */
+  remote_message_id: number | null;
+  /** reply / delivered: the persona the reply is addressed to (the original asker). */
+  recipient: string | null;
+  /** reply / local-reply: the local message id replied to. */
+  reply_to: number | null;
+  /** reply / delivered: the delivery identifier (deduplicates retried deliveries). */
+  delivery_id: string | null;
+  /** inbound: when the first explicit reply was delivered back, else null. */
+  answered_ts: string | null;
+  answered_by: string | null;
+}
+
+/** An inbound cross-room request still waiting for a delivered reply (#144). */
+export interface CrossRoomRequestView {
+  request_id: string;
+  /** Local id of the request message in this room. */
+  message_id: number;
+  origin_room: string;
+  origin_persona: string;
+  sender: string;
+  body: string;
+  created_ts: string;
+  age_ms: number;
+  /** Replies already stored here whose delivery is still pending, if any. */
+  pending_deliveries: PendingDeliveryView[];
+}
+
+/** A stored cross-room reply whose delivery to the asking room has not succeeded yet (#144). */
+export interface PendingDeliveryView {
+  delivery_id: string;
+  request_id: string;
+  /** Local id of the stored reply. */
+  message_id: number;
+  dest_room: string;
+  recipient: string;
+  attempts: number;
+  last_error: string | null;
+  created_ts: string;
+  age_ms: number;
+}
+
+/** Outcome of one successful (or already-complete) cross-room delivery (#144). */
+export interface DeliveryResult {
+  delivery_id: string;
+  request_id: string;
+  dest_room: string;
+  recipient: string;
+  /** 'delivered' on this call, or 'already-delivered' when a retry found it done. */
+  status: "delivered" | "already-delivered";
+  /** The copy's message id in the destination room, when known. */
+  remote_message_id: number | null;
+  delivered_ts: string | null;
+}
+
+/** What `Squad.reply()` returns. */
+export interface ReplyResult {
+  /** The reply as stored in this room. */
+  message: Message;
+  /** True when the reply was routed to another room; false for a local reply. */
+  routed: boolean;
+  delivery?: DeliveryResult;
+}
+
+/**
+ * Failure-injection seams for crash-safety tests of cross-room delivery
+ * (#144). Never set in production: a hook that throws simulates a crash just
+ * before or just after the origin room's copy is committed.
+ */
+export interface DeliveryFaults {
+  beforeOriginCommit?: () => void;
+  afterOriginCommit?: () => void;
+}
+
+interface RouteRow extends MessageRoute {
+  message_id: number;
+  created_ts: string;
+}
+
+interface DeliveryRow {
+  delivery_id: string;
+  request_id: string;
+  message_id: number;
+  dest_room: string;
+  recipient: string;
+  status: "pending" | "delivered";
+  attempts: number;
+  last_error: string | null;
+  created_ts: string;
+  delivered_ts: string | null;
+}
+
+function toRoute(row: RouteRow): MessageRoute {
+  return {
+    direction: row.direction,
+    request_id: row.request_id,
+    remote_room: row.remote_room,
+    remote_persona: row.remote_persona,
+    remote_message_id: row.remote_message_id,
+    recipient: row.recipient,
+    reply_to: row.reply_to,
+    delivery_id: row.delivery_id,
+    answered_ts: row.answered_ts,
+    answered_by: row.answered_by,
+  };
+}
+
+/** Run `fn` in an IMMEDIATE transaction on `db`, rolling back on any throw. */
+function immediate<T>(db: DatabaseSync, fn: () => T): T {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const result = fn();
+    db.exec("COMMIT");
+    return result;
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // COMMIT itself failed and already ended the transaction.
+    }
+    throw err;
+  }
+}
+
+/**
+ * Deliver a `squad send --room` message into `destRoom` as a replyable
+ * cross-room request (#144). `db` is the destination room's database and
+ * `originRoom`/`originPersona` were resolved in the *sending* room before the
+ * target override, so no persona is minted here. Checks the destination's
+ * inbound policy first; writes the message and its routing row atomically.
+ * The message carries no session id: the sender's session belongs to its own
+ * room, and an automatic identity's resume token must never appear here.
+ */
+export function receiveCrossRoomRequest(
+  db: DatabaseSync,
+  destRoom: string,
+  input: { body: string; originRoom: string; originPersona: string },
+): Message {
+  const body = input.body.trim();
+  if (!body) throw new Error("cross-room message body is empty");
+  assertInboundAllowed(destRoom, input.originRoom);
+  const originRoom = canonicalRoomDir(input.originRoom);
+  const sender = `${input.originPersona}@${roomLabel(originRoom)}`;
+  const ts = now();
+  const requestId = randomUUID();
+  return immediate(db, () => {
+    const { lastInsertRowid } = db
+      .prepare("INSERT INTO messages (sender, kind, body, ts, occurrences, session_id) VALUES (?, 'chat', ?, ?, 1, NULL)")
+      .run(sender, body, ts);
+    const id = Number(lastInsertRowid);
+    db.prepare(
+      `INSERT INTO message_routes (message_id, direction, request_id, remote_room, remote_persona, created_ts)
+       VALUES (?, 'inbound', ?, ?, ?, ?)`,
+    ).run(id, requestId, originRoom, input.originPersona, ts);
+    return {
+      id,
+      sender,
+      kind: "chat" as const,
+      body,
+      ts,
+      occurrences: 1,
+      session_id: null,
+      route: {
+        direction: "inbound" as const,
+        request_id: requestId,
+        remote_room: originRoom,
+        remote_persona: input.originPersona,
+        remote_message_id: null,
+        recipient: null,
+        reply_to: null,
+        delivery_id: null,
+        answered_ts: null,
+        answered_by: null,
+      },
+    };
+  });
 }
 
 export interface Goal {
@@ -217,6 +420,14 @@ export interface JoinResult {
    * reading chat chronologically.
    */
   pending_reviews: ReviewRequestView[];
+  /**
+   * Cross-room requests (#144) that arrived here and have no delivered reply
+   * yet, oldest first, read from durable routing state rather than `recent`,
+   * so an old unanswered request stays visible however busy the room is.
+   */
+  cross_room_requests: CrossRoomRequestView[];
+  /** Replies stored here whose delivery to the asking room is still pending. */
+  pending_deliveries: PendingDeliveryView[];
   recent: Message[];
   /**
    * Set only when the identity you joined under is already held by another
@@ -241,6 +452,10 @@ export interface CheckSummary {
   pending_review_count: number;
   /** Those same requests, most urgent first. */
   pending_reviews: ReviewRequestView[];
+  /** How many inbound cross-room requests have no delivered reply yet (#144). */
+  cross_room_request_count: number;
+  /** Those requests, oldest first. */
+  cross_room_requests: CrossRoomRequestView[];
 }
 
 /**
@@ -824,6 +1039,26 @@ export class Squad {
    * default, and always for the CLI) means no relay side effect at all.
    */
   onMessageInserted: (() => void) | null = null;
+
+  /** Test-only crash-injection hooks for cross-room delivery (#144). */
+  deliveryFaults: DeliveryFaults | null = null;
+
+  private _roomDir: string | null | undefined;
+
+  /**
+   * Canonical directory of this room (the dir holding squad.db), derived from
+   * the open database file itself so every caller agrees on the room's
+   * identity without plumbing a path through. Null for an in-memory db, which
+   * therefore cannot take part in cross-room routing.
+   */
+  get roomDir(): string | null {
+    if (this._roomDir === undefined) {
+      const rows = this.db.prepare("PRAGMA database_list").all() as unknown as Array<{ name: string; file: string }>;
+      const file = rows.find((r) => r.name === "main")?.file;
+      this._roomDir = file ? canonicalRoomDir(dirname(file)) : null;
+    }
+    return this._roomDir;
+  }
 
   private messageInserted(): void {
     try {
@@ -1590,6 +1825,8 @@ export class Squad {
         checkCommitExists: status.configuration.config
           ? (repository, commit) => commitExistsLocally(repository, commit)
           : undefined,
+        crossRoomRequests: this.crossRoomRequests(),
+        pendingDeliveries: this.pendingDeliveries(),
       });
     });
   }
@@ -1963,7 +2200,26 @@ export class Squad {
     const rows = this.db
       .prepare("SELECT * FROM messages ORDER BY id DESC LIMIT ?")
       .all(limit) as unknown as Message[];
-    return rows.reverse();
+    return this.withRoutes(rows.reverse());
+  }
+
+  /**
+   * Attach cross-room routing metadata (#144) to the routed messages in
+   * `rows`; every other message is returned unchanged (no `route` key).
+   */
+  withRoutes(rows: Message[]): Message[] {
+    if (!rows.length) return rows;
+    const lo = Math.min(...rows.map((m) => m.id));
+    const hi = Math.max(...rows.map((m) => m.id));
+    const routes = new Map(
+      (
+        this.db
+          .prepare("SELECT * FROM message_routes WHERE message_id BETWEEN ? AND ?")
+          .all(lo, hi) as unknown as RouteRow[]
+      ).map((r) => [r.message_id, toRoute(r)]),
+    );
+    if (!routes.size) return rows;
+    return rows.map((m) => (routes.has(m.id) ? { ...m, route: routes.get(m.id)! } : m));
   }
 
   /**
@@ -2051,7 +2307,7 @@ export class Squad {
       .prepare("SELECT * FROM messages WHERE id > ? AND sender != ? ORDER BY id ASC")
       .all(since, this.persona) as unknown as Message[];
     if (!opts.peek) this.setCursor(this.maxMessageId());
-    return rows;
+    return this.withRoutes(rows);
   }
 
   /**
@@ -2335,6 +2591,8 @@ export class Squad {
       nodes: this.nodeList(),
       claims: this.claims(),
       pending_reviews: this.pendingReviews(),
+      cross_room_requests: this.crossRoomRequests(),
+      pending_deliveries: this.pendingDeliveries(),
       recent,
       ...(colliding.length
         ? {
@@ -2363,6 +2621,7 @@ export class Squad {
   checkSummary(): CheckSummary {
     const session = this.session();
     const pending = this.pendingReviews();
+    const crossRoom = this.crossRoomRequests();
     return {
       peers: this.peers(),
       session_id: session?.session_id ?? null,
@@ -2372,7 +2631,234 @@ export class Squad {
       active_claims: this.claims().length,
       pending_review_count: pending.length,
       pending_reviews: pending,
+      cross_room_request_count: crossRoom.length,
+      cross_room_requests: crossRoom,
     };
+  }
+
+  /**
+   * Inbound cross-room requests (#144) with no delivered reply yet, oldest
+   * first, each with any of its replies still awaiting delivery. Reads only
+   * this room's durable routing tables -- never another room's database --
+   * and writes nothing, so it is safe from the read-only doctor.
+   */
+  crossRoomRequests(nowMs: number = Date.now()): CrossRoomRequestView[] {
+    const rows = this.db
+      .prepare(
+        `SELECT r.message_id, r.request_id, r.remote_room, r.remote_persona, r.created_ts, m.sender, m.body
+           FROM message_routes r JOIN messages m ON m.id = r.message_id
+          WHERE r.direction = 'inbound' AND r.answered_ts IS NULL
+          ORDER BY r.message_id ASC`,
+      )
+      .all() as unknown as Array<{
+      message_id: number;
+      request_id: string;
+      remote_room: string;
+      remote_persona: string;
+      created_ts: string;
+      sender: string;
+      body: string;
+    }>;
+    const pending = this.pendingDeliveries(nowMs);
+    return rows.map((r) => ({
+      request_id: r.request_id,
+      message_id: r.message_id,
+      origin_room: r.remote_room,
+      origin_persona: r.remote_persona,
+      sender: r.sender,
+      body: r.body,
+      created_ts: r.created_ts,
+      age_ms: Math.max(0, nowMs - Date.parse(r.created_ts)),
+      pending_deliveries: pending.filter((d) => d.request_id === r.request_id),
+    }));
+  }
+
+  /** Stored cross-room replies whose delivery has not succeeded yet (#144), oldest first. */
+  pendingDeliveries(nowMs: number = Date.now()): PendingDeliveryView[] {
+    const rows = this.db
+      .prepare("SELECT * FROM route_deliveries WHERE status = 'pending' ORDER BY created_ts ASC, delivery_id ASC")
+      .all() as unknown as DeliveryRow[];
+    return rows.map((d) => ({
+      delivery_id: d.delivery_id,
+      request_id: d.request_id,
+      message_id: d.message_id,
+      dest_room: d.dest_room,
+      recipient: d.recipient,
+      attempts: d.attempts,
+      last_error: d.last_error,
+      created_ts: d.created_ts,
+      age_ms: Math.max(0, nowMs - Date.parse(d.created_ts)),
+    }));
+  }
+
+  /**
+   * Explicitly reply to local message `replyTo` (#144: `squad send --reply`,
+   * `squad_send` with `reply_to`). Routing comes only from this room's own
+   * metadata -- a caller can never supply a return path.
+   *
+   * - Replying to an inbound cross-room request stores the reply here and
+   *   delivers exactly one copy into the asking room, addressed (@mention) to
+   *   the original asker and carrying the same request id. Policies are
+   *   checked first (this room's `reply_to`, the asking room's `accept_from`);
+   *   a refusal stores nothing. A delivery failure after the reply is stored
+   *   leaves it pending and the request outstanding, and throws an error
+   *   naming the delivery id to retry with `retryDelivery()`.
+   * - Replying to anything else (an ordinary message, or a delivered copy of a
+   *   reply from another room) stays local, so a routed copy can never
+   *   trigger another forward.
+   */
+  reply(replyTo: number, body: string): ReplyResult {
+    const text = body.trim();
+    if (!text) throw new Error("reply body is empty");
+    if (!Number.isSafeInteger(replyTo) || replyTo < 1) throw new Error(`invalid message id to reply to: ${replyTo}`);
+    this.touch();
+    const target = this.db.prepare("SELECT id FROM messages WHERE id = ?").get(replyTo);
+    if (!target) throw new Error(`no message #${replyTo} in this room to reply to`);
+    const route = this.db
+      .prepare("SELECT * FROM message_routes WHERE message_id = ?")
+      .get(replyTo) as unknown as RouteRow | undefined;
+    const ts = now();
+    if (!route || route.direction !== "inbound") {
+      const message = immediate(this.db, () => {
+        const id = this.insertMessage(text, ts);
+        this.db
+          .prepare("INSERT INTO message_routes (message_id, direction, reply_to, created_ts) VALUES (?, 'local-reply', ?, ?)")
+          .run(id, replyTo, ts);
+        return id;
+      });
+      this.messageInserted();
+      return { message: this.messageWithRoute(message), routed: false };
+    }
+    const self = this.roomDir;
+    if (!self) throw new Error("this room has no on-disk location, so replies cannot be routed to another room");
+    const dest = route.remote_room!;
+    const recipient = route.remote_persona!;
+    const requestId = route.request_id!;
+    // Pre-flight policy checks: a refusal stores nothing and sends nothing.
+    assertReplyAllowed(self, dest);
+    if (existsSync(dest)) assertInboundAllowed(dest, self);
+    const deliveryId = randomUUID();
+    const id = immediate(this.db, () => {
+      const id = this.insertMessage(text, ts);
+      this.db
+        .prepare(
+          `INSERT INTO message_routes
+             (message_id, direction, request_id, remote_room, remote_persona, recipient, reply_to, delivery_id, created_ts)
+           VALUES (?, 'reply', ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(id, requestId, dest, recipient, recipient, replyTo, deliveryId, ts);
+      this.db
+        .prepare(
+          `INSERT INTO route_deliveries (delivery_id, request_id, message_id, dest_room, recipient, status, attempts, created_ts)
+           VALUES (?, ?, ?, ?, ?, 'pending', 0, ?)`,
+        )
+        .run(deliveryId, requestId, id, dest, recipient, ts);
+      return id;
+    });
+    this.messageInserted();
+    const delivery = this.retryDelivery(deliveryId);
+    return { message: this.messageWithRoute(id), routed: true, delivery };
+  }
+
+  /**
+   * Deliver (or re-deliver) a stored cross-room reply (#144). Idempotent: the
+   * origin room's copy is keyed by the UNIQUE delivery id, so retrying after a
+   * failure -- whether the copy never arrived or arrived but this room never
+   * recorded it -- yields exactly one copy. The delivery is marked delivered,
+   * and its request answered, only after the origin room's write commits. A
+   * delivery already recorded as delivered returns 'already-delivered'.
+   */
+  retryDelivery(deliveryId: string): DeliveryResult {
+    const d = this.db
+      .prepare("SELECT * FROM route_deliveries WHERE delivery_id = ?")
+      .get(deliveryId) as unknown as DeliveryRow | undefined;
+    if (!d) throw new Error(`no cross-room delivery '${deliveryId}' in this room`);
+    const result = (status: DeliveryResult["status"], remote: number | null, at: string | null): DeliveryResult => ({
+      delivery_id: d.delivery_id,
+      request_id: d.request_id,
+      dest_room: d.dest_room,
+      recipient: d.recipient,
+      status,
+      remote_message_id: remote,
+      delivered_ts: at,
+    });
+    if (d.status === "delivered") return result("already-delivered", null, d.delivered_ts);
+    const reply = this.db
+      .prepare("SELECT sender, body FROM messages WHERE id = ?")
+      .get(d.message_id) as { sender: string; body: string } | undefined;
+    this.db.prepare("UPDATE route_deliveries SET attempts = attempts + 1 WHERE delivery_id = ?").run(deliveryId);
+    try {
+      if (!reply) throw new Error(`the stored reply #${d.message_id} no longer exists in this room`);
+      const self = this.roomDir;
+      if (!self) throw new Error("this room has no on-disk location");
+      assertReplyAllowed(self, d.dest_room);
+      const origin = openExistingRoom(d.dest_room);
+      let remoteId: number;
+      try {
+        assertInboundAllowed(d.dest_room, self);
+        remoteId = immediate(origin, () => {
+          const existing = origin
+            .prepare("SELECT message_id FROM message_routes WHERE delivery_id = ?")
+            .get(deliveryId) as { message_id: number } | undefined;
+          let id = existing?.message_id;
+          if (id === undefined) {
+            const ts = now();
+            const mention = `@${d.recipient}`;
+            const body = reply.body === mention || reply.body.startsWith(`${mention} `) ? reply.body : `${mention} ${reply.body}`;
+            id = Number(
+              origin
+                .prepare("INSERT INTO messages (sender, kind, body, ts, occurrences, session_id) VALUES (?, 'chat', ?, ?, 1, NULL)")
+                .run(`${reply.sender}@${roomLabel(self)}`, body, ts).lastInsertRowid,
+            );
+            origin
+              .prepare(
+                `INSERT INTO message_routes
+                   (message_id, direction, request_id, remote_room, remote_persona, remote_message_id, recipient, delivery_id, created_ts)
+                 VALUES (?, 'delivered', ?, ?, ?, ?, ?, ?, ?)`,
+              )
+              .run(id, d.request_id, self, reply.sender, d.message_id, d.recipient, deliveryId, ts);
+          }
+          this.deliveryFaults?.beforeOriginCommit?.();
+          return id;
+        });
+        this.deliveryFaults?.afterOriginCommit?.();
+      } finally {
+        origin.close();
+      }
+      const at = now();
+      immediate(this.db, () => {
+        this.db
+          .prepare("UPDATE route_deliveries SET status = 'delivered', delivered_ts = ?, last_error = NULL WHERE delivery_id = ?")
+          .run(at, deliveryId);
+        this.db
+          .prepare(
+            `UPDATE message_routes SET answered_ts = ?, answered_by = ?
+              WHERE direction = 'inbound' AND request_id = ? AND answered_ts IS NULL`,
+          )
+          .run(at, reply.sender, d.request_id);
+      });
+      return result("delivered", remoteId, at);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      this.db.prepare("UPDATE route_deliveries SET last_error = ? WHERE delivery_id = ?").run(reason, deliveryId);
+      throw new Error(
+        `reply #${d.message_id} is stored in this room but was NOT delivered to ${d.dest_room}: ${reason}. ` +
+          `The request stays outstanding. Retry with 'squad send --retry ${deliveryId}' ` +
+          `(MCP: squad_retry_delivery); a retry never duplicates a copy that already arrived.`,
+      );
+    }
+  }
+
+  private insertMessage(body: string, ts: string): number {
+    const { lastInsertRowid } = this.db
+      .prepare("INSERT INTO messages (sender, kind, body, ts, occurrences, session_id) VALUES (?, 'chat', ?, ?, 1, ?)")
+      .run(this.persona, body, ts, this._sessionId);
+    return Number(lastInsertRowid);
+  }
+
+  private messageWithRoute(id: number): Message {
+    const row = this.db.prepare("SELECT * FROM messages WHERE id = ?").get(id) as unknown as Message;
+    return this.withRoutes([row])[0]!;
   }
 
   /**

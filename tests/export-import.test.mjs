@@ -14,7 +14,7 @@ import { join } from "node:path";
 // assertions can inspect row counts/content precisely.
 
 const { openDb, ROOM_TABLES, SCHEMA_VERSION } = await import("../dist/db.js");
-const { Squad } = await import("../dist/core.js");
+const { Squad, receiveCrossRoomRequest } = await import("../dist/core.js");
 
 const tmpDirs = [];
 
@@ -54,6 +54,15 @@ test("round-trip export -> import preserves row counts and content across every 
   src.squad.divergeSubmit(round.id, "my independent take");
   // review_requests
   src.squad.reviewOpen("codex", "please check this");
+  // message_routes, route_deliveries (#144): a cross-room request from another
+  // room, answered here, so a delivery row exists alongside the routes.
+  const origin = freshRoom("alice");
+  const ask = receiveCrossRoomRequest(src.db, src.dir, {
+    body: "cross-room ask",
+    originRoom: origin.dir,
+    originPersona: "alice",
+  });
+  assert.equal(src.squad.reply(ask.id, "cross-room answer").delivery.status, "delivered");
   // science_cards, science_card_transitions, science_card_evidence
   const card = src.squad.cardCreate({ title: "t", question: "does it hold?" });
   src.squad.cardTransition(card.id, "DIVERGE", "moving forward");
@@ -130,7 +139,10 @@ test("round-trip export -> import preserves row counts and content across every 
   const beforeMessages = src.db.prepare("SELECT * FROM messages ORDER BY id").all();
   // Every message carries its posting session (#135), and two personas'
   // sessions are distinct, so the round-trip below exercises real values.
-  for (const m of beforeMessages) assert.ok(m.session_id, `message ${m.id} has a session_id`);
+  // A routed arrival (#144) deliberately carries none: its sender's session
+  // belongs to another room.
+  for (const m of beforeMessages)
+    if (m.id !== ask.id) assert.ok(m.session_id, `message ${m.id} has a session_id`);
   const claudeMsg = beforeMessages.find((m) => m.body === "hello from claude");
   const codexMsg = beforeMessages.find((m) => m.body === "hi back from codex");
   assert.notEqual(claudeMsg.session_id, codexMsg.session_id);
@@ -228,8 +240,10 @@ test("import rejects a source with an incompatible schema version", async () => 
   }
 });
 
-test("SCHEMA_VERSION is 10: messages.session_id (#135) moved it past 9", () => {
-  assert.equal(SCHEMA_VERSION, 10);
+test("SCHEMA_VERSION is 11: cross-room routing tables (#144) moved it past 10", () => {
+  assert.equal(SCHEMA_VERSION, 11);
+  assert.ok(ROOM_TABLES.includes("message_routes"));
+  assert.ok(ROOM_TABLES.includes("route_deliveries"));
   const { db } = freshRoom("claude");
   const cols = db.prepare("PRAGMA table_info(messages)").all().map((c) => c.name);
   assert.equal(cols[cols.length - 1], "session_id", "session_id is the last messages column");
@@ -268,7 +282,7 @@ test("import rejects a schema-9 export (pre-session_id messages) with the clear 
   const dest = freshRoom("claude");
   assert.throws(
     () => dest.squad.importRoom(exportPath),
-    /schema version mismatch \(export is v9, this squad build expects v10\)/,
+    /schema version mismatch \(export is v9, this squad build expects v11\)/,
   );
   for (const t of ROOM_TABLES) {
     assert.equal(dest.db.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get().n, 0, `${t} untouched after rejected import`);

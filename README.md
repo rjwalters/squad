@@ -131,8 +131,9 @@ Everything is **pull-only**: nothing ever pushes into an agent's context or wake
 
 | Tool | Semantics |
 |---|---|
-| `squad_join` | Open a presence lease (returns your `session_id` + `lease_expires_at`); get members with their presence (`active`/`idle`/`stale`), open goals, current file claims, the directed review requests still gating you (`pending_reviews`, most urgent first), recent history. Advances your session's read cursor past the returned history. Idempotent. Optional `persona` renames an unpinned identity. |
-| `squad_send` | Post to the room (`@name` to address someone). |
+| `squad_join` | Open a presence lease (returns your `session_id` + `lease_expires_at`); get members with their presence (`active`/`idle`/`stale`), open goals, current file claims, the directed review requests still gating you (`pending_reviews`, most urgent first), unanswered cross-room requests (`cross_room_requests`, oldest first, with origin and age) and stored replies still awaiting delivery (`pending_deliveries`), recent history. Advances your session's read cursor past the returned history. Idempotent. Optional `persona` renames an unpinned identity. |
+| `squad_send` | Post to the room (`@name` to address someone). Optional `reply_to` (a message id in this room) replies explicitly; replying to a cross-room request also delivers the reply to the asking room — see [Cross-room requests and replies](#cross-room-requests-and-replies). |
+| `squad_retry_delivery` | Retry a cross-room reply whose delivery failed, by `delivery_id`. Never duplicates a copy that already arrived. |
 | `squad_check` | Unread messages via a durable **per-session** cursor (excludes your own), **plus every peer's presence** (`active`/`idle`/`stale`) and your own renewed lease — so a pause is distinguishable from a dead session without re-joining — plus `pending_review_count`/`pending_reviews` next to `open_goals`/`active_claims`. Consumes by default; `peek: true` looks without consuming; `wait_seconds` long-polls. |
 | `squad_leave` | End your presence lease and leave the room, auto-announced in chat (the announcement names any claims you still hold). You drop out of peers' member lists immediately instead of lingering until the lease expires; any later `squad_*` call simply opens a fresh session. |
 | `squad_goals` | List shared goals. |
@@ -493,9 +494,86 @@ legacy `/squad-<workflow>` prompts when installed:
 - **fanout** — coordinate separately identified workers on distinct assignments
 - **clear** — wipe the room for a fresh session when the user explicitly requests a reset
 
-Human CLI: `squad send | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | relay [--once|--follow|status] | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
+Human CLI: `squad send [--room <repo> | --reply <id> | --retry <delivery-id>] | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | relay [--once|--follow|status] | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
+
+### Cross-room requests and replies
+
+Rooms are isolated: no command reads or browses another room's history. The
+only way content crosses is an explicit send, and the only way an answer comes
+back is an explicit reply.
+
+```
+# in repo A: ask repo B's room something
+squad send --room ../repo-b "@reviewer can you check PR #12?"
+# in repo B: the request shows up in squad read / squad_check / squad_join
+#   <alice@repo-a> @reviewer can you check PR #12? [cross-room request #7 from /…/repo-a/.squad; reply: squad send --reply 7 <text>]
+squad send --reply 7 "LGTM, one nit on line 40"
+# in repo A: one copy arrives, addressed to the asker
+#   <bob@repo-b> @alice LGTM, one nit on line 40 [reply from /…/repo-b/.squad to your request <request-id>]
+```
+
+- **Flag parsing.** `--room`, `--reply <message-id>` and `--retry <delivery-id>`
+  are recognized only as the *first* argument after `send`, so a message whose
+  prose contains `--reply 3` is sent verbatim. `--room` cannot be combined with
+  `--reply`/`--retry`.
+- **Source room.** `send --room` resolves the room you are sending *from*
+  before switching to the target, the same way every command does: an explicit
+  `SQUAD_DIR` wins, otherwise the repo containing the current directory (a
+  linked worktree means its primary clone's room). If that room exists, the
+  message becomes a *cross-room request*: the target room records the source
+  room, your persona (an automatic identity is resolved in the source room, never
+  minted in the target), and a stable request id. The sender shows as
+  `<persona>@<source-repo-name>`. No presence is opened in the target room, and
+  no session id or `SQUAD_SESSION_ID` resume token is stored there. If the source
+  room does not exist, squad does not create one: the message is delivered
+  one-way exactly as before, with a warning that replies cannot be routed back.
+  Sending to your own room is an ordinary local message.
+- **Replies.** `squad send --reply <id> <text...>` (MCP: `squad_send` with
+  `reply_to`) replies to message `<id>` in the current room. Where the reply goes
+  depends only on that message's stored metadata, so a caller cannot supply a
+  return path. Replying to a cross-room request stores the reply locally and
+  delivers one copy into the asking room, with an `@mention` of the original
+  asker and the same request id. That copy is a normal message in the asking
+  room, so anyone in that room can read it; "addressed to" means a directed
+  mention, not private messaging. Replying to anything else, including a
+  delivered copy, stays local, so a routed message is never forwarded again.
+  Several replies to one request are allowed. The first one delivered marks the
+  request answered.
+- **Failed deliveries.** Two room databases cannot share a transaction. The
+  reply is therefore stored first with a `pending` delivery id. The copy is then
+  written into the asking room, deduplicated there by that id, and only after
+  that write commits is the delivery marked done and the request answered. If
+  the asking room is missing or moved, uses a newer incompatible schema, or the
+  write fails, squad never creates a room and never reports success. The command
+  fails with the reason and the delivery id, and the request stays outstanding.
+  `squad send --retry <delivery-id>` (MCP: `squad_retry_delivery`) retries it.
+  Retrying is always safe: a copy that already arrived is not written twice,
+  and an already-delivered id reports `already delivered`.
+- **Unanswered requests.** `squad_join` (`cross_room_requests`,
+  `pending_deliveries`), `squad_check` (`cross_room_request_count`) and both
+  room-doctor surfaces list requests with no delivered reply, with their origin
+  and age. They read durable routing state, so an old request stays visible
+  after it has scrolled out of recent history.
+- **Policies.** A room can restrict routing in `<repo>/.squad/routing.json`:
+
+  ```json
+  { "accept_from": ["../repo-a"], "reply_to": ["../repo-a"] }
+  ```
+
+  `accept_from` lists the rooms that may `send --room` into this room.
+  `reply_to` lists the rooms this room may deliver replies to. Entries are paths
+  resolved like `--room`: a checkout, any directory in it, a linked worktree, or
+  the `.squad` dir. Relative entries resolve against this repo's root. Symlinks
+  and worktrees are canonicalized, so an alias names the same room. An omitted
+  key leaves that direction open (the behavior before policies existed). An
+  empty list denies it. A malformed file is an error that names the file, never
+  treated as "no policy". A reply checks this room's `reply_to` and the asking
+  room's `accept_from` before anything is stored. For example, an isolated room
+  can accept requests but refuse replies by setting `"reply_to": []`, or
+  refuse incoming sends by setting `"accept_from": []`. These are cooperative
+  application policies, not an OS access-control boundary.
 
 ### Relaying room chat to an observability host (opt-in)
 
@@ -769,4 +847,8 @@ configured, or the reachability check itself could not be performed, e.g. an
 inaccessible repository path) -- an unreachable or unobserved branch is never
 reported as if it were verified clean. Two runs against one unchanged observed
 revision/state and observation time agree, provided local repository visibility also agrees. Chat findings are heuristic warnings requiring verification, never proof that a participant falsely claimed banking. The default scan covers the latest 2,000 chat messages. Any identity may run it; it never writes to the
-room, sends chat, or renews presence.
+room, sends chat, or renews presence. It also lists cross-room requests with no
+delivered reply and stored replies whose delivery is still pending (see
+[Cross-room requests and replies](#cross-room-requests-and-replies)), with
+origin, age and the `squad send --reply` / `--retry` command. It reads only this
+room's routing state and never opens another room's database.

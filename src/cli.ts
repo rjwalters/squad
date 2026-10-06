@@ -1,7 +1,9 @@
 import { identityFromEnv } from "./identity.js";
-import { openDb, openDbReadOnly, dbPath, squadDir, findRepoRoot } from "./db.js";
+import { openDb, openDbReadOnly, openExistingRoom, dbPath, squadDir, findRepoRoot, canonicalRoomDir } from "./db.js";
+import { assertInboundAllowed } from "./routing.js";
 import {
   Squad,
+  receiveCrossRoomRequest,
   CARD_TERMINAL_PHASES,
   REVIEW_PRIORITIES,
   REVIEW_STATUSES,
@@ -110,6 +112,8 @@ const SUB_USAGE: Record<string, string> = {
   "review resolve": "usage: squad review resolve <id> [note...]",
   "review cancel": "usage: squad review cancel <id> [reason...]",
   "node create": "usage: squad node create --json '<fields>'",
+  "send --reply": "usage: squad send --reply <message-id> <text...>",
+  "send --retry": "usage: squad send --retry <delivery-id>",
 };
 
 const COMMAND_USAGE: Record<string, string> = {
@@ -136,7 +140,9 @@ const COMMAND_USAGE: Record<string, string> = {
   read: "usage: squad read [-n N] (show the last N messages, default 30; stateless)",
   release: "usage: squad release <path>",
   review: "usage: squad review [open|list|show|claim|resolve|cancel] ...",
-  send: "usage: squad send [--room <repo-path>] <text...>",
+  send:
+    "usage: squad send [--room <repo-path>] <text...> | squad send --reply <message-id> <text...> | " +
+    "squad send --retry <delivery-id>",
   steward: "usage: squad steward <status|tick>",
   tail: "usage: squad tail (follow the room live; Ctrl-C to stop)",
   who: "usage: squad who (presence state and last-seen times for everyone in the room, per session for a shared persona)",
@@ -152,7 +158,18 @@ Human CLI usage:
   squad send <text...>        Post a message to the room
   squad send --room <repo-path> <text...>
                                Post into another repo's existing room (leading
-                               args only; fails if that repo has no room yet)
+                               args only; fails if that repo has no room yet).
+                               When this repo has a room too, the message is a
+                               cross-room request that records this room and
+                               your persona, so the other room can reply
+  squad send --reply <message-id> <text...>
+                               Reply to a message in this room. Replying to a
+                               cross-room request also delivers one copy,
+                               addressed to the asker, into the asking room;
+                               any other reply stays local
+  squad send --retry <delivery-id>
+                               Retry a cross-room reply whose delivery failed;
+                               never duplicates a copy that already arrived
   squad read [-n N]           Show the last N messages (default 30; stateless)
   squad tail                  Follow the room live (Ctrl-C to stop)
   squad goals                 Show the goal board (open + done)
@@ -277,6 +294,11 @@ The room is per-repo: data lives in <repo-root>/.squad/, found by walking up
 from the current directory (falling back to ~/.squad outside any repo). Inside
 a git worktree the room is the primary clone's, so every worktree shares one.
 
+Cross-room replies: nothing crosses rooms except what someone explicitly sends.
+A room can restrict senders and reply destinations in <room>/routing.json:
+  {"accept_from": ["<repo-path>", ...], "reply_to": ["<repo-path>", ...]}
+An omitted key allows that direction; an empty list denies it.
+
 Environment:
   SQUAD_PERSONA   Explicit identity override (default: human without a session token)
   SQUAD_SESSION_ID Logical agent UUID; reuse across CLI calls and MCP reconnects
@@ -310,12 +332,28 @@ Environment:
                   (default: every kind)
 `;
 
+/** The thread annotation a routed message (#144) carries in CLI output. */
+function routeNote(m: Message): string {
+  const r = m.route;
+  if (!r) return "";
+  switch (r.direction) {
+    case "inbound":
+      return ` [cross-room request #${m.id} from ${r.remote_room}${r.answered_ts ? `; answered by ${r.answered_by}` : `; reply: squad send --reply ${m.id} <text>`}]`;
+    case "reply":
+      return ` [reply to #${r.reply_to}, routed to ${r.recipient} in ${r.remote_room}]`;
+    case "delivered":
+      return ` [reply from ${r.remote_room} to your request ${r.request_id}]`;
+    default:
+      return ` [reply to #${r.reply_to}]`;
+  }
+}
+
 function fmt(m: Message): string {
   const time = m.ts.slice(11, 19);
   // Collapsed system messages (#59) carry occurrences > 1: surface the
   // repeat count and last-seen time instead of silently showing only the
   // latest occurrence with no indication earlier ones ever happened.
-  const suffix = m.occurrences > 1 ? ` (seen ${m.occurrences} times, last at ${time})` : "";
+  const suffix = (m.occurrences > 1 ? ` (seen ${m.occurrences} times, last at ${time})` : "") + routeNote(m);
   return m.kind === "system"
     ? `${time} -- ${m.body}${suffix}`
     : `${time} <${m.sender}> ${m.body}${suffix}`;
@@ -536,7 +574,7 @@ async function runRelay(command: RelayCommand): Promise<void> {
  * repo has no squad.db: an explicitly addressed foreign room must already
  * exist, or a typo would mint a room nobody watches.
  */
-function applySendRoom(rest: string[]): void {
+function applySendRoom(rest: string[]): string {
   const path = rest[1];
   if (!path) throw new Error(COMMAND_USAGE.send);
   const abs = resolve(path);
@@ -557,11 +595,86 @@ function applySendRoom(rest: string[]): void {
   }
   process.env.SQUAD_DIR = dir;
   rest.splice(0, 2);
+  return dir;
+}
+
+/** A `squad send --room` resolved against both rooms (#144). */
+interface RoomSendPlan {
+  /** Canonical room this command would have used without --room. */
+  sourceDir: string;
+  /** Whether that source room already has a database (and so a return route). */
+  sourceExists: boolean;
+  /** Canonical target room. */
+  targetDir: string;
+}
+
+/**
+ * Resolve the *source* room -- honoring an explicit SQUAD_DIR and linked
+ * worktree resolution exactly as every other command does -- before
+ * applySendRoom() overrides SQUAD_DIR with the target. Must run first: after
+ * the override, the source is gone.
+ */
+function planRoomSend(rest: string[]): RoomSendPlan {
+  const sourceDir = canonicalRoomDir(squadDir());
+  const sourceExists = existsSync(join(sourceDir, "squad.db"));
+  const targetDir = canonicalRoomDir(applySendRoom(rest));
+  if (rest[0] === "--reply" || rest[0] === "--retry")
+    throw new Error(
+      "--room cannot be combined with --reply/--retry: a reply is routed by the request's own metadata; " +
+        "run 'squad send --reply <id>' inside the room that received the request",
+    );
+  return { sourceDir, sourceExists, targetDir };
+}
+
+/** Same warning `squad send` gives when it is about to post as the operator (#119). */
+function warnImplicitHuman(): void {
+  if (!process.env.SQUAD_PERSONA && !process.env.SQUAD_SESSION_ID) {
+    process.stderr.write(
+      "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
+        "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
+    );
+  }
+}
+
+/**
+ * A replyable cross-room send (#144): the sender's identity is resolved in
+ * the *source* room (an automatic identity resumes there instead of minting a
+ * new persona in the target), then the message lands in the target room with
+ * the source room, persona and a fresh request id as routing metadata. No
+ * presence is opened in the target room.
+ */
+function runRoutedSend(rest: string[], plan: RoomSendPlan): void {
+  const body = rest.join(" ").trim();
+  if (!body) throw new Error(COMMAND_USAGE.send);
+  warnImplicitHuman();
+  const persona = process.env.SQUAD_PERSONA || (process.env.SQUAD_SESSION_ID ? undefined : "human");
+  const source = openExistingRoom(plan.sourceDir);
+  let originPersona: string;
+  try {
+    originPersona = new Squad(source, persona, identityFromEnv()).persona;
+  } finally {
+    source.close();
+  }
+  const dest = openDb();
+  try {
+    const m = receiveCrossRoomRequest(dest, plan.targetDir, {
+      body,
+      originRoom: plan.sourceDir,
+      originPersona,
+    });
+    console.log(fmt(m));
+    console.log(
+      `cross-room request ${m.route!.request_id} delivered to ${plan.targetDir}; ` +
+        `replies will be routed back to ${originPersona} in ${plan.sourceDir}`,
+    );
+  } finally {
+    dest.close();
+  }
 }
 
 export async function runCli(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
-  if (cmd === "send" && rest[0] === "--room") applySendRoom(rest);
+  const roomSend = cmd === "send" && rest[0] === "--room" ? planRoomSend(rest) : null;
   if (cmd === "help" || cmd === "--help" || cmd === "-h" || cmd === undefined) {
     process.stdout.write(HELP);
     return;
@@ -592,6 +705,20 @@ export async function runCli(argv: string[]): Promise<void> {
       console.log("(run 'squad help' for the full command reference)");
       return;
     }
+  }
+  if (roomSend && roomSend.sourceDir !== roomSend.targetDir) {
+    if (roomSend.sourceExists) {
+      runRoutedSend(rest, roomSend);
+      return;
+    }
+    // Source-less (legacy) send: never create a source room just to make the
+    // message replyable. Deliver it one-way, exactly as before, after the
+    // target's inbound policy (if any) agrees.
+    assertInboundAllowed(roomSend.targetDir, roomSend.sourceDir);
+    process.stderr.write(
+      `squad: no room at ${roomSend.sourceDir}, so this message is one-way: ` +
+        "replies to it cannot be routed back.\n",
+    );
   }
   if (cmd === "path") {
     console.log(dbPath());
@@ -852,6 +979,30 @@ export async function runCli(argv: string[]): Promise<void> {
       break;
     }
     case "send": {
+      if (rest[0] === "--reply") {
+        const id = rest[1];
+        const text = rest.slice(2).join(" ").trim();
+        if (!id || !/^[1-9][0-9]*$/.test(id) || !text) throw new Error(SUB_USAGE["send --reply"]);
+        warnImplicitHuman();
+        const r = squad.reply(Number(id), text);
+        console.log(fmt(r.message));
+        if (r.delivery)
+          console.log(
+            `delivered to ${r.delivery.recipient} in ${r.delivery.dest_room} ` +
+              `(request ${r.delivery.request_id}, delivery ${r.delivery.delivery_id})`,
+          );
+        break;
+      }
+      if (rest[0] === "--retry") {
+        if (rest.length !== 2 || !rest[1]) throw new Error(SUB_USAGE["send --retry"]);
+        const d = squad.retryDelivery(rest[1]);
+        console.log(
+          d.status === "already-delivered"
+            ? `delivery ${d.delivery_id} was already delivered to ${d.recipient} in ${d.dest_room}; nothing re-sent`
+            : `delivered to ${d.recipient} in ${d.dest_room} (request ${d.request_id}, delivery ${d.delivery_id})`,
+        );
+        break;
+      }
       const body = rest.join(" ").trim();
       if (!body) throw new Error(COMMAND_USAGE.send);
       // Posting is the one command that puts words in somebody's mouth: with
