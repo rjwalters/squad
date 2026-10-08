@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.12
+
+- MCP launcher env fallback (#147). `.claude/hooks/squad-mcp.mjs` now reads
+  `mcpServers.squad.env` from `.mcp.json` (installed root, then primary clone)
+  when a harness starts it without `SQUAD_RUNTIME` or `SQUAD_DIR` set. A real
+  environment value always wins; only unset keys are filled.
+
 ## 0.19.11
 
 - Cross-room replies (#144). `squad send --room <repo>` now records the

@@ -53,3 +53,16 @@ test("neither source: the original error still fires", () => {
     assert.match(r.stderr, /SQUAD_RUNTIME is not set/);
   }
 });
+
+test("partial: SQUAD_RUNTIME from env, SQUAD_DIR from .mcp.json", () => {
+  const repo = setup({ SQUAD_RUNTIME: "fallback.mjs", SQUAD_DIR: ".squad-room" });
+  writeFileSync(
+    join(repo, "real.mjs"),
+    `console.log("ran-real"); console.log("dir=" + process.env.SQUAD_DIR);\n`,
+  );
+  const r = run(repo, { SQUAD_RUNTIME: "real.mjs" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /ran-real/);
+  // The fallback relative SQUAD_DIR is anchored to the repo root, not the cwd.
+  assert.match(r.stdout, /^dir=\/.*[\\/]\.squad-room$/m);
+});
