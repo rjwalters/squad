@@ -54,7 +54,6 @@ Issues carrying `loom:curated`.
 ## Epics
 
 - **#55**: Epic: research rooms need a merge point — 'banked' as integration, a steward role, node-level review, cards as state (lessons from the Erdős-85 room)
-- **#120**: Agents from different workstreams post under one persona, so room attribution breaks
 
 ## Backlog Balance
 
@@ -68,5 +67,5 @@ Issues carrying `loom:curated`.
 | Approved PRs awaiting merge | 1 |
 | Curated | 3 |
 | Architect / Hermit proposals | 1 |
-| Active epics | 2 |
+| Active epics | 1 |
 <!-- guide:plan-body:end -->
