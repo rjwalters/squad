@@ -20,12 +20,12 @@
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.0",
-    "smol-toml": "^1.8.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
+    "smol-toml": "^1.9.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.4",
     "ajv": "^8.20.0",
     "ajv-formats": "^3.0.1",
     "typescript": "^7.0.2"
