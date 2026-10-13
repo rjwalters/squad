@@ -38,6 +38,8 @@ installed configurations. These protocol tests do not invoke Claude or Codex mod
 
 There is no daemon. Each agent's harness spawns its own copy of the `squad` stdio MCP server; every copy opens the same SQLite database (WAL mode) at `<repo>/.squad/squad.db`. The human uses the same binary as a one-shot CLI. Claude and Codex are **peers**: identical tools, identical instructions (the installer writes the same block to `CLAUDE.md` and `AGENTS.md`), same room.
 
+The MCP server shuts down cleanly (leaves its own presence session, checkpoints the WAL, closes the database, exits 0) when its host closes stdin or sends SIGTERM/SIGINT/SIGHUP, and `squad who` ends with a `holders` block listing the live local MCP server pids holding the room open (omitted when there are none).
+
 ```
 Claude Code ──spawns──► squad (stdio MCP) ──┐
 Codex       ──spawns──► squad (stdio MCP) ──┼──► <repo>/.squad/squad.db  (SQLite, WAL)

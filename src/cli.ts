@@ -1421,6 +1421,12 @@ export async function runCli(argv: string[]): Promise<void> {
           console.log(`  session ${shortSessionId(s.session_id)}\t${s.state}\tlast seen ${s.last_seen}`);
         }
       }
+      // Local MCP servers holding the room open (#151); silent when none.
+      const holders = squad.listHolders();
+      if (holders.length > 0) {
+        console.log("holders (local MCP servers holding this room open):");
+        for (const h of holders) console.log(`  pid ${h.pid}\t${h.host}\tsince ${h.started_at ?? "?"}`);
+      }
       break;
     }
     case "leave": {
