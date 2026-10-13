@@ -88,6 +88,10 @@ test("never-touched server shuts down without ending another session of the pers
     await touch(a.child);
     const b = start(room);
     await b.banner();
+    // Both live servers -- touched (a) and never-touched (b) -- are listed by `squad who`.
+    const who = spawnSync(process.execPath, [entry, "who"], { env: { ...process.env, SQUAD_DIR: room }, encoding: "utf8" });
+    assert.match(who.stdout, new RegExp(`pid ${a.child.pid}\\b`));
+    assert.match(who.stdout, new RegExp(`pid ${b.child.pid}\\b`));
     b.child.kill("SIGTERM");
     assert.equal((await b.exited).code, 0);
     const db = new DatabaseSync(join(room, "squad.db"));
