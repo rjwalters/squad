@@ -2,6 +2,10 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-08
+
+- **Issue #120** (closed): Agents from different workstreams post under one persona, so room attribution breaks
+
 ### 2026-10-06
 
 - **PR #145**: feat: route replies to cross-room requests back to the asking room (#144)

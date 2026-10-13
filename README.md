@@ -38,6 +38,8 @@ installed configurations. These protocol tests do not invoke Claude or Codex mod
 
 There is no daemon. Each agent's harness spawns its own copy of the `squad` stdio MCP server; every copy opens the same SQLite database (WAL mode) at `<repo>/.squad/squad.db`. The human uses the same binary as a one-shot CLI. Claude and Codex are **peers**: identical tools, identical instructions (the installer writes the same block to `CLAUDE.md` and `AGENTS.md`), same room.
 
+The MCP server shuts down cleanly (leaves its own presence session, checkpoints the WAL, closes the database, exits 0) when its host closes stdin or sends SIGTERM/SIGINT/SIGHUP, and `squad who` ends with a `holders` block listing the live local MCP server pids holding the room open (omitted when there are none).
+
 ```
 Claude Code ──spawns──► squad (stdio MCP) ──┐
 Codex       ──spawns──► squad (stdio MCP) ──┼──► <repo>/.squad/squad.db  (SQLite, WAL)
@@ -94,7 +96,7 @@ puts on their stdin rather than the environment, so one Claude Code session is
 one lease row however many times its hooks fire. Keep the token in launcher
 state and pass it on resume. Room clear removes identity reservations too; connected agents restore their
 reservation on the next operation (resolving any new collision before sending). Exports
-include them (schema version 3). Rooms need no migration: reservations made under the
+have included them since schema version 3. Rooms need no migration: reservations made under the
 earlier `<provider>-<model>-<session-prefix>` format keep resolving to those names;
 only new identities get the new format.
 
@@ -153,6 +155,8 @@ Everything is **pull-only**: nothing ever pushes into an agent's context or wake
 | `squad_review_resolve` | Close out a request you claimed, with an optional `resolution`. Claimant-only, and only from `claimed` — a `pending` request must be acked first, so the ack is never skipped. Auto-announced in chat. |
 | `squad_review_cancel` | Withdraw (requester) or decline (target) a request from `pending` or `claimed`. Nobody else may cancel someone else's gate. Auto-announced in chat. |
 | `squad_review_list` | List review requests, most urgent first — open and unexpired by default; narrow by `target`/`requested_by`/`status`, widen with `include_terminal`/`include_expired`. |
+| `squad_node_create` / `squad_node_get` / `squad_node_list` / `squad_node_update` / `squad_node_claim` / `squad_node_submit` / `squad_node_review` | Durable research nodes (sharing IDs with Science Cards): create, discover, edit with `expected_revision`, claim, submit committed artifacts, and review. See [docs/nodes.md](docs/nodes.md). |
+| `squad_integration_get` / `squad_integration_set` / `squad_integration_unset` / `squad_integration_check` / `squad_integration_submit` / `squad_integration_attempt_get` / `squad_integration_attempt_list` | Shared integration target configuration and submission attempts; `squad_bank` integrates and publishes them. See [docs/integration.md](docs/integration.md). |
 | `squad_clear` | Wipe the room. |
 
 Goals are squad-scoped, not assigned: agents negotiate division of labor in chat, which is exactly the collaboration you want to see in the transcript.
@@ -706,65 +710,9 @@ $ squad card list --all
 
 Two things worth calling out: the `SUPPORTED` gate only checks that a qualifying evidence *type* (`experiment`/`observation` for an empirical claim) exists — it can't judge whether the evidence's content actually supports the hypothesis, which is why the team's own judgment (not the system) is what turns this into a `LEARN` → `PIVOT` instead of a premature `SUPPORTED`. And `squad card list` hides terminal-phase cards by default (`--all` / `squad_card_list`'s `include_done: true` shows them) — but the underlying `cardList()` / `squad_card_get` never delete or lock away a `FALSIFIED`/`INCONCLUSIVE`/`ABANDONED` card; negative results are exactly as durable and queryable as positive ones.
 
-## Design notes
+## Research integration
 
-- **One room per repo, on purpose.** The room's scope matches the work's scope, several projects can run squads independently, and `rm -rf .squad` resets exactly one of them. No named rooms, no TTLs, no allowlists, no crypto — if multi-host or encrypted coordination is ever needed, that's [safehouse](https://github.com/rjwalters/safehouse)'s job, and squad's conventions (persona-stamped sender, pull-only cursors, peek-vs-consume) are deliberately compatible with it.
-- **`read` vs `check`** (inherited from safehouse): `read`/`tail` are stateless history replay and never touch a cursor; `check` is a specific session's durable unread cursor and consumes by default. Scripts and curious humans should read, not check — don't eat a real agent's mail.
-- **SQLite over a flat file** because the room needs concurrent writers from independent processes and durable per-session cursors; WAL mode makes that safe without a server.
-- **Read cursors are per-session, not per-persona (#41).** One persona can hold multiple live sessions at once — an MCP connection and a one-shot CLI invocation, or two concurrent MCP clients — and each session (identified by the `session_id` `squad_join`/`squad_check` return) tracks its own unread cursor. Two sessions of the same persona never consume or fast-forward each other's unread state: session A's `squad_check` result is unaffected by session B calling `squad_join`/`squad_check` in between. A brand-new session's first cursor read is seeded once from the persona's most-advanced other session (live or recently-ended), falling back to the persona's durable high-water mark — see the next bullet — and only to the room's start (everything unread) if this is the persona's very first session ever. So the common case of one persona with one session at a time keeps today's steady-state UX, while a second concurrent session gets its own independent unread stream from that point forward. Messages sent by your own persona are still never returned as unread, regardless of which of your sessions sent them.
-- **Session cursors are swept, the persona's high-water mark is not (#41).** `session_cursors` rows are per-connection state and are pruned with their session row after `SESSION_RETENTION_HOURS` (24h), so a machine that has opened thousands of sessions doesn't keep a row for each forever. Cursor *durability* doesn't ride on that retention, though: every cursor advance also bumps a monotonic per-persona high-water mark in the long-lived `cursors` table, which is never pruned. A persona that goes quiet for days and comes back — every one of its sessions long swept — seeds its new session from that mark and sees only what actually arrived while it was away, rather than replaying the entire room history as unread.
-- **Review-request expiry is lazy, like presence staleness.** A request past its `expires_ts` stops counting toward the target's `pending_reviews` the moment anyone reads them — nothing is mutated, no status transition is recorded, and no scheduler exists (or is needed) to drive one. The stored state stays exactly what a persona put there: expiry is a *derived* view of a timestamp, so it can never drift from it. It also means an expired request can still be resolved or cancelled to close the record out honestly; only *claiming* one is refused, since a late ack would re-gate a requester who has already been released. Requester-or-target for cancel, target-only for claim, claimant-only for resolve: the two personas with a stake can always end the ask, and nobody else can end it for them.
-- **`dist/` is a gitignored build artifact, not bundled, and `node_modules` is required at runtime.** For the running server, only `mcp.ts` (two dependencies: `@modelcontextprotocol/sdk`, `zod`) needs `node_modules` (the installer separately uses `smol-toml` for configuration validation) — `db.ts`/`core.ts`/`cli.ts` use nothing but Node built-ins (`node:sqlite` needs no native build). `index.ts` exploits that split by importing `mcp.js` lazily, only when actually starting the MCP server, so a missing/broken `node_modules` (e.g. wiped by a host reboot, as happened once — every agent reaches the room through this one `node dist/index.js` entry point, so that single missing directory silently took squad down for all of them at once) degrades the CLI instead of crashing it outright: `squad doctor`, `squad --help`, and every other CLI command still run and report the problem plainly, and a failed MCP startup leaves a system message in the room itself so any teammate already there sees *why* this persona never showed up with tools. Bundling `mcp.js`'s two dependencies into a single self-contained `dist/index.js` (esbuild/rollup) would remove the `node_modules` runtime dependency entirely and was considered, but wasn't worth the added build-tooling surface given the mitigations above (plus `install.sh` verifying the dependencies actually resolve before writing any config, not just that `dist/` exists) close the same gap more simply. Revisit if this class of failure recurs.
-
-## Development
-
-```bash
-pnpm test    # builds + runs the node:test suite
-node scripts/generate-workflow-adapters.mjs --check  # fail on stale generated aliases
-```
-
-CI runs both commands on Node 22 and 24. The installed collaboration test loads
-the real Claude JSON and Codex TOML registrations in an isolated repository,
-exercises both MCP connections and CLI handoffs, and checks the capability matrix
-against the registered tool list. Installer tests verify matching skill references
-and ownership preservation. See [verification limits](docs/capabilities.md#verification-and-its-limits)
-for what these deterministic checks establish.
-
-### VERSION bumps for consumer-visible changes
-
-`install.sh` copies `commands/squad/*.md`, `skills/squad/SKILL.md`, its workflow
-references, `hooks/squad-mcp.mjs` (the project MCP launcher), and (with
-`--reentry`) `hooks/squad-reentry.sh` into every consumer repo, and
-`codex/prompts/squad-*.md` globally into `$CODEX_HOME/prompts/` (default
-`~/.codex/prompts/`); every installed
-`.mcp.json` also runs the compiled MCP server straight out of this repo's
-`src/` (via `dist/`), so a server-behavior change reaches consumers as soon as
-this repo updates. `install-metadata.json` records `VERSION` at install time,
-and `/repo:update-tools` compares it against this repo's current `VERSION` to
-detect drift — so a `VERSION` that never moves makes every consumer look
-falsely "current."
-
-**If your PR touches the installed surface** (`commands/squad/`,
-`skills/squad/`, `codex/prompts/`, `hooks/`,
-`install.sh`, `uninstall.sh`, `scripts/install-lifecycle.mjs`,
-`scripts/generate-workflow-adapters.mjs`, or `src/`) — bump `VERSION` (keep
-`package.json`'s `"version"` and the `McpServer` version string in
-`src/mcp.ts` in sync; `pnpm test` enforces this) via `/loom:bump`, or, if the
-change genuinely does not alter installed behavior (a comment, a typo fix, a
-test-only edit), add this exact marker to the PR body or a commit message
-instead:
-
-```
-<!-- loom:no-surface-change -->
-```
-
-CI (`.github/workflows/version-check.yml`) runs
-`scripts/check-surface-version-bump.sh` on every PR and fails when the
-watched surface changed without either a `VERSION` bump or the marker.
-
-## License
-
-MIT
+### Shared integration target
 
 Research rooms can opt into a [shared integration target](docs/integration.md).
 Its repository, remote, branch, build command and steward are revisioned in the
@@ -852,3 +800,63 @@ delivered reply and stored replies whose delivery is still pending (see
 [Cross-room requests and replies](#cross-room-requests-and-replies)), with
 origin, age and the `squad send --reply` / `--retry` command. It reads only this
 room's routing state and never opens another room's database.
+
+## Design notes
+
+- **One room per repo, on purpose.** The room's scope matches the work's scope, several projects can run squads independently, and `rm -rf .squad` resets exactly one of them. No named rooms, no TTLs, no allowlists, no crypto — if multi-host or encrypted coordination is ever needed, that's [safehouse](https://github.com/rjwalters/safehouse)'s job, and squad's conventions (persona-stamped sender, pull-only cursors, peek-vs-consume) are deliberately compatible with it.
+- **`read` vs `check`** (inherited from safehouse): `read`/`tail` are stateless history replay and never touch a cursor; `check` is a specific session's durable unread cursor and consumes by default. Scripts and curious humans should read, not check — don't eat a real agent's mail.
+- **SQLite over a flat file** because the room needs concurrent writers from independent processes and durable per-session cursors; WAL mode makes that safe without a server.
+- **Read cursors are per-session, not per-persona (#41).** One persona can hold multiple live sessions at once — an MCP connection and a one-shot CLI invocation, or two concurrent MCP clients — and each session (identified by the `session_id` `squad_join`/`squad_check` return) tracks its own unread cursor. Two sessions of the same persona never consume or fast-forward each other's unread state: session A's `squad_check` result is unaffected by session B calling `squad_join`/`squad_check` in between. A brand-new session's first cursor read is seeded once from the persona's most-advanced other session (live or recently-ended), falling back to the persona's durable high-water mark — see the next bullet — and only to the room's start (everything unread) if this is the persona's very first session ever. So the common case of one persona with one session at a time keeps today's steady-state UX, while a second concurrent session gets its own independent unread stream from that point forward. Messages sent by your own persona are still never returned as unread, regardless of which of your sessions sent them.
+- **Session cursors are swept, the persona's high-water mark is not (#41).** `session_cursors` rows are per-connection state and are pruned with their session row after `SESSION_RETENTION_HOURS` (24h), so a machine that has opened thousands of sessions doesn't keep a row for each forever. Cursor *durability* doesn't ride on that retention, though: every cursor advance also bumps a monotonic per-persona high-water mark in the long-lived `cursors` table, which is never pruned. A persona that goes quiet for days and comes back — every one of its sessions long swept — seeds its new session from that mark and sees only what actually arrived while it was away, rather than replaying the entire room history as unread.
+- **Review-request expiry is lazy, like presence staleness.** A request past its `expires_ts` stops counting toward the target's `pending_reviews` the moment anyone reads them — nothing is mutated, no status transition is recorded, and no scheduler exists (or is needed) to drive one. The stored state stays exactly what a persona put there: expiry is a *derived* view of a timestamp, so it can never drift from it. It also means an expired request can still be resolved or cancelled to close the record out honestly; only *claiming* one is refused, since a late ack would re-gate a requester who has already been released. Requester-or-target for cancel, target-only for claim, claimant-only for resolve: the two personas with a stake can always end the ask, and nobody else can end it for them.
+- **`dist/` is a gitignored build artifact, not bundled, and `node_modules` is required at runtime.** For the running server, only `mcp.ts` (two dependencies: `@modelcontextprotocol/sdk`, `zod`) needs `node_modules` (the installer separately uses `smol-toml` for configuration validation) — `db.ts`/`core.ts`/`cli.ts` use nothing but Node built-ins (`node:sqlite` needs no native build). `index.ts` exploits that split by importing `mcp.js` lazily, only when actually starting the MCP server, so a missing/broken `node_modules` (e.g. wiped by a host reboot, as happened once — every agent reaches the room through this one `node dist/index.js` entry point, so that single missing directory silently took squad down for all of them at once) degrades the CLI instead of crashing it outright: `squad doctor`, `squad --help`, and every other CLI command still run and report the problem plainly, and a failed MCP startup leaves a system message in the room itself so any teammate already there sees *why* this persona never showed up with tools. Bundling `mcp.js`'s two dependencies into a single self-contained `dist/index.js` (esbuild/rollup) would remove the `node_modules` runtime dependency entirely and was considered, but wasn't worth the added build-tooling surface given the mitigations above (plus `install.sh` verifying the dependencies actually resolve before writing any config, not just that `dist/` exists) close the same gap more simply. Revisit if this class of failure recurs.
+
+## Development
+
+```bash
+pnpm test    # builds + runs the node:test suite
+node scripts/generate-workflow-adapters.mjs --check  # fail on stale generated aliases
+```
+
+CI runs both commands on Node 22 and 24. The installed collaboration test loads
+the real Claude JSON and Codex TOML registrations in an isolated repository,
+exercises both MCP connections and CLI handoffs, and checks the capability matrix
+against the registered tool list. Installer tests verify matching skill references
+and ownership preservation. See [verification limits](docs/capabilities.md#verification-and-its-limits)
+for what these deterministic checks establish.
+
+### VERSION bumps for consumer-visible changes
+
+`install.sh` copies `commands/squad/*.md`, `skills/squad/SKILL.md`, its workflow
+references, `hooks/squad-mcp.mjs` (the project MCP launcher), and (with
+`--reentry`) `hooks/squad-reentry.sh` into every consumer repo, and
+`codex/prompts/squad-*.md` globally into `$CODEX_HOME/prompts/` (default
+`~/.codex/prompts/`); every installed
+`.mcp.json` also runs the compiled MCP server straight out of this repo's
+`src/` (via `dist/`), so a server-behavior change reaches consumers as soon as
+this repo updates. `install-metadata.json` records `VERSION` at install time,
+and `/repo:update-tools` compares it against this repo's current `VERSION` to
+detect drift — so a `VERSION` that never moves makes every consumer look
+falsely "current."
+
+**If your PR touches the installed surface** (`commands/squad/`,
+`skills/squad/`, `codex/prompts/`, `hooks/`,
+`install.sh`, `uninstall.sh`, `scripts/install-lifecycle.mjs`,
+`scripts/generate-workflow-adapters.mjs`, or `src/`) — bump `VERSION` (keep
+`package.json`'s `"version"` and the `McpServer` version string in
+`src/mcp.ts` in sync; `pnpm test` enforces this) via `/loom:bump`, or, if the
+change genuinely does not alter installed behavior (a comment, a typo fix, a
+test-only edit), add this exact marker to the PR body or a commit message
+instead:
+
+```
+<!-- loom:no-surface-change -->
+```
+
+CI (`.github/workflows/version-check.yml`) runs
+`scripts/check-surface-version-bump.sh` on every PR and fails when the
+watched surface changed without either a `VERSION` bump or the marker.
+
+## License
+
+MIT

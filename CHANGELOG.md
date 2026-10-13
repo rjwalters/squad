@@ -4,12 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.19.12
+## 0.19.13
 
 - MCP launcher env fallback (#147). `.claude/hooks/squad-mcp.mjs` now reads
   `mcpServers.squad.env` from `.mcp.json` (installed root, then primary clone)
   when a harness starts it without `SQUAD_RUNTIME` or `SQUAD_DIR` set. A real
   environment value always wins; only unset keys are filled.
+
+## 0.19.12
+
+- MCP server shuts down gracefully (#151). On server close, stdin EOF, or
+  SIGTERM/SIGINT/SIGHUP it leaves only its own session (if it joined), runs a
+  WAL checkpoint, closes the database and exits 0, with a 3s fallback exit.
+  Each live server registers itself in a new host-local `mcp_holders` table
+  (not exported, no schema-version change), and `squad who` appends the live
+  holders on this host, pruning dead pids. Output is unchanged when there are
+  no holders.
 
 ## 0.19.11
 

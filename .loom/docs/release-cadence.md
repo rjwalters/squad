@@ -1,12 +1,56 @@
 # Release cadence vs. `VERSION`
 
-`VERSION` (and the other five `scripts/version.sh`-managed files, #5517) bumps
-after nearly every merge to `main` that touches `defaults/`
-(`version-bump-on-merge.yml`, #7743) — it tracks the tree, not a release. A
-GitHub Release is a **separate event with its own rule**, stated below, and
-not every `VERSION` gets one. This doc states that rule and what it means for
-the signed-artifact `--fetch` path (Epic #4990 Phase 3, #5009/#5018/#5020) and
-for everything that reads the release list.
+`VERSION` (and the other five `scripts/version.sh`-managed files, #5517) is
+bumped by `version-bump-on-merge.yml` (#7743) **at most once per
+`RELEASE_MIN_INTERVAL`** (default 24 h, #11174): `defaults/` merges inside the
+window accumulate, unreleased, and ship together in the next bump. A GitHub
+Release is a **separate event with its own rule**, stated below, and not every
+`VERSION` gets one. This doc states the bump cadence, the release rule, and
+what they mean for the signed-artifact `--fetch` path (Epic #4990 Phase 3,
+#5009/#5018/#5020) and for everything that reads the release list.
+
+## Cadence: at most one bump per release interval (#11174)
+
+Until #11174 every `defaults/` merge cut a version: 52 bump commits in one
+day, each starting its own `main` CI run and then a release, which queued PR
+CI behind it and moved every non-fleet `autoUpdate` host. The operator
+direction (2026-10-09) is **at most one release a day**.
+
+- **The gate.** `scripts/version-bump-gate.sh` (unit-tested by
+  `scripts/test-version-bump-gate.sh`) runs before any toolchain setup. The
+  last bump is the newest **first-parent** `main` commit that changed
+  `VERSION`, timed by its **committer** time (PRs cannot change `VERSION`, so
+  only bump commits match; tags and Release dates are never read). A run bumps
+  only when `now - last_bump >= RELEASE_MIN_INTERVAL` **and** something under
+  `defaults/` changed since that bump. Otherwise it exits green and changes
+  nothing, with `deferred: last bump <sha> at <UTC>; next bump eligible at
+  <UTC>` (or `nothing to release`) in the job summary. The gate is re-checked
+  after every `git fetch` in the push-retry loop, so a bump that lands mid-race
+  makes the run defer instead of bumping twice.
+- **The interval.** Repository variable `RELEASE_MIN_INTERVAL`, in seconds;
+  unset means `86400`. A non-integer or negative value fails the run red — it
+  never falls back to "always bump". `0` explicitly disables the limit. A
+  missing bump commit or a shallow checkout also fails red: a gate wrong in
+  the "defer" direction would silently stop releases.
+- **Triggers.** A `defaults/**` push to `main` (as before); an **hourly**
+  `schedule` catch-up, which is what ships a quiet day's merges; and
+  `workflow_dispatch`. Worst-case delay from the first unreleased merge to its
+  bump is `RELEASE_MIN_INTERVAL` + about 1 h, plus GitHub's own schedule delay
+  (cron runs can be late or dropped under load; the next run recovers). A
+  once-a-day cron was rejected: against a window that started at an arbitrary
+  time it can stretch the wait to about 48 h.
+- **Hotfix path.** Dispatch the workflow with `force: true` and a `reason`
+  (required) to bump now. `force` skips only the interval: there must still be
+  an unreleased `defaults/` change, so no no-op version is cut. The commit body
+  records `Forced-by: <actor>` and `Reason: <reason>`; a bot actor is refused.
+  Anyone with `workflow_dispatch` (write) access can force; it is the operator
+  path. A forced bump starts a new window. `force: false` runs the normal gate,
+  which is useful for checking what the next run would do.
+- **Fleet floors wait for the daily release.** A `loom_min_version` floor can
+  only name a published release, so a fix the fleet needs now waits for the
+  next eligible bump unless it is forced. To ship it now: dispatch `force` with
+  a reason, wait for that commit's `CI` to go green and `release.yml` to
+  publish, then raise `loom_min_version` to the released tag.
 
 ## The decision: a release is a green `main` commit with an unreleased `VERSION` (#10826)
 
@@ -42,12 +86,15 @@ for everything that reads the release list.
   Release (`/repo:release`, the `release` event) and a `workflow_dispatch` dry
   run keep their per-tag groups and are unchanged.
 
-### Versions are assigned at merge; tags may skip versions
+### Versions are assigned by the bump; tags may skip versions
 
-`version-bump-on-merge.yml` is unchanged: a bump commit still assigns the
-next patch version right after the merge. That version is released only if
-the bump commit, or a later `main` commit still carrying the same unreleased
-`VERSION`, finishes green. Examples:
+A bump commit assigns the next patch version to everything merged since the
+previous bump (see Cadence above). That version is released only if the bump
+commit, or a later `main` commit still carrying the same unreleased `VERSION`,
+finishes green. With a 24 h window many merges share one `VERSION`, so
+`v<X>` can also contain a few merges made *after* the bump commit, when the
+bump commit's own CI run was superseded and a later merge went green first.
+That is the #10826 semantics, unchanged. Examples:
 
 - Bump commit B's CI is superseded by merge M2's pending run. M2 goes green
   still carrying B's `VERSION`, so `v<VERSION>` is released **at M2** — the
@@ -104,9 +151,14 @@ resolved release against the **source tree's own `VERSION` file** (not just
 the installed binary's version) and reports the gap on both paths:
 
 - **Resolution time** (any `--check`/plain run, not just `--fetch`): when the
-  newest release is behind the source tree's `VERSION`, a warning is printed:
-  `Artifact path cannot reach current source: newest release ... is behind
-  this source tree's VERSION (...)`.
+  newest release is behind the source tree's `VERSION`, an informational note
+  is printed. When the release IS newer than the installed binary (so this
+  run installs it), the note says so plainly — the target of a release
+  install is the release, not the checkout, and a checkout a few commits ahead
+  is routine (#11070). When it is not, the note says no release artifact can
+  update this host until a release >= the source `VERSION` is cut. Neither
+  note predicts a hard-fail; under a forced `--fetch` the refusal below is
+  the only message, and only when it actually happens.
 - **`--check`**: the same gap is summarized up front —
   `Release gap: installed ..., newest release ..., source ... — the
   artifact-fetch path cannot reach current source until a release >= ... is
@@ -132,8 +184,8 @@ simply never created.
 
 **This is accepted, not treated as a gap to backfill**, for two reasons:
 
-1. **Each bump's tag is unique** (`v<VERSION>`, and `VERSION` moves forward on
-   nearly every merge). A later run resolves a *different*, newer tag, and
+1. **Each bump's tag is unique** (`v<VERSION>`, and `VERSION` moves forward
+   with every bump, at most once per release interval). A later run resolves a *different*, newer tag, and
    once a newer version is released an older one is never published (#10826) — it has
    no way to notice or recreate a specific *earlier* version's missing
    Release without extra state (e.g. diffing the full tag history against
@@ -253,6 +305,97 @@ both the file-size ratchet and the portable shell budget, so the classification
 cannot be added there without first porting the resolution behind the daemon.
 Tracked separately in
 [#8654](https://github.com/rjwalters/loom/issues/8654).
+
+## Compatibility contract (#10716)
+
+Each release declares what its two halves need from each other (tracker
+[#10698](https://github.com/rjwalters/loom/issues/10698), D3/D4). Both values
+are constants in `loom-daemon/src/install_compat.rs`:
+
+| Constant | Meaning | Recorded where |
+|---|---|---|
+| `SUPPORTS_INSTALLED` | the oldest installed Loom (`loom_version`) this daemon works with | in the daemon only |
+| `REQUIRES_DAEMON` | the oldest daemon the installed files this release ships work with | `.loom/install-metadata.json` `requires_daemon`, written by `loom-daemon init` and `scripts/install-loom.sh` |
+
+**They move only when a change breaks compatibility**, in the PR that breaks
+it, never at release time:
+
+- Raise `REQUIRES_DAEMON` when shipped shell starts needing something an older
+  daemon lacks: a new `loom-daemon` subcommand, or a hard
+  `# requires-daemon: <sub> >= <version>` floor above the current value. Name
+  a published release, or the version this change ships as (`VERSION` + 1
+  patch) when the dependency lands in the same PR — still the next bump, but
+  that bump may now be up to a release interval away (see Cadence above). The value is a floor, not
+  a tag: releases skip versions (above), so `v<REQUIRES_DAEMON>` may never be
+  published, and CI proves the claim against the oldest published release at
+  or above it.
+- Raise `SUPPORTS_INSTALLED` when the daemon stops working with older
+  installed files: it starts executing an installed file that older releases
+  do not ship, or relies on a changed argument contract. Add any newly
+  executed file to `DAEMON_INVOKED_INSTALLED_FILES` in the same PR.
+
+The `Compatibility contract across adjacent releases` step of CI's
+`Install Surface Checks` job (`loom-daemon install-compat check`) proves both
+claims. It runs the previous release's installed files against the new daemon,
+and the new installed files against the oldest published release at or above
+`REQUIRES_DAEMON` (`--fetch-old-daemon`; a release whose assets are still
+uploading is skipped). While no such release is published, which is the PR
+that raises the value and `main` until the next release, the new daemon stands
+in for it. It fails when a claim is violated. To try a proposed value before
+changing the constant, run it locally with `--requires-daemon <v>` /
+`--supports-installed <v>` and `--fetch-old-daemon` (or `--old-daemon <that
+release's binary>`). `loom-daemon install-compat show --repo <clone>` prints
+both sides for one repo and how they classify.
+
+Three things about that step's verdict (#10868):
+
+- **A release still uploading is skipped, and the output says so.** The note
+  names each tag passed over (`release v<x> is tagged but its assets are not
+  uploaded yet`). A listed asset that then fails to download is retried, three
+  attempts five seconds apart, before the step fails naming the tag and the
+  asset. An asset listing the forge could not answer still fails the step.
+- **A daemon that crashes is a violation, not a pass.** A subcommand is
+  missing only when clap refuses it. A probe binary that cannot be executed,
+  is killed by a signal or panics is reported as broken, with the binary, the
+  subcommand and the exit status. It is never counted as having the
+  subcommand.
+- **The floor check also runs as a unit test.**
+  `no_shipped_hard_floor_is_above_requires_daemon`
+  (`loom-daemon/src/install_compat/tests.rs`) walks `defaults/` with the
+  harness's own code and fails when a hard `# requires-daemon:` floor is above
+  `REQUIRES_DAEMON`. It catches a floor that is too high, never one that is
+  too low.
+
+### The daily proof of `SUPPORTS_INSTALLED`
+
+The CI step tests one release in direction A: the newest tag at or below
+`VERSION`. So nothing in the merge gate runs the release `SUPPORTS_INSTALLED`
+itself names. The `Compatibility Floor (SUPPORTS_INSTALLED)` job of
+`.github/workflows/ci-daily.yml` does, once a day:
+
+```bash
+loom-daemon install-compat check --prev-ref "v<SUPPORTS_INSTALLED>" --fetch-old-daemon
+```
+
+It reads the value from the built daemon (`install-compat show --json`), so
+moving the constant needs no workflow edit. A failure opens the
+`[ci-daily] Compatibility Floor (SUPPORTS_INSTALLED)` tracking issue.
+
+When it fails the claim is false, and there are two ways to make it true:
+
+- **Raise `SUPPORTS_INSTALLED`** to the oldest release for which the command
+  above passes (try one with `--supports-installed <v> --prev-ref v<v>`), and
+  update the constant's comment. This is the default. What it means: once the
+  dispatch hold ([#10719](https://github.com/rjwalters/loom/issues/10719))
+  acts on the value, a repo installed below it is held until it is resynced.
+  Fleet repos are resynced by the daemon; a repo outside the fleet that old
+  needs a manual resync.
+- **Keep the value** and restore in the daemon whatever the old installed
+  shell needs. Choose this when the gap is a regression, not an intended
+  break.
+
+`SUPPORTS_INSTALLED` must name a release tag: the job fails when `v<value>`
+does not exist, because then nothing can be run against it.
 
 ## See also
 

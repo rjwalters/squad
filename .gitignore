@@ -34,14 +34,19 @@ dist/
 .loom/claims/
 .loom/locks/
 .loom/signals/
+.loom/sweep-dispatch-tap/
 .loom/status/
 .loom/retry-state/
 .loom/exit-codes/
 .loom/sweep-checkpoint/
 .loom/sweep-run/
+.loom/targets/
+.loom/target*/
+.cargo-target*/
+.loom-target/
+/target-*/
 .loom/state/*
 !.loom/state/detect-unlabeled-epics-dismissed
-.loom/concierge/
 .loom/stats/
 .loom/diagnostics/
 .loom/guide-docs-state.json
@@ -88,6 +93,10 @@ dist/
 # Ignoring them makes the mistake harmless instead of committable.
 package-lock.json
 yarn.lock
+
+# pnpm's content-addressable store, created in-repo when pnpm's global store
+# is unavailable. Package cache only — never committable.
+.pnpm-store/
 
 # Tool logs, same rule as .loom/logs/ above.
 .claude/skills/repo/logs/

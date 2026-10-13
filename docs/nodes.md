@@ -103,7 +103,7 @@ independent builds. Current-version export/import includes these alongside the
 graph, snapshots and integration bindings;
 `clear` removes them with the rest of the room. As with earlier schema changes,
 imports require matching export schema versions. Open an older room with the
-current build and re-export it to upgrade its export format.
+current build (schema 11) and re-export it to upgrade its export format.
 
 ## Observed workflow gap
 
