@@ -23,6 +23,7 @@ import { randomUUID } from "node:crypto";
 import { DatabaseSync, backup } from "node:sqlite";
 import { existsSync } from "node:fs";
 import { dirname } from "node:path";
+import { hostname } from "node:os";
 import { canonicalRoomDir, envMinutes, openExistingRoom, ROOM_TABLES, SCHEMA_VERSION } from "./db.js";
 import { assertInboundAllowed, assertReplyAllowed, roomLabel } from "./routing.js";
 
@@ -2050,6 +2051,41 @@ export class Squad {
       this.db
         .prepare("UPDATE sessions SET left_ts = NULL WHERE session_id = ? AND left_ts IS NOT NULL")
         .run(this._sessionId);
+  }
+
+  /** Record this process as an MCP server holding the room open (#151). */
+  registerHolder(pid: number = process.pid): void {
+    this.db
+      .prepare("INSERT OR REPLACE INTO mcp_holders (host, pid, started_at) VALUES (?, ?, ?)")
+      .run(hostname(), pid, now());
+  }
+
+  /** Remove this process's holder row. */
+  unregisterHolder(pid: number = process.pid): void {
+    this.db.prepare("DELETE FROM mcp_holders WHERE host = ? AND pid = ?").run(hostname(), pid);
+  }
+
+  /**
+   * Live local holders of the room: rows for this host whose pid still exists.
+   * Dead pids are pruned. Rows from other hosts are skipped (unverifiable).
+   */
+  listHolders(): Array<{ host: string; pid: number; started_at: string | null }> {
+    const host = hostname();
+    const rows = this.db
+      .prepare("SELECT host, pid, started_at FROM mcp_holders WHERE host = ? ORDER BY started_at, pid")
+      .all(host) as unknown as Array<{ host: string; pid: number; started_at: string | null }>;
+    const live: typeof rows = [];
+    for (const r of rows) {
+      let alive = true;
+      try {
+        process.kill(r.pid, 0);
+      } catch (e) {
+        alive = (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+      if (alive) live.push(r);
+      else this.db.prepare("DELETE FROM mcp_holders WHERE host = ? AND pid = ?").run(r.host, r.pid);
+    }
+    return live;
   }
 
   /** This connection's session row, or null before its first operation. */

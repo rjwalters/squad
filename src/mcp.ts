@@ -38,7 +38,7 @@ export async function runMcpServer(): Promise<void> {
   // never able to block or fail the tool call that inserted the message.
   squad.onMessageInserted = opportunisticRelay(db);
 
-  const server = new McpServer({ name: "squad", version: "0.19.11" });
+  const server = new McpServer({ name: "squad", version: "0.19.12" });
 
   const cardCreateSchema = {
     title: z.string().min(1).describe("Short card title"),
@@ -908,7 +908,43 @@ export async function runMcpServer(): Promise<void> {
     },
   );
 
-  await server.connect(new StdioServerTransport());
+  const transport = new StdioServerTransport();
+  await server.connect(transport);
+  // Visible as a room holder from startup, before any tool call (#151).
+  try {
+    squad.registerHolder();
+  } catch {
+    // Holder bookkeeping must never stop the server from starting.
+  }
+
+  // Graceful, idempotent shutdown (#151). StdioServerTransport only listens
+  // to stdin 'data'/'error', so EOF is watched on process.stdin directly.
+  let shuttingDown = false;
+  const shutdown = (): void => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    // A hung step must not block exit.
+    setTimeout(() => process.exit(0), 3000).unref();
+    // Leave only our own session: leave() with none would end every live
+    // session of the persona.
+    try {
+      if (squad.session()) squad.leave();
+    } catch {}
+    try {
+      squad.unregisterHolder();
+    } catch {}
+    try {
+      db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } catch {}
+    try {
+      db.close();
+    } catch {}
+    process.exit(0);
+  };
+  server.server.onclose = shutdown;
+  process.stdin.on("end", shutdown);
+  process.stdin.on("close", shutdown);
+  for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"] as const) process.on(sig, shutdown);
 
   // Startup banner on stderr (stdout is the transport). Two audiences:
   // a human reading a launch log, and the automated smoke tests that gate
@@ -920,4 +956,6 @@ export async function runMcpServer(): Promise<void> {
   // repo whose .mcp.json names only squad failed with MCP_PREFLIGHT_FAILED.
   // Emit after connect() so the line means "ready", not "about to try".
   console.error("squad MCP server running on stdio");
+  // stdin may already have ended before the listeners above were attached.
+  if (process.stdin.readableEnded || process.stdin.destroyed) shutdown();
 }

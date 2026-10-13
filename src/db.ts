@@ -435,6 +435,15 @@ CREATE TABLE IF NOT EXISTS relay_cursors (
   last_error TEXT,
   last_error_at TEXT
 );
+-- Local MCP server processes holding this room open (#151). Local process
+-- state like relay_cursors: outside ROOM_TABLES, so clear/export/import
+-- ignore it and SCHEMA_VERSION does not move.
+CREATE TABLE IF NOT EXISTS mcp_holders (
+  host TEXT NOT NULL,
+  pid INTEGER NOT NULL,
+  started_at TEXT,
+  PRIMARY KEY (host, pid)
+);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */
