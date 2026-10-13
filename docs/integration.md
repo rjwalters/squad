@@ -60,7 +60,7 @@ unset takes `expected_revision`. Both CLI and MCP return the same JSON state.
 
 Configuration history lives in the room's `integration_configs` table. Opening an
 older room adds the empty table without changing existing identities or other
-room state. Schema version 5 exports include every configuration revision;
+room state. Exports from schema version 5 onward include every configuration revision;
 imports require a matching schema version and an empty destination. Open older
 rooms with this release and re-export to migrate older exports. `squad clear`
 resets integration configuration and its history along with the rest of the room;

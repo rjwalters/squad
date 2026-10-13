@@ -94,6 +94,10 @@ dist/
 package-lock.json
 yarn.lock
 
+# pnpm's content-addressable store, created in-repo when pnpm's global store
+# is unavailable. Package cache only — never committable.
+.pnpm-store/
+
 # Tool logs, same rule as .loom/logs/ above.
 .claude/skills/repo/logs/
 
