@@ -7,7 +7,7 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 
 Judge-approved PRs stuck under a `loom:operator` merge-risk hold — implementation work is done, only a human merge decision is missing.
 
-- **#148**: fix(launcher): fall back to .mcp.json when SQUAD_RUNTIME is unset
+_None._
 
 ## Operator Priority
 
@@ -37,7 +37,7 @@ _None._
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#148**: fix(launcher): fall back to .mcp.json when SQUAD_RUNTIME is unset
+_None._
 
 ## Proposed
 
@@ -45,7 +45,6 @@ Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
 - **#122**: Inbox hook identity without a pin: record a session_id → persona mapping on squad_join *(curated)*
-- **#147**: squad-mcp launcher: fall back to .mcp.json when SQUAD_RUNTIME is unset *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -59,13 +58,13 @@ Issues carrying `loom:curated`.
 
 | Tier | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Operator priority | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 3 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 2 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
