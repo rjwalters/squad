@@ -2,6 +2,13 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-13
+
+- **PR #152**: MCP server: graceful shutdown + show room holders in squad who
+- **PR #148**: fix(launcher): fall back to .mcp.json when SQUAD_RUNTIME is unset
+- **Issue #151** (closed): MCP server never closes the room: no shutdown on stdin EOF/SIGTERM, and no way to see which process holds .squad/squad.db
+- **Issue #147** (closed): squad-mcp launcher: fall back to .mcp.json when SQUAD_RUNTIME is unset
+
 ### 2026-10-08
 
 - **Issue #120** (closed): Agents from different workstreams post under one persona, so room attribution breaks
