@@ -7,7 +7,7 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#156**: Bump Repo Skills 0.19.5 -> 0.24.1
+_None._
 
 ## Very Important
 
@@ -43,14 +43,13 @@ _None._
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#156**: Bump Repo Skills 0.19.5 -> 0.24.1
+_None._
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
-- **#122**: Inbox hook identity without a pin: record a session_id → persona mapping on squad_join *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -64,14 +63,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 1 |
-| Curated | 2 |
+| Approved PRs awaiting merge | 0 |
+| Curated | 1 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
