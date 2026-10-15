@@ -5,13 +5,19 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 <!-- guide:plan-body:start -->
 ## Operator Attention: Merge-Risk-Hold Pileup
 
-Judge-approved PRs stuck under a `loom:operator` merge-risk hold — implementation work is done, only a human merge decision is missing.
+Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
+
+- **#156**: Bump Repo Skills 0.19.5 -> 0.24.1
+
+## Very Important
+
+`loom:very-important` (one counts per workspace); every stage takes these first.
 
 _None._
 
-## Operator Priority
+## Important
 
-Issues the operator starred (`loom:operator-priority`); land these first.
+`loom:important`; taken before unlabelled work.
 
 _None._
 
@@ -37,7 +43,7 @@ _None._
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#156**: Bump Repo Skills 0.19.5 -> 0.24.1
 
 ## Proposed
 
@@ -56,14 +62,15 @@ Issues carrying `loom:curated`.
 
 ## Backlog Balance
 
-| Tier | Count |
+| Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 0 |
-| Operator priority | 0 |
+| Operator merge-risk holds | 1 |
+| Very important | 0 |
+| Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 0 |
+| Approved PRs awaiting merge | 1 |
 | Curated | 2 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
