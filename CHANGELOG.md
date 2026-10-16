@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.14
+
+- Codex re-entry native join prompt (#162). When no global `squad-join.md`
+  prompt exists (a `--no-codex` install) but the repo has the native
+  `.agents/skills/squad/SKILL.md` bundle, a fresh Codex session now receives
+  the explicit native `$squad` join prompt instead of a bare `/squad-join`
+  that `codex exec` does not expand. A global prompt still wins and `--prompt`
+  stays authoritative.
+
 ## 0.19.13
 
 - MCP launcher env fallback (#147). `.claude/hooks/squad-mcp.mjs` now reads
