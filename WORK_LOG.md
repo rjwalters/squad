@@ -4,6 +4,8 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-10-16
 
+- **PR #163**: feat(codex-reentry): select native $squad join workflow when no legacy prompt exists
+- **Issue #162** (closed): codex-reentry: use the native Squad join workflow when legacy prompts are absent
 - **PR #159**: Bump Repo Skills 0.24.1 -> 0.24.3
 
 ### 2026-10-15
