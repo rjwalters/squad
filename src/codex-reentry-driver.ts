@@ -13,11 +13,12 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { envMinutes, openDb, squadDir } from "./db.js";
+import { envMinutes, findRepoRoot, openDb, squadDir } from "./db.js";
 import { Squad } from "./core.js";
 import {
   DEFAULT_MIN_RUN_INTERVAL_MS,
   FALLBACK_JOIN_PROMPT,
+  NATIVE_JOIN_PROMPT,
   classifyRolloutTail,
   pickLatestRollout,
   resumePrompt,
@@ -94,14 +95,17 @@ export function classifyRunFromLogs(startedAtMs: number): RolloutOutcome {
 }
 
 /**
- * The fresh-session prompt. Codex expands `/squad-join` from
- * `~/.codex/prompts/squad-join.md` in its interactive TUI, but `codex exec`
- * takes a prompt string — so the supervisor inlines the prompt file's text
- * when it can find it, and falls back to the literal slash command
- * otherwise (harmless if unexpanded: the persona still gets told what to do
- * by CLAUDE.md/AGENTS.md's squad block).
+ * The fresh-session prompt. `codex exec` takes a prompt string and does not
+ * expand slash commands, so resolution order is:
+ *  1. non-empty global `prompts/squad-join.md` text (installed or customized),
+ *     inlined verbatim;
+ *  2. if `<repoRoot>/.agents/skills/squad/SKILL.md` exists (the native bundle
+ *     present even after `--no-codex`), `NATIVE_JOIN_PROMPT`;
+ *  3. the literal `/squad-join` (harmless if unexpanded: the persona still
+ *     gets told what to do by AGENTS.md's squad block).
+ * An explicit `--prompt` bypasses this entirely (see `runCodexReentry`).
  */
-export function joinPromptText(): string {
+export function joinPromptText(repoRoot: string | null = findRepoRoot(process.cwd())): string {
   const candidates = [
     join(codexHome(), "prompts", "squad-join.md"),
     join(homedir(), ".codex", "prompts", "squad-join.md"),
@@ -113,6 +117,9 @@ export function joinPromptText(): string {
     } catch {
       // next candidate
     }
+  }
+  if (repoRoot && existsSync(join(repoRoot, ".agents", "skills", "squad", "SKILL.md"))) {
+    return NATIVE_JOIN_PROMPT;
   }
   return FALLBACK_JOIN_PROMPT;
 }

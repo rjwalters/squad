@@ -27,10 +27,11 @@ const {
   startAnnouncement,
   supervise,
   FALLBACK_JOIN_PROMPT,
+  NATIVE_JOIN_PROMPT,
 } = await import("../dist/codex-reentry.js");
 
 const { initialState, decide } = await import("../dist/reentry.js");
-const { classifyRunFromLogs } = await import("../dist/codex-reentry-driver.js");
+const { classifyRunFromLogs, joinPromptText } = await import("../dist/codex-reentry-driver.js");
 
 const FAST_BACKOFF = { baseMs: 1000, multiplier: 2, capMs: 4000, jitterFraction: 0 };
 
@@ -461,4 +462,65 @@ test("supervisor honors claims, notices directed work during idle and deduplicat
   const again = await supervise(cfg, deps);
   assert.equal(again.runs, 0);
   assert.equal(calls.announcements.filter(a => a.includes("is stopping")).length, 1);
+});
+
+// --- fresh-session prompt resolution ----------------------------------------
+
+function withJoinPromptEnv({ globalPrompt, nativeBundle }, fn) {
+  const root = mkdtempSync(join(tmpdir(), "squad-joinprompt-"));
+  const codexHome = join(root, "codex-home");
+  const repo = join(root, "repo");
+  mkdirSync(join(codexHome, "prompts"), { recursive: true });
+  mkdirSync(repo, { recursive: true });
+  if (globalPrompt !== undefined) {
+    writeFileSync(join(codexHome, "prompts", "squad-join.md"), globalPrompt);
+  }
+  if (nativeBundle === "full") {
+    mkdirSync(join(repo, ".agents", "skills", "squad"), { recursive: true });
+    writeFileSync(join(repo, ".agents", "skills", "squad", "SKILL.md"), "---\nname: squad\n---\n");
+  } else if (nativeBundle === "dir-only") {
+    mkdirSync(join(repo, ".agents", "skills", "squad"), { recursive: true });
+  }
+  const prev = { CODEX_HOME: process.env.CODEX_HOME, HOME: process.env.HOME };
+  process.env.CODEX_HOME = codexHome;
+  process.env.HOME = join(root, "empty-home");
+  try {
+    return fn(repo);
+  } finally {
+    for (const [k, v] of Object.entries(prev)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("joinPromptText: native-only (--no-codex) repo gets the explicit native join prompt", () => {
+  const prompt = withJoinPromptEnv({ nativeBundle: "full" }, (repo) => joinPromptText(repo));
+  assert.equal(prompt, NATIVE_JOIN_PROMPT);
+  assert.notEqual(prompt, "/squad-join");
+  assert.match(prompt, /\$squad/);
+  assert.match(prompt, /references\/join\.md/);
+});
+
+test("joinPromptText: a global squad-join.md wins over the native bundle", () => {
+  const prompt = withJoinPromptEnv({ globalPrompt: "  my custom join  \n", nativeBundle: "full" }, (repo) =>
+    joinPromptText(repo),
+  );
+  assert.equal(prompt, "my custom join");
+});
+
+test("joinPromptText: empty global prompt falls through to the native bundle", () => {
+  const prompt = withJoinPromptEnv({ globalPrompt: "  \n", nativeBundle: "full" }, (repo) => joinPromptText(repo));
+  assert.equal(prompt, NATIVE_JOIN_PROMPT);
+});
+
+test("joinPromptText: no bundle and no global file falls back to /squad-join", () => {
+  assert.equal(withJoinPromptEnv({}, (repo) => joinPromptText(repo)), FALLBACK_JOIN_PROMPT);
+  assert.equal(withJoinPromptEnv({}, () => joinPromptText(null)), FALLBACK_JOIN_PROMPT);
+});
+
+test("joinPromptText: a bundle directory without SKILL.md counts as absent", () => {
+  const prompt = withJoinPromptEnv({ nativeBundle: "dir-only" }, (repo) => joinPromptText(repo));
+  assert.equal(prompt, FALLBACK_JOIN_PROMPT);
 });
