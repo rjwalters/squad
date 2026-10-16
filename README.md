@@ -468,6 +468,17 @@ park.
   `SQUAD_REENTRY_SUPERVISOR` (exported into every supervised run) so the
   persona's own idle message says the matching thing.
 
+**Native-only setup (`--no-codex`).** The fresh-session prompt resolves in this
+order: an explicit `--prompt`; the text of a global `~/.codex/prompts/squad-join.md`
+(so a customized prompt keeps winning); the repo's native `$squad` skill
+(`.agents/skills/squad/SKILL.md`), for which the supervisor sends an explicit
+"use the `$squad` skill / follow `references/join.md`" prompt; and finally the
+literal `/squad-join`. A repo installed with `--no-codex` therefore works without
+any global prompt file. The Squad **MCP registration is a separate
+prerequisite** — the native skill does not register the server, so Codex must
+still have the `squad` MCP server configured (e.g. via the repo's `.mcp.json`
+or your Codex config) for the persona to reach the room.
+
 `squad codex-reentry --help` lists the flags: `--persona`, `--codex <bin>`,
 `--prompt`, `--ttl-minutes`, `--max-attempts`,
 `--no-resume`. It uses `codex exec resume --last` when the local binary

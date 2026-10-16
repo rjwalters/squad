@@ -202,8 +202,23 @@ export function preLaunchStop(opts: {
 /** Default floor between two `codex` runs. See the module doc's "Bounds". */
 export const DEFAULT_MIN_RUN_INTERVAL_MS = 10_000;
 
-/** The prompt used for a fresh session when no `squad-join` prompt file is found. */
+/**
+ * The prompt used for a fresh session when neither a `squad-join` prompt file
+ * nor a repo-local native `$squad` skill bundle is found. `codex exec` does not
+ * expand slash commands, so this is only a hint the persona may infer from
+ * AGENTS.md.
+ */
 export const FALLBACK_JOIN_PROMPT = "/squad-join";
+
+/**
+ * The prompt used for a fresh session when the repo has the native `$squad`
+ * skill bundle (`.agents/skills/squad/`, installed even with `--no-codex`) but
+ * no global `squad-join` prompt file: names the join workflow explicitly rather
+ * than relying on a bare legacy slash token.
+ */
+export const NATIVE_JOIN_PROMPT =
+  "Use the $squad skill: read .agents/skills/squad/references/join.md and follow it " +
+  "to join the room and hold the live conversation loop.";
 
 /** The nudge used to resume an existing session rather than re-reading the whole join prompt. */
 export function resumePrompt(persona: string): string {
@@ -219,7 +234,7 @@ export interface SuperviseConfig {
   persona: string;
   ttlMinutes: number;
   maxAttempts: number;
-  /** Prompt for a fresh (non-resumed) session — normally the `/squad-join` prompt text. */
+  /** Prompt for a fresh (non-resumed) session — resolved by `joinPromptText()` (an explicit `--prompt` wins over it). */
   joinPrompt: string;
   /** Prompt for a resumed session. */
   reentryPrompt: string;
