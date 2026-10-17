@@ -34,6 +34,7 @@ import {
 } from "./reentry.js";
 import { observeWakeWork } from "./reentry-room.js";
 import { loadState, operatorStopped, saveState } from "./reentry-state.js";
+import { codexSessionFromRollout, upsertWakeHandle } from "./wake-handles.js";
 
 export const CODEX_REENTRY_USAGE =
   "usage: squad codex-reentry [--persona <name>] [--codex <bin>] [--prompt <text>]\n" +
@@ -73,6 +74,30 @@ function rolloutCandidates(root: string, depth = 0): { path: string; mtimeMs: nu
     }
   }
   return found;
+}
+
+/**
+ * Record the Codex session of the run that started at `startedAtMs` as the
+ * persona's wake handle (#173), when its rollout file names a session id.
+ * Best-effort: a missing log, unparseable name or unreachable room records
+ * nothing -- never a guessed handle, never a supervisor failure.
+ */
+function recordCodexWakeHandle(persona: string, startedAtMs: number): void {
+  try {
+    const sessions = join(codexHome(), "sessions");
+    if (!existsSync(sessions)) return;
+    const path = pickLatestRollout(rolloutCandidates(sessions), startedAtMs);
+    const sessionRef = path ? codexSessionFromRollout(path) : null;
+    if (!sessionRef) return;
+    const db = openDb();
+    try {
+      upsertWakeHandle(db, { persona, runtime: "codex", sessionRef, cwd: process.cwd() });
+    } finally {
+      db.close();
+    }
+  } catch {
+    // best-effort
+  }
 }
 
 /**
@@ -297,7 +322,10 @@ export async function runCodexReentry(rest: string[]): Promise<SuperviseSummary>
 
   const deps: SuperviseDeps = {
     runCodex: (args) => runCodexProcess(opts.bin, args),
-    classifyRun: async (startedAtMs) => classifyRunFromLogs(startedAtMs),
+    classifyRun: async (startedAtMs) => {
+      recordCodexWakeHandle(persona, startedAtMs);
+      return classifyRunFromLogs(startedAtMs);
+    },
     resumeSupported: async () => {
       if (resumeCache === null) resumeCache = await probeResumeSupport(opts.bin);
       return resumeCache;

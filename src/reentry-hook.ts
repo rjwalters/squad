@@ -114,6 +114,14 @@ async function main(): Promise<void> {
     const { Squad } = await import("./core.js");
     const db = openDb();
     try {
+      // Record how this Claude session can be resumed (#173). Only with a
+      // real session_id from the payload -- never a guessed one.
+      if (sessionId) {
+        try {
+          const { upsertWakeHandle } = await import("./wake-handles.js");
+          upsertWakeHandle(db, { persona, runtime: "claude", sessionRef: sessionId, cwd: process.cwd() });
+        } catch { /* best-effort; never block the hook */ }
+      }
       const work = observeWakeWork(new Squad(db, persona, { sessionId }), persona);
       directed = work.directed;
       held = work.held;
