@@ -1,6 +1,6 @@
 {
   "name": "@rjwalters/squad",
-  "version": "0.19.14",
+  "version": "0.19.15",
   "description": "Local cross-agent chat room with shared goals — so Codex and Claude can collaborate on one machine",
   "repository": "github:rjwalters/squad",
   "license": "MIT",
@@ -9,7 +9,15 @@
     "squad": "dist/index.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "scripts",
+    "hooks",
+    "commands",
+    "skills",
+    "codex",
+    "VERSION",
+    "install.sh",
+    "uninstall.sh"
   ],
   "engines": {
     "node": ">=22.16.0"
