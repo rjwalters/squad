@@ -7,7 +7,8 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-_None._
+- **#153**: chore(deps): bump @modelcontextprotocol/sdk from 1.30.0 to 1.31.0
+- **#155**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
 
 ## Very Important
 
@@ -43,7 +44,8 @@ _None._
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#153**: chore(deps): bump @modelcontextprotocol/sdk from 1.30.0 to 1.31.0
+- **#155**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
 
 ## Proposed
 
@@ -63,13 +65,13 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 0 |
+| Operator merge-risk holds | 2 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 0 |
+| Approved PRs awaiting merge | 2 |
 | Curated | 1 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
