@@ -257,6 +257,30 @@ Before installing from a clean checkout run
 `CI=true pnpm install --frozen-lockfile && pnpm build`; missing dependencies or a
 broken runtime fail clearly before any target configuration is written.
 
+### Installing a release for agents (recommended for fleets)
+
+The checkout-backed install above points every agent's MCP at the dev clone, so
+a cleanup of its `node_modules/`, a half-finished build, or a branch checkout
+there breaks squad for every agent on the machine. To run agents from an
+installed build instead:
+
+```bash
+CI=true pnpm install --frozen-lockfile    # once, in the clone
+scripts/release-install.sh                 # pack + install to ~/.local/share/squad/<version>
+bash ~/.local/share/squad/current/install.sh ~/projects/my-lean-proof
+```
+
+`SQUAD_HOME` (default `~/.local/share/squad`) and `SQUAD_BIN_DIR` (default
+`~/.local/bin`) relocate the install. Re-running `release-install.sh` swaps the
+`current` symlink atomically; installing from `current/` records that stable
+path (never the versioned directory) in `.mcp.json` and the Codex config, so
+re-run the installer on each repo only when you want to repoint it. Running
+`install.sh` from the clone remains the explicit dev opt-in: it prints a note
+that agents will point at a dev tree, which `SQUAD_DEV=1` silences.
+`squad doctor` checks the configured entries (`.mcp.json` `SQUAD_RUNTIME` in the
+current directory, the Codex `config.toml`): it fails naming any missing package
+and warns when an entry is a dev clone.
+
 ### Healing rooms earlier versions left untracked
 
 Rooms created before squad wrote its own ignore entry stay untracked dirt in any
