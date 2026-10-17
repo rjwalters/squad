@@ -444,6 +444,17 @@ CREATE TABLE IF NOT EXISTS mcp_holders (
   started_at TEXT,
   PRIMARY KEY (host, pid)
 );
+-- How a persona's agent session could be resumed (#173). Host-local state like
+-- relay_cursors: outside ROOM_TABLES, so SCHEMA_VERSION does not move.
+CREATE TABLE IF NOT EXISTS wake_handles (
+  persona TEXT PRIMARY KEY,
+  runtime TEXT NOT NULL CHECK (runtime IN ('codex', 'claude')),
+  session_ref TEXT NOT NULL,
+  cwd TEXT,
+  host TEXT NOT NULL,
+  no_wake INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */
