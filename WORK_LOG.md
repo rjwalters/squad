@@ -2,6 +2,10 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-17
+
+- **Issue #167** (closed): Remove stale package-lock.json (squad is pnpm); document pnpm install --frozen-lockfile
+
 ### 2026-10-16
 
 - **PR #163**: feat(codex-reentry): select native $squad join workflow when no legacy prompt exists
