@@ -38,6 +38,7 @@ Issues currently being built (`loom:building`).
 - **#166**: `squad send` (CLI) hides peer replies; agents miss messages when the MCP server is down
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
 - **#173**: waker 1/3: persona wake-handle registry (table, join hook, opt-out, argv resolution)
+- **#178**: CLI `squad send` from an agent with no persona posts as `human`, impersonating the operator
 
 ## PRs Awaiting Review
 
@@ -65,6 +66,7 @@ Issues carrying `loom:curated`.
 - **#173**: waker 1/3: persona wake-handle registry (table, join hook, opt-out, argv resolution) *(curated)*
 - **#174**: waker 2/3: squad waker engine with bounded wake policy and room system lines *(curated)*
 - **#175**: waker 3/3: squad install --waker service unit and squad doctor reporting *(curated)*
+- **#178**: CLI `squad send` from an agent with no persona posts as `human`, impersonating the operator *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -82,10 +84,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 3 |
+| In Progress (`loom:building`) | 4 |
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 5 |
-| Curated | 6 |
+| Curated | 7 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
