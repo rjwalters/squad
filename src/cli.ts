@@ -626,14 +626,28 @@ function planRoomSend(rest: string[]): RoomSendPlan {
   return { sourceDir, sourceExists, targetDir };
 }
 
-/** Same warning `squad send` gives when it is about to post as the operator (#119). */
-function warnImplicitHuman(): void {
-  if (!process.env.SQUAD_PERSONA && !process.env.SQUAD_SESSION_ID) {
-    process.stderr.write(
-      "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
-        "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
+/** Env markers an agent harness exports into the shell it runs the CLI from. */
+const AGENT_HARNESS_MARKERS = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"];
+
+/**
+ * Guard for every `squad send` path before it posts as the implicit `human`
+ * (#119). With neither SQUAD_PERSONA nor SQUAD_SESSION_ID set the message is
+ * stamped as the operator: warn on stderr for a person at a terminal, but
+ * refuse when an agent-harness marker shows an agent is driving the CLI (#178).
+ */
+function guardImplicitHuman(): void {
+  if (process.env.SQUAD_PERSONA || process.env.SQUAD_SESSION_ID) return;
+  if (AGENT_HARNESS_MARKERS.some((k) => process.env[k])) {
+    throw new Error(
+      "refusing to post as 'human' (the operator) from an agent harness: " +
+        "set SQUAD_PERSONA=<name> to post under your own identity " +
+        "(SQUAD_PERSONA=human to post as the operator)",
     );
   }
+  process.stderr.write(
+    "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
+      "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
+  );
 }
 
 /**
@@ -646,7 +660,7 @@ function warnImplicitHuman(): void {
 function runRoutedSend(rest: string[], plan: RoomSendPlan): void {
   const body = rest.join(" ").trim();
   if (!body) throw new Error(COMMAND_USAGE.send);
-  warnImplicitHuman();
+  guardImplicitHuman();
   const persona = process.env.SQUAD_PERSONA || (process.env.SQUAD_SESSION_ID ? undefined : "human");
   const source = openExistingRoom(plan.sourceDir);
   let originPersona: string;
@@ -983,7 +997,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const id = rest[1];
         const text = rest.slice(2).join(" ").trim();
         if (!id || !/^[1-9][0-9]*$/.test(id) || !text) throw new Error(SUB_USAGE["send --reply"]);
-        warnImplicitHuman();
+        guardImplicitHuman();
         const r = squad.reply(Number(id), text);
         console.log(fmt(r.message));
         if (r.delivery)
@@ -1005,18 +1019,7 @@ export async function runCli(argv: string[]): Promise<void> {
       }
       const body = rest.join(" ").trim();
       if (!body) throw new Error(COMMAND_USAGE.send);
-      // Posting is the one command that puts words in somebody's mouth: with
-      // neither SQUAD_PERSONA nor SQUAD_SESSION_ID set, the shared default
-      // above stamps the message `human`, i.e. attributes it to the operator
-      // (#119). Defaulting to `human` is intentional and documented for every
-      // other command, so the warning is scoped to `send` -- but it says so
-      // out loud, on stderr, so the body still pipes cleanly from stdout.
-      if (!process.env.SQUAD_PERSONA && !process.env.SQUAD_SESSION_ID) {
-        process.stderr.write(
-          "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
-            "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
-        );
-      }
+      guardImplicitHuman();
       const m = squad.send(body);
       console.log(fmt(m));
       break;
