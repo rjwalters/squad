@@ -2,6 +2,10 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-20
+
+- **PR #153**: chore(deps): bump @modelcontextprotocol/sdk from 1.30.0 to 1.31.0
+
 ### 2026-10-17
 
 - **Issue #167** (closed): Remove stale package-lock.json (squad is pnpm); document pnpm install --frozen-lockfile
