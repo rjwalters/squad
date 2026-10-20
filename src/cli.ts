@@ -137,7 +137,7 @@ const COMMAND_USAGE: Record<string, string> = {
   outline:
     "usage: squad outline render|status [path]|publish <request-key> [path] [--build-timeout-ms N]",
   path: "usage: squad path (print the database path)",
-  read: "usage: squad read [-n N] (show the last N messages, default 30; stateless)",
+  read: "usage: squad read [-n N | --unread] (show the last N messages, default 30; stateless -- or, with --unread, only other senders' messages since your last read, advancing the cursor)",
   release: "usage: squad release <path>",
   review: "usage: squad review [open|list|show|claim|resolve|cancel] ...",
   send:
@@ -171,6 +171,8 @@ Human CLI usage:
                                Retry a cross-room reply whose delivery failed;
                                never duplicates a copy that already arrived
   squad read [-n N]           Show the last N messages (default 30; stateless)
+  squad read --unread         Show only peers' messages since your last read; advances
+                               the cursor (a second call prints nothing)
   squad tail                  Follow the room live (Ctrl-C to stop)
   squad goals                 Show the goal board (open + done)
   squad goals add <text...>   Add a shared goal
@@ -1020,11 +1022,34 @@ export async function runCli(argv: string[]): Promise<void> {
       const body = rest.join(" ").trim();
       if (!body) throw new Error(COMMAND_USAGE.send);
       guardImplicitHuman();
+      // A persona with no read state yet has an unseen backlog, not unread
+      // news: consume it up front so the notice below counts only what peers
+      // post after this persona first showed up.
+      const known = db
+        .prepare(
+          `SELECT 1 FROM cursors WHERE persona = ?
+           UNION ALL
+           SELECT 1 FROM session_cursors sc JOIN sessions s ON s.session_id = sc.session_id
+            WHERE s.persona = ? LIMIT 1`,
+        )
+        .get(squad.persona, squad.persona);
+      if (!known) squad.check();
       const m = squad.send(body);
       console.log(fmt(m));
+      // Peek only: the notice must never consume what it announces. stderr
+      // keeps stdout pipe-clean.
+      const waiting = squad.check({ peek: true });
+      if (waiting.length)
+        process.stderr.write(
+          `squad: ${waiting.length} unread message(s) waiting -- run 'squad read --unread'\n`,
+        );
       break;
     }
     case "read": {
+      if (rest.includes("--unread")) {
+        for (const m of squad.check()) console.log(fmt(m));
+        break;
+      }
       let limit = 30;
       const nIdx = rest.indexOf("-n");
       if (nIdx !== -1) limit = parseInt(rest[nIdx + 1] ?? "30", 10);

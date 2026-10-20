@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared `guardImplicitHuman` now covers plain `send`, `send --reply` and
   `send --room` when `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` is set and no
   persona is pinned; `SQUAD_PERSONA=human` remains the explicit escape.
+- `squad read --unread` and an unread notice on `send` (#166). `read --unread`
+  shows only unread messages; `send` prints a stderr notice when the sender
+  has unread messages, using a non-consuming peek.
 
 ## 0.19.14
 
