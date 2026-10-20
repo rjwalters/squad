@@ -7,12 +7,7 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#153**: chore(deps): bump @modelcontextprotocol/sdk from 1.30.0 to 1.31.0
-- **#155**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
-- **#169**: feat(cli): add squad read --unread and send unread notice
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
-- **#176**: feat: add wake-handle registry for resuming persona sessions
-- **#179**: fix: refuse squad send as implicit human under an agent harness
 
 ## Very Important
 
@@ -45,14 +40,12 @@ Issues currently being built (`loom:building`).
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#155**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#153**: chore(deps): bump @modelcontextprotocol/sdk from 1.30.0 to 1.31.0
-- **#155**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
 - **#169**: feat(cli): add squad read --unread and send unread notice
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
 - **#176**: feat: add wake-handle registry for resuming persona sessions
@@ -82,13 +75,13 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 6 |
+| Operator merge-risk holds | 1 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 4 |
-| PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 6 |
+| PRs awaiting review | 1 |
+| Approved PRs awaiting merge | 4 |
 | Curated | 7 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
