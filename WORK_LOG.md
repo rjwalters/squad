@@ -4,6 +4,9 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-10-20
 
+- **PR #155**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
+- **PR #169**: feat(cli): add squad read --unread and send unread notice
+- **Issue #166** (closed): `squad send` (CLI) hides peer replies; agents miss messages when the MCP server is down
 - **PR #153**: chore(deps): bump @modelcontextprotocol/sdk from 1.30.0 to 1.31.0
 
 ### 2026-10-17

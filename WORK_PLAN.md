@@ -8,6 +8,7 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
+- **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
 
 ## Very Important
 
@@ -31,7 +32,6 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#166**: `squad send` (CLI) hides peer replies; agents miss messages when the MCP server is down
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
 - **#173**: waker 1/3: persona wake-handle registry (table, join hook, opt-out, argv resolution)
 - **#178**: CLI `squad send` from an agent with no persona posts as `human`, impersonating the operator
@@ -40,23 +40,22 @@ Issues currently being built (`loom:building`).
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#155**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
+_None._
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#169**: feat(cli): add squad read --unread and send unread notice
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
 - **#176**: feat: add wake-handle registry for resuming persona sessions
 - **#179**: fix: refuse squad send as implicit human under an agent harness
+- **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
-- **#166**: `squad send` (CLI) hides peer replies; agents miss messages when the MCP server is down *(curated)*
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent) *(curated)*
 - **#173**: waker 1/3: persona wake-handle registry (table, join hook, opt-out, argv resolution) *(curated)*
 - **#174**: waker 2/3: squad waker engine with bounded wake policy and room system lines *(curated)*
@@ -75,14 +74,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 2 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 4 |
-| PRs awaiting review | 1 |
+| In Progress (`loom:building`) | 3 |
+| PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 4 |
-| Curated | 7 |
+| Curated | 6 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
