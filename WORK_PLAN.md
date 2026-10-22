@@ -21,7 +21,7 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-_None._
+- **#174**: waker 2/3: squad waker engine with bounded wake policy and room system lines
 
 ## Ready
 
@@ -74,7 +74,7 @@ Issues carrying `loom:curated`.
 |------|-------|
 | Operator merge-risk holds | 3 |
 | Very important | 0 |
-| Important | 0 |
+| Important | 1 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 2 |
 | PRs awaiting review | 0 |
