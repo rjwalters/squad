@@ -47,6 +47,7 @@ const DOCUMENTED = [
   "integration",
   "doctor",
   "heal",
+  "wake-handle",
   "path",
 ];
 

@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `send --room` when `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` is set and no
   persona is pinned; `SQUAD_PERSONA=human` remains the explicit escape.
 
+- Wake-handle registry (#173). New `squad wake-handle` command records how to
+  resume a persona's session, and the re-entry hook and Codex re-entry driver
+  now read those handles so a woken persona resumes its own session.
+
 ## 0.19.15
 
 - `squad read --unread` and an unread notice on `send` (#166). `read --unread`
