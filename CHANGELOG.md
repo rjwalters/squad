@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.16
+
+- Wake-handle registry (#173). New `squad wake-handle` command records how to
+  resume a persona's session, and the re-entry hook and Codex re-entry driver
+  now read those handles so a woken persona resumes its own session.
+
 ## 0.19.15
 
 - `squad read --unread` and an unread notice on `send` (#166). `read --unread`

@@ -18,6 +18,7 @@ import {
 import { existsSync, statSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { formatRoomDoctorReport } from "./room-doctor.js";
+import { WAKE_HANDLE_USAGE, runWakeHandle } from "./wake-handles.js";
 import { HEAL_USAGE, formatHealReport, healRooms, parseHealArgs } from "./room-heal.js";
 import {
   relayConfigFromEnv,
@@ -128,6 +129,7 @@ const COMMAND_USAGE: Record<string, string> = {
   doctor: "usage: squad doctor [--room]",
   export: "usage: squad export <path>",
   heal: HEAL_USAGE,
+  "wake-handle": WAKE_HANDLE_USAGE,
   goals: "usage: squad goals [add <text...> | done <id> | reopen <id>]",
   import: "usage: squad import <path>",
   integration:
@@ -288,6 +290,11 @@ Human CLI usage:
                                ignored. Default root: the parent of this squad
                                checkout. Never opens a room or creates one;
                                exits nonzero if any room is left unhealed
+  squad wake-handle set|show|list|clear|opt-out|opt-in <persona> ...
+                              Record how a persona's session could be resumed
+                               (runtime, session ref, cwd, host) and its
+                               no-wake opt-out. Launches nothing; handles for
+                               other hosts are listed but marked not usable
   squad help                  Show this help
   squad <command> --help      One-line usage for that command, printed without
                                running it (no message sent, nothing cleared)
@@ -767,6 +774,17 @@ export async function runCli(argv: string[]): Promise<void> {
       `codex re-entry supervisor stopped after ${summary.runs} run(s) / ` +
         `${summary.attempts} re-entry(ies): ${summary.stopReason}`,
     );
+    return;
+  }
+
+  if (cmd === "wake-handle") {
+    // Registry admin, not a persona acting in the room: no presence lease.
+    const db = openDb();
+    try {
+      for (const line of runWakeHandle(db, rest)) console.log(line);
+    } finally {
+      db.close();
+    }
     return;
   }
 
@@ -1524,6 +1542,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "path",
       "doctor",
       "heal",
+      "wake-handle",
       "codex-reentry",
       "relay",
       "help",
