@@ -8,6 +8,7 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
+- **#179**: fix: refuse squad send as implicit human under an agent harness
 - **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
 
 ## Very Important
@@ -33,7 +34,6 @@ _None._
 Issues currently being built (`loom:building`).
 
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
-- **#173**: waker 1/3: persona wake-handle registry (table, join hook, opt-out, argv resolution)
 - **#178**: CLI `squad send` from an agent with no persona posts as `human`, impersonating the operator
 
 ## PRs Awaiting Review
@@ -47,7 +47,6 @@ _None._
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
-- **#176**: feat: add wake-handle registry for resuming persona sessions
 - **#179**: fix: refuse squad send as implicit human under an agent harness
 - **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
 
@@ -57,7 +56,6 @@ Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent) *(curated)*
-- **#173**: waker 1/3: persona wake-handle registry (table, join hook, opt-out, argv resolution) *(curated)*
 - **#174**: waker 2/3: squad waker engine with bounded wake policy and room system lines *(curated)*
 - **#175**: waker 3/3: squad install --waker service unit and squad doctor reporting *(curated)*
 - **#178**: CLI `squad send` from an agent with no persona posts as `human`, impersonating the operator *(curated)*
@@ -74,14 +72,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 2 |
+| Operator merge-risk holds | 3 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 3 |
+| In Progress (`loom:building`) | 2 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 4 |
-| Curated | 6 |
+| Approved PRs awaiting merge | 3 |
+| Curated | 5 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
