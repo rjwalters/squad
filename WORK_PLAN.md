@@ -7,7 +7,7 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
+_None._
 
 ## Very Important
 
@@ -37,12 +37,13 @@ Issues currently being built (`loom:building`).
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#170**: feat: run squad MCP from an installed release and check it in doctor
+_None._
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
+- **#170**: feat: run squad MCP from an installed release and check it in doctor
 - **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
 
 ## Proposed
@@ -66,13 +67,13 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 1 |
+| Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
-| Approved PRs awaiting merge | 1 |
+| PRs awaiting review | 0 |
+| Approved PRs awaiting merge | 2 |
 | Curated | 3 |
 | Architect / Hermit proposals | 2 |
 | Active epics | 1 |
