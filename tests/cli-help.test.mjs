@@ -19,11 +19,11 @@ const entry = join(repoRoot, "dist", "index.js");
 
 /**
  * Every top-level command documented in HELP that squad itself must answer
- * `--help` for. `relay` and `codex-reentry` own their own `--help` handling
+ * `--help` for. `relay`, `waker` and `codex-reentry` own their own `--help` handling
  * (their parser/supervisor prints its own usage); `nuke` is deliberately
  * undocumented and out of scope for #119.
  */
-const SELF_DOCUMENTING = new Set(["help", "relay", "codex-reentry"]);
+const SELF_DOCUMENTING = new Set(["help", "relay", "waker", "codex-reentry"]);
 const DOCUMENTED = [
   "send",
   "read",

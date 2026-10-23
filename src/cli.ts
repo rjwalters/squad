@@ -19,6 +19,7 @@ import { existsSync, statSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { formatRoomDoctorReport } from "./room-doctor.js";
 import { WAKE_HANDLE_USAGE, runWakeHandle } from "./wake-handles.js";
+import { parseWakerArgs, runWakerCommand } from "./waker.js";
 import { HEAL_USAGE, formatHealReport, healRooms, parseHealArgs } from "./room-heal.js";
 import {
   relayConfigFromEnv,
@@ -96,7 +97,7 @@ const CARD_EDIT_USAGE =
  *     bad input, so the usage a human reads from `--help` is exactly the usage
  *     they get told off with.
  *
- * `relay` and `codex-reentry` are absent on purpose: both parse `--help`
+ * `relay`, `waker` and `codex-reentry` are absent on purpose: both parse `--help`
  * themselves (their own supervisors/parsers own the text). So is the
  * deliberately undocumented `nuke`.
  */
@@ -275,6 +276,13 @@ Human CLI usage:
                                default) until Ctrl-C / SIGTERM
   squad relay status          Configured target, cursor lag, and last error
                                (or "not configured")
+  squad waker [--once]        Opt-in: wake personas with no live session that
+                               have directed @mentions/review requests, by
+                               running their wake handle (see wake-handle);
+                               every wake or skip is posted as a system line
+  squad waker --follow [--interval <seconds>]
+                               Keep polling (every 15s by default) until Ctrl-C
+  squad waker status          Per-persona wake eligibility and counters
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad doctor --room         Read-only room drift report: known unbanked work,
@@ -799,6 +807,12 @@ export async function runCli(argv: string[]): Promise<void> {
     } finally {
       db.close();
     }
+    return;
+  }
+
+  if (cmd === "waker") {
+    // Waking is delivery plumbing, not a persona acting in the room: no presence lease.
+    await runWakerCommand(parseWakerArgs(rest));
     return;
   }
 
@@ -1546,6 +1560,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "doctor",
       "heal",
       "wake-handle",
+      "waker",
       "codex-reentry",
       "relay",
       "help",
