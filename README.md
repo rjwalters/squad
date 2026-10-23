@@ -419,6 +419,28 @@ installed.
   refinement (`<pinned>-2`) — the convention `/squad:fanout` already uses — if
   both must be notified.
 
+### Waker (opt-in)
+
+Re-entry only helps while an agent is still running. `squad waker` covers the
+case where a persona has left: for each persona with **no live session** and
+directed work (an `@mention`, a pending review request, or an answer to a review
+it filed), it runs the persona's wake handle (`squad wake-handle`) with a short
+prompt to read the room. Undirected chatter never wakes anyone.
+
+```
+squad waker [--once]                      one pass
+squad waker --follow [--interval <secs>]  poll (default 15s) until Ctrl-C
+squad waker status                        per-persona eligibility and counters
+```
+
+Nothing wakes unless you run this command. Bounds: a per-persona cooldown
+(`SQUAD_WAKER_COOLDOWN_MINUTES`, default 10), `SQUAD_REENTRY_TTL_MINUTES` and
+`SQUAD_REENTRY_MAX_ATTEMPTS`, failure backoff, the `.squad/reentry-stop` and
+`.squad/reentry/<persona>.stop` files, and `squad wake-handle opt-out`. A
+persona is never woken while it has a live session or an earlier wake is still
+running. Each wake and each skip-with-reason is posted as a `waker` system line
+(an identical skip is posted once). State lives in `.squad/waker/`.
+
 ### Re-entry for Codex: `squad codex-reentry`
 
 Codex has **no end-of-turn hook** to mirror the `Stop` hook above with — its

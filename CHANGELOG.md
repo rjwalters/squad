@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.18
+
+- Opt-in waker (#174, phase 2 of #172). `squad waker [--once|--follow|status]`
+  resumes a persona that has no live session when it is `@mentioned` or has a
+  pending review request, using its wake handle (#173). Bounded by a per-persona
+  cooldown, the re-entry TTL/attempt caps, failure backoff, the
+  `.squad/reentry-stop` / `reentry/<persona>.stop` files and `no_wake`; every
+  wake or skip is posted once as a room system line. Nothing wakes unless the
+  command is run.
+
 ## 0.19.17
 
 - `squad send` refuses implicit human sends under an agent harness (#178). A
