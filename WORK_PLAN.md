@@ -33,6 +33,7 @@ _None._
 Issues currently being built (`loom:building`).
 
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
+- **#174**: waker 2/3: squad waker engine with bounded wake policy and room system lines
 
 ## PRs Awaiting Review
 
@@ -46,6 +47,7 @@ PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
 - **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
+- **#191**: feat: add opt-in squad waker that resumes departed personas on directed work
 
 ## Proposed
 
@@ -72,9 +74,9 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 1 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
+| In Progress (`loom:building`) | 2 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 2 |
+| Approved PRs awaiting merge | 3 |
 | Curated | 4 |
 | Architect / Hermit proposals | 1 |
 | Active epics | 1 |
