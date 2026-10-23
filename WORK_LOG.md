@@ -4,6 +4,8 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-10-23
 
+- **PR #191**: feat: add opt-in squad waker that resumes departed personas on directed work
+- **Issue #174** (closed): waker 2/3: squad waker engine with bounded wake policy and room system lines
 - **PR #179**: fix: refuse squad send as implicit human under an agent harness
 - **Issue #178** (closed): CLI `squad send` from an agent with no persona posts as `human`, impersonating the operator
 

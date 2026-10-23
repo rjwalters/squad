@@ -7,7 +7,6 @@ This snapshot follows GitHub lifecycle labels. Operator-only issues require thei
 
 Judge-approved PRs under a hold (`loom:blocked` or `loom:operator`) — only a human merge decision is missing.
 
-- **#170**: feat: run squad MCP from an installed release and check it in doctor
 - **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
 
 ## Very Important
@@ -20,7 +19,7 @@ _None._
 
 `loom:important`; taken before unlabelled work.
 
-- **#174**: waker 2/3: squad waker engine with bounded wake policy and room system lines
+_None._
 
 ## Ready
 
@@ -33,21 +32,18 @@ _None._
 Issues currently being built (`loom:building`).
 
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
-- **#174**: waker 2/3: squad waker engine with bounded wake policy and room system lines
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#170**: feat: run squad MCP from an installed release and check it in doctor
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#170**: feat: run squad MCP from an installed release and check it in doctor
 - **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
-- **#191**: feat: add opt-in squad waker that resumes departed personas on directed work
 
 ## Proposed
 
@@ -55,12 +51,12 @@ Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent) *(curated)*
-- **#174**: waker 2/3: squad waker engine with bounded wake policy and room system lines *(curated)*
 - **#175**: waker 3/3: squad install --waker service unit and squad doctor reporting *(curated)*
 
 ## Proposed (Architect / Hermit)
 
 - **#128**: Remove dead find_repo_root/REPO_ROOT from loom-attach.sh and loom-send.sh *(hermit)*
+- **#193**: Split src/core.ts (3.8k lines, one 2.8k-line Squad class) into domain modules *(hermit)*
 
 ## Epics
 
@@ -70,14 +66,14 @@ Issues carrying `loom:curated`.
 
 | Bucket | Count |
 |------|-------|
-| Operator merge-risk holds | 2 |
+| Operator merge-risk holds | 1 |
 | Very important | 0 |
-| Important | 1 |
+| Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 3 |
-| Curated | 4 |
-| Architect / Hermit proposals | 1 |
+| In Progress (`loom:building`) | 1 |
+| PRs awaiting review | 1 |
+| Approved PRs awaiting merge | 1 |
+| Curated | 3 |
+| Architect / Hermit proposals | 2 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
