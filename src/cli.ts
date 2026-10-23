@@ -19,6 +19,8 @@ import { existsSync, statSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { checkMcpInstall, configuredEntries } from "./mcp-install.js";
 import { formatRoomDoctorReport } from "./room-doctor.js";
+import { WAKE_HANDLE_USAGE, runWakeHandle } from "./wake-handles.js";
+import { parseWakerArgs, runWakerCommand } from "./waker.js";
 import { HEAL_USAGE, formatHealReport, healRooms, parseHealArgs } from "./room-heal.js";
 import {
   relayConfigFromEnv,
@@ -96,7 +98,7 @@ const CARD_EDIT_USAGE =
  *     bad input, so the usage a human reads from `--help` is exactly the usage
  *     they get told off with.
  *
- * `relay` and `codex-reentry` are absent on purpose: both parse `--help`
+ * `relay`, `waker` and `codex-reentry` are absent on purpose: both parse `--help`
  * themselves (their own supervisors/parsers own the text). So is the
  * deliberately undocumented `nuke`.
  */
@@ -129,6 +131,7 @@ const COMMAND_USAGE: Record<string, string> = {
   doctor: "usage: squad doctor [--room]",
   export: "usage: squad export <path>",
   heal: HEAL_USAGE,
+  "wake-handle": WAKE_HANDLE_USAGE,
   goals: "usage: squad goals [add <text...> | done <id> | reopen <id>]",
   import: "usage: squad import <path>",
   integration:
@@ -138,7 +141,7 @@ const COMMAND_USAGE: Record<string, string> = {
   outline:
     "usage: squad outline render|status [path]|publish <request-key> [path] [--build-timeout-ms N]",
   path: "usage: squad path (print the database path)",
-  read: "usage: squad read [-n N] (show the last N messages, default 30; stateless)",
+  read: "usage: squad read [-n N | --unread] (show the last N messages, default 30; stateless -- or, with --unread, only other senders' messages since your last read, advancing the cursor)",
   release: "usage: squad release <path>",
   review: "usage: squad review [open|list|show|claim|resolve|cancel] ...",
   send:
@@ -172,6 +175,8 @@ Human CLI usage:
                                Retry a cross-room reply whose delivery failed;
                                never duplicates a copy that already arrived
   squad read [-n N]           Show the last N messages (default 30; stateless)
+  squad read --unread         Show only peers' messages since your last read; advances
+                               the cursor (a second call prints nothing)
   squad tail                  Follow the room live (Ctrl-C to stop)
   squad goals                 Show the goal board (open + done)
   squad goals add <text...>   Add a shared goal
@@ -272,6 +277,13 @@ Human CLI usage:
                                default) until Ctrl-C / SIGTERM
   squad relay status          Configured target, cursor lag, and last error
                                (or "not configured")
+  squad waker [--once]        Opt-in: wake personas with no live session that
+                               have directed @mentions/review requests, by
+                               running their wake handle (see wake-handle);
+                               every wake or skip is posted as a system line
+  squad waker --follow [--interval <seconds>]
+                               Keep polling (every 15s by default) until Ctrl-C
+  squad waker status          Per-persona wake eligibility and counters
   squad path                  Print the database path
   squad doctor                Preflight: runtime deps resolve, DB reachable, persona resolves
   squad doctor --room         Read-only room drift report: known unbanked work,
@@ -287,6 +299,11 @@ Human CLI usage:
                                ignored. Default root: the parent of this squad
                                checkout. Never opens a room or creates one;
                                exits nonzero if any room is left unhealed
+  squad wake-handle set|show|list|clear|opt-out|opt-in <persona> ...
+                              Record how a persona's session could be resumed
+                               (runtime, session ref, cwd, host) and its
+                               no-wake opt-out. Launches nothing; handles for
+                               other hosts are listed but marked not usable
   squad help                  Show this help
   squad <command> --help      One-line usage for that command, printed without
                                running it (no message sent, nothing cleared)
@@ -627,14 +644,28 @@ function planRoomSend(rest: string[]): RoomSendPlan {
   return { sourceDir, sourceExists, targetDir };
 }
 
-/** Same warning `squad send` gives when it is about to post as the operator (#119). */
-function warnImplicitHuman(): void {
-  if (!process.env.SQUAD_PERSONA && !process.env.SQUAD_SESSION_ID) {
-    process.stderr.write(
-      "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
-        "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
+/** Env markers an agent harness exports into the shell it runs the CLI from. */
+const AGENT_HARNESS_MARKERS = ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"];
+
+/**
+ * Guard for every `squad send` path before it posts as the implicit `human`
+ * (#119). With neither SQUAD_PERSONA nor SQUAD_SESSION_ID set the message is
+ * stamped as the operator: warn on stderr for a person at a terminal, but
+ * refuse when an agent-harness marker shows an agent is driving the CLI (#178).
+ */
+function guardImplicitHuman(): void {
+  if (process.env.SQUAD_PERSONA || process.env.SQUAD_SESSION_ID) return;
+  if (AGENT_HARNESS_MARKERS.some((k) => process.env[k])) {
+    throw new Error(
+      "refusing to post as 'human' (the operator) from an agent harness: " +
+        "set SQUAD_PERSONA=<name> to post under your own identity " +
+        "(SQUAD_PERSONA=human to post as the operator)",
     );
   }
+  process.stderr.write(
+    "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
+      "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
+  );
 }
 
 /**
@@ -647,7 +678,7 @@ function warnImplicitHuman(): void {
 function runRoutedSend(rest: string[], plan: RoomSendPlan): void {
   const body = rest.join(" ").trim();
   if (!body) throw new Error(COMMAND_USAGE.send);
-  warnImplicitHuman();
+  guardImplicitHuman();
   const persona = process.env.SQUAD_PERSONA || (process.env.SQUAD_SESSION_ID ? undefined : "human");
   const source = openExistingRoom(plan.sourceDir);
   let originPersona: string;
@@ -766,6 +797,23 @@ export async function runCli(argv: string[]): Promise<void> {
       `codex re-entry supervisor stopped after ${summary.runs} run(s) / ` +
         `${summary.attempts} re-entry(ies): ${summary.stopReason}`,
     );
+    return;
+  }
+
+  if (cmd === "wake-handle") {
+    // Registry admin, not a persona acting in the room: no presence lease.
+    const db = openDb();
+    try {
+      for (const line of runWakeHandle(db, rest)) console.log(line);
+    } finally {
+      db.close();
+    }
+    return;
+  }
+
+  if (cmd === "waker") {
+    // Waking is delivery plumbing, not a persona acting in the room: no presence lease.
+    await runWakerCommand(parseWakerArgs(rest));
     return;
   }
 
@@ -984,7 +1032,7 @@ export async function runCli(argv: string[]): Promise<void> {
         const id = rest[1];
         const text = rest.slice(2).join(" ").trim();
         if (!id || !/^[1-9][0-9]*$/.test(id) || !text) throw new Error(SUB_USAGE["send --reply"]);
-        warnImplicitHuman();
+        guardImplicitHuman();
         const r = squad.reply(Number(id), text);
         console.log(fmt(r.message));
         if (r.delivery)
@@ -1006,23 +1054,35 @@ export async function runCli(argv: string[]): Promise<void> {
       }
       const body = rest.join(" ").trim();
       if (!body) throw new Error(COMMAND_USAGE.send);
-      // Posting is the one command that puts words in somebody's mouth: with
-      // neither SQUAD_PERSONA nor SQUAD_SESSION_ID set, the shared default
-      // above stamps the message `human`, i.e. attributes it to the operator
-      // (#119). Defaulting to `human` is intentional and documented for every
-      // other command, so the warning is scoped to `send` -- but it says so
-      // out loud, on stderr, so the body still pipes cleanly from stdout.
-      if (!process.env.SQUAD_PERSONA && !process.env.SQUAD_SESSION_ID) {
-        process.stderr.write(
-          "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
-            "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
-        );
-      }
+      guardImplicitHuman();
+      // A persona with no read state yet has an unseen backlog, not unread
+      // news: consume it up front so the notice below counts only what peers
+      // post after this persona first showed up.
+      const known = db
+        .prepare(
+          `SELECT 1 FROM cursors WHERE persona = ?
+           UNION ALL
+           SELECT 1 FROM session_cursors sc JOIN sessions s ON s.session_id = sc.session_id
+            WHERE s.persona = ? LIMIT 1`,
+        )
+        .get(squad.persona, squad.persona);
+      if (!known) squad.check();
       const m = squad.send(body);
       console.log(fmt(m));
+      // Peek only: the notice must never consume what it announces. stderr
+      // keeps stdout pipe-clean.
+      const waiting = squad.check({ peek: true });
+      if (waiting.length)
+        process.stderr.write(
+          `squad: ${waiting.length} unread message(s) waiting -- run 'squad read --unread'\n`,
+        );
       break;
     }
     case "read": {
+      if (rest.includes("--unread")) {
+        for (const m of squad.check()) console.log(fmt(m));
+        break;
+      }
       let limit = 30;
       const nIdx = rest.indexOf("-n");
       if (nIdx !== -1) limit = parseInt(rest[nIdx + 1] ?? "30", 10);
@@ -1500,6 +1560,8 @@ export function knownCommand(cmd: string | undefined): boolean {
       "path",
       "doctor",
       "heal",
+      "wake-handle",
+      "waker",
       "codex-reentry",
       "relay",
       "help",

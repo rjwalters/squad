@@ -2,6 +2,31 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-23
+
+- **PR #179**: fix: refuse squad send as implicit human under an agent harness
+- **Issue #178** (closed): CLI `squad send` from an agent with no persona posts as `human`, impersonating the operator
+
+### 2026-10-22
+
+- **PR #176**: feat: add wake-handle registry for resuming persona sessions
+- **Issue #173** (closed): waker 1/3: persona wake-handle registry (table, join hook, opt-out, argv resolution)
+
+### 2026-10-21
+
+- **PR #185**: Bump Repo Skills 0.24.3 -> 0.24.7
+
+### 2026-10-20
+
+- **PR #155**: chore(deps): bump the npm-minor-patch group across 1 directory with 4 updates
+- **PR #169**: feat(cli): add squad read --unread and send unread notice
+- **Issue #166** (closed): `squad send` (CLI) hides peer replies; agents miss messages when the MCP server is down
+- **PR #153**: chore(deps): bump @modelcontextprotocol/sdk from 1.30.0 to 1.31.0
+
+### 2026-10-17
+
+- **Issue #167** (closed): Remove stale package-lock.json (squad is pnpm); document pnpm install --frozen-lockfile
+
 ### 2026-10-16
 
 - **PR #163**: feat(codex-reentry): select native $squad join workflow when no legacy prompt exists

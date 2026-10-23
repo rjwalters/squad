@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.19.15
+## Unreleased
 
 - Run agents' squad MCP from an installed release (#168). `scripts/release-install.sh`
   packs this checkout, installs it with production dependencies under
@@ -16,6 +16,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Installing from a git clone prints a note (`SQUAD_DEV=1` silences it), and
   `squad doctor` gains an `mcp-install` check that fails naming the missing
   package and warns when a configured runtime is a dev clone.
+
+## 0.19.18
+
+- Opt-in waker (#174, phase 2 of #172). `squad waker [--once|--follow|status]`
+  resumes a persona that has no live session when it is `@mentioned` or has a
+  pending review request, using its wake handle (#173). Bounded by a per-persona
+  cooldown, the re-entry TTL/attempt caps, failure backoff, the
+  `.squad/reentry-stop` / `reentry/<persona>.stop` files and `no_wake`; every
+  wake or skip is posted once as a room system line. Nothing wakes unless the
+  command is run.
+
+## 0.19.17
+
+- `squad send` refuses implicit human sends under an agent harness (#178). A
+  shared `guardImplicitHuman` now covers plain `send`, `send --reply` and
+  `send --room` when `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` is set and no
+  persona is pinned; `SQUAD_PERSONA=human` remains the explicit escape.
+
+## 0.19.16
+
+- Wake-handle registry (#173). New `squad wake-handle` command records how to
+  resume a persona's session, and the re-entry hook and Codex re-entry driver
+  now read those handles so a woken persona resumes its own session.
+
+## 0.19.15
+
+- `squad read --unread` and an unread notice on `send` (#166). `read --unread`
+  shows only unread messages; `send` prints a stderr notice when the sender
+  has unread messages, using a non-consuming peek.
 
 ## 0.19.14
 

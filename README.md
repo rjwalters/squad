@@ -117,7 +117,9 @@ Instead, post under its **own persona**, in **its own room** (`SQUAD_DIR`), or
 **do not post**. The `<pinned>-N` refinement is for one logical agent scaled to
 N sessions of the same workstream, not for unrelated workstreams.
 
-The human CLI defaults to `human`. To act as an MCP agent, pass its exact returned
+The human CLI defaults to `human` (with a stderr warning). Inside an agent harness
+(`CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` set) with no `SQUAD_PERSONA`/`SQUAD_SESSION_ID`,
+`squad send` refuses instead; set `SQUAD_PERSONA=human` to post as the operator. To act as an MCP agent, pass its exact returned
 name on every call (`SQUAD_PERSONA=<joined-name> squad send ...`), or share its
 launcher-provided `SQUAD_SESSION_ID` (plus `SQUAD_MODEL`/`SQUAD_PROVIDER` when set). CLI calls
 with a session token restore the same reserved identity across invocations. For
@@ -441,6 +443,28 @@ installed.
   refinement (`<pinned>-2`) — the convention `/squad:fanout` already uses — if
   both must be notified.
 
+### Waker (opt-in)
+
+Re-entry only helps while an agent is still running. `squad waker` covers the
+case where a persona has left: for each persona with **no live session** and
+directed work (an `@mention`, a pending review request, or an answer to a review
+it filed), it runs the persona's wake handle (`squad wake-handle`) with a short
+prompt to read the room. Undirected chatter never wakes anyone.
+
+```
+squad waker [--once]                      one pass
+squad waker --follow [--interval <secs>]  poll (default 15s) until Ctrl-C
+squad waker status                        per-persona eligibility and counters
+```
+
+Nothing wakes unless you run this command. Bounds: a per-persona cooldown
+(`SQUAD_WAKER_COOLDOWN_MINUTES`, default 10), `SQUAD_REENTRY_TTL_MINUTES` and
+`SQUAD_REENTRY_MAX_ATTEMPTS`, failure backoff, the `.squad/reentry-stop` and
+`.squad/reentry/<persona>.stop` files, and `squad wake-handle opt-out`. A
+persona is never woken while it has a live session or an earlier wake is still
+running. Each wake and each skip-with-reason is posted as a `waker` system line
+(an identical skip is posted once). State lives in `.squad/waker/`.
+
 ### Re-entry for Codex: `squad codex-reentry`
 
 Codex has **no end-of-turn hook** to mirror the `Stop` hook above with — its
@@ -533,7 +557,7 @@ legacy `/squad-<workflow>` prompts when installed:
 - **fanout** — coordinate separately identified workers on distinct assignments
 - **clear** — wipe the room for a fresh session when the user explicitly requests a reset
 
-Human CLI: `squad send [--room <repo> | --reply <id> | --retry <delivery-id>] | read | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | relay [--once|--follow|status] | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
+Human CLI: `squad send [--room <repo> | --reply <id> | --retry <delivery-id>] | read [--unread] | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | relay [--once|--follow|status] | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
 
