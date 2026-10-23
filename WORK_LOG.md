@@ -2,6 +2,11 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-23
+
+- **PR #179**: fix: refuse squad send as implicit human under an agent harness
+- **Issue #178** (closed): CLI `squad send` from an agent with no persona posts as `human`, impersonating the operator
+
 ### 2026-10-22
 
 - **PR #176**: feat: add wake-handle registry for resuming persona sessions
