@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -55,7 +55,7 @@ function runCli(args, { cwd, env = {} } = {}) {
   const merged = { ...process.env, ...env };
   // The ambient environment must not decide whether a persona is pinned: the
   // implicit-`human` warning below is only about the *absence* of both.
-  for (const key of ["SQUAD_PERSONA", "SQUAD_SESSION_ID"]) {
+  for (const key of ["SQUAD_PERSONA", "SQUAD_SESSION_ID", "CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]) {
     if (!(key in env)) delete merged[key];
   }
   return spawnSync(process.execPath, [entry, ...args], {
@@ -233,6 +233,36 @@ test("squad send names the sender when the persona implicitly defaults to human"
     assert.equal(diagnostics(session.stderr), "", "a session identity needs no warning");
   } finally {
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("squad send refuses to post as human from an agent harness (#178)", () => {
+  const dir = freshDir();
+  const repo = freshDir();
+  try {
+    execFileSync("git", ["init", "-q", repo]);
+    // --room needs an existing target room.
+    assert.equal(runCli(["send", "seed"], { cwd: repo, env: { SQUAD_PERSONA: "seed" } }).status, 0);
+    for (const marker of ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]) {
+      for (const args of [["send", "hi"], ["send", "--reply", "1", "hi"], ["send", "--room", repo, "hi"]]) {
+        const res = runCli(args, { env: { SQUAD_DIR: dir, [marker]: "1" } });
+        assert.notEqual(res.status, 0, `${marker} ${args.join(" ")} must refuse`);
+        assert.match(res.stderr, /SQUAD_PERSONA=<name>/);
+        assert.match(res.stderr, /SQUAD_PERSONA=human/);
+      }
+    }
+    assert.doesNotMatch(runCli(["read"], { env: { SQUAD_DIR: dir } }).stdout, /<human>/);
+
+    // A pinned persona or session is unchanged under the same marker, and
+    // SQUAD_PERSONA=human is the explicit operator escape.
+    const pinned = runCli(["send", "pinned"], { env: { SQUAD_DIR: dir, SQUAD_PERSONA: "codex", CLAUDECODE: "1" } });
+    assert.equal(pinned.status, 0, pinned.stdout + pinned.stderr);
+    const op = runCli(["send", "operator"], { env: { SQUAD_DIR: dir, SQUAD_PERSONA: "human", CLAUDECODE: "1" } });
+    assert.equal(op.status, 0, op.stdout + op.stderr);
+    assert.match(op.stdout, /<human> operator/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(repo, { recursive: true, force: true });
   }
 });
 

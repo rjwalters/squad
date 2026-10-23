@@ -117,7 +117,9 @@ Instead, post under its **own persona**, in **its own room** (`SQUAD_DIR`), or
 **do not post**. The `<pinned>-N` refinement is for one logical agent scaled to
 N sessions of the same workstream, not for unrelated workstreams.
 
-The human CLI defaults to `human`. To act as an MCP agent, pass its exact returned
+The human CLI defaults to `human` (with a stderr warning). Inside an agent harness
+(`CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` set) with no `SQUAD_PERSONA`/`SQUAD_SESSION_ID`,
+`squad send` refuses instead; set `SQUAD_PERSONA=human` to post as the operator. To act as an MCP agent, pass its exact returned
 name on every call (`SQUAD_PERSONA=<joined-name> squad send ...`), or share its
 launcher-provided `SQUAD_SESSION_ID` (plus `SQUAD_MODEL`/`SQUAD_PROVIDER` when set). CLI calls
 with a session token restore the same reserved identity across invocations. For

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.17
+
+- `squad send` refuses implicit human sends under an agent harness (#178). A
+  shared `guardImplicitHuman` now covers plain `send`, `send --reply` and
+  `send --room` when `CLAUDECODE` or `CLAUDE_CODE_ENTRYPOINT` is set and no
+  persona is pinned; `SQUAD_PERSONA=human` remains the explicit escape.
+
 ## 0.19.16
 
 - Wake-handle registry (#173). New `squad wake-handle` command records how to
