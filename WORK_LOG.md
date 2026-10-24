@@ -2,6 +2,10 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-24
+
+- **Issue #197** (closed): Older installs leave SQUAD_RUNTIME as a relative ../squad path that breaks when the target isn't a sibling
+
 ### 2026-10-23
 
 - **PR #191**: feat: add opt-in squad waker that resumes departed personas on directed work
