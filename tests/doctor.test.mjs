@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, rmSync, existsSync } from "node:fs";
+import { cpSync, mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -160,4 +160,62 @@ test("squad --help works normally (sanity check with node_modules present)", () 
   const res = runCli(["--help"]);
   assert.equal(res.status, 0, res.stdout + res.stderr);
   assert.match(res.stdout, /squad doctor/);
+});
+
+// #168: doctor inspects the *configured* MCP entry, not just the install the
+// doctor itself runs from, so a fleet pointing at a cleaned dev clone is caught.
+function withConfiguredRuntime(setup, fn) {
+  const root = mkdtempSync(join(tmpdir(), "squad-mcpinstall-"));
+  try {
+    const runtimeDir = join(root, "install");
+    mkdirSync(join(runtimeDir, "dist"), { recursive: true });
+    writeFileSync(join(runtimeDir, "dist/index.js"), "");
+    setup(runtimeDir);
+    const project = join(root, "project");
+    mkdirSync(project);
+    writeFileSync(
+      join(project, ".mcp.json"),
+      JSON.stringify({
+        mcpServers: { squad: { env: { SQUAD_RUNTIME: join(runtimeDir, "dist/index.js") } } },
+      }),
+    );
+    const res = spawnSync(process.execPath, [entry, "doctor"], {
+      cwd: project,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        SQUAD_DIR: join(root, "room"),
+        CODEX_HOME: join(root, "no-codex"),
+      },
+    });
+    return fn(res);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("squad doctor fails naming the missing package when the configured install has no dependencies", () => {
+  withConfiguredRuntime(
+    () => {},
+    (res) => {
+      assert.equal(res.status, 1, res.stdout + res.stderr);
+      assert.match(res.stdout, /\[FAIL\] mcp-install:.*@modelcontextprotocol\/sdk/);
+    },
+  );
+});
+
+test("squad doctor warns, but passes, when the configured runtime is a dev clone", () => {
+  withConfiguredRuntime(
+    (dir) => {
+      mkdirSync(join(dir, ".git"));
+      for (const pkg of ["@modelcontextprotocol/sdk", "zod"]) {
+        mkdirSync(join(dir, "node_modules", pkg), { recursive: true });
+        writeFileSync(join(dir, "node_modules", pkg, "package.json"), "{}");
+      }
+    },
+    (res) => {
+      assert.equal(res.status, 0, res.stdout + res.stderr);
+      assert.match(res.stdout, /\[ok\] mcp-install: warning:.*development clone/);
+    },
+  );
 });

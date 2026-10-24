@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.19
+
+- Run agents' squad MCP from an installed release (#168). `scripts/release-install.sh`
+  packs this checkout, installs it with production dependencies under
+  `~/.local/share/squad/<version>/` (`SQUAD_HOME` overrides), and atomically
+  repoints `~/.local/share/squad/current` and `~/.local/bin/squad`. Running
+  `install.sh` from `current/` records the stable `current` path in `.mcp.json`
+  and the Codex config, so cleaning or switching branches in the dev clone no
+  longer breaks every agent. `pnpm pack` now ships the installer's inputs.
+  Installing from a git clone prints a note (`SQUAD_DEV=1` silences it), and
+  `squad doctor` gains an `mcp-install` check that fails naming the missing
+  package and warns when a configured runtime is a dev clone.
+
 ## 0.19.18
 
 - Opt-in waker (#174, phase 2 of #172). `squad waker [--once|--follow|status]`
