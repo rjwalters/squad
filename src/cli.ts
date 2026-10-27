@@ -452,6 +452,31 @@ async function runDoctor(): Promise<void> {
   } else {
     console.log("\nall checks passed.");
   }
+  await reportWaker();
+}
+
+/** Waker unit health and per-persona wake-handle state (#175); informational, never fails doctor. */
+async function reportWaker(): Promise<void> {
+  try {
+    const { inspectWaker, formatWakerHealth } = await import("./waker-unit.js");
+    const { listWakeHandles } = await import("./wake-handles.js");
+    const { formatWakeHandleLines } = await import("./room-doctor.js");
+    const { hostname } = await import("node:os");
+    console.log(`\n${formatWakerHealth(inspectWaker(squadDir(), Date.now()))}`);
+    const db = openDb();
+    try {
+      const host = hostname();
+      const handles = new Map(listWakeHandles(db, host).map((h) => [h.persona, h]));
+      const personas = new Set(handles.keys());
+      for (const r of db.prepare("SELECT persona FROM members").all() as unknown as { persona: string }[])
+        personas.add(r.persona);
+      for (const line of formatWakeHandleLines([...personas], handles, host)) console.log(line);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.log(`waker: status unavailable (${err instanceof Error ? err.message : String(err)})`);
+  }
 }
 
 export const RELAY_USAGE =

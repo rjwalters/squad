@@ -441,6 +441,12 @@ persona is never woken while it has a live session or an earlier wake is still
 running. Each wake and each skip-with-reason is posted as a `waker` system line
 (an identical skip is posted once). State lives in `.squad/waker/`.
 
+To run it unattended, opt in with `./install.sh --waker` (a launchd agent on
+macOS, a systemd user unit on Linux, running `squad waker --follow` from this
+checkout's `dist/`); `./install.sh --no-waker` or uninstall removes it. `squad
+doctor` then reports whether the unit is installed and running, the last poll
+time, and each persona's wake handle (usable / missing / other-host / opted-out).
+
 ### Re-entry for Codex: `squad codex-reentry`
 
 Codex has **no end-of-turn hook** to mirror the `Stop` hook above with — its

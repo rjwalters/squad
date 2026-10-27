@@ -14,6 +14,7 @@ import {
   type ReentryState,
 } from "./reentry.js";
 import { operatorStopped } from "./reentry-state.js";
+import { writeWakerHeartbeat } from "./waker-unit.js";
 import { getWakeHandle, resolveWakeCommand, usableHere, type WakeHandle } from "./wake-handles.js";
 
 /**
@@ -455,6 +456,7 @@ export async function runWakerCommand(command: WakerCommand): Promise<void> {
     try {
       while (!controller.signal.aborted) {
         report(await wakeOnce(db, deps));
+        writeWakerHeartbeat(deps.squadDir, deps.now(), command.intervalMs);
         await new Promise<void>((resolve) => {
           const timer = setTimeout(done, command.intervalMs);
           function done() {
