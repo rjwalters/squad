@@ -44,7 +44,6 @@ _None._
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
-- **#182**: chore(deps): bump @modelcontextprotocol/sdk from 1.31.0 to 1.32.0
 
 ## Proposed
 
@@ -73,7 +72,7 @@ Issues carrying `loom:curated`.
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 2 |
+| Approved PRs awaiting merge | 1 |
 | Curated | 3 |
 | Architect / Hermit proposals | 2 |
 | Active epics | 1 |
