@@ -2,6 +2,12 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-28
+
+- **PR #206**: feat: warn and report when a room's repo lacks Claude Code setup
+- **Issue #204** (closed): A room can exist without Claude Code setup, and nothing says so
+- **PR #203**: chore(deps): bump @modelcontextprotocol/sdk from 1.32.1 to 1.32.2 in the npm-minor-patch group
+
 ### 2026-10-24
 
 - **Issue #197** (closed): Older installs leave SQUAD_RUNTIME as a relative ../squad path that breaks when the target isn't a sibling

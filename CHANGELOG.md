@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   follow loop writes `.squad/waker/heartbeat.json` each poll, and `squad doctor`
   reports unit installed / running / last poll plus a per-persona wake handle
   line (usable / missing / other-host / opted-out).
+- `squad send`/`read` warn once on stderr when an agent harness is driving the
+  CLI in a repo where Claude Code lacks squad tools (`.mcp.json`) or a
+  new-message hook, naming `install.sh --inbox <repo>` (#204). `squad doctor`
+  gains informational Claude Code and Codex setup lines (never a failure). Both
+  share `src/runtime-setup.ts`.
 
 ## 0.19.18
 
