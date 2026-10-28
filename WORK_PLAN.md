@@ -32,6 +32,7 @@ _None._
 Issues currently being built (`loom:building`).
 
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
+- **#175**: waker 3/3: squad install --waker service unit and squad doctor reporting
 
 ## PRs Awaiting Review
 
@@ -44,6 +45,7 @@ _None._
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
 - **#170**: feat: run squad MCP from an installed release and check it in doctor
+- **#201**: feat: add opt-in waker service unit and doctor waker reporting
 
 ## Proposed
 
@@ -70,9 +72,9 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
+| In Progress (`loom:building`) | 2 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 1 |
+| Approved PRs awaiting merge | 2 |
 | Curated | 3 |
 | Architect / Hermit proposals | 2 |
 | Active epics | 1 |
