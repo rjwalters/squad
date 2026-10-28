@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## 0.19.19
 
 - `squad send`/`read` warn once on stderr when an agent harness is driving the
   CLI in a repo where Claude Code lacks squad tools (`.mcp.json`) or a
