@@ -33,12 +33,13 @@ Issues currently being built (`loom:building`).
 
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
 - **#175**: waker 3/3: squad install --waker service unit and squad doctor reporting
+- **#204**: A room can exist without Claude Code setup, and nothing says so
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#206**: feat: warn and report when a room's repo lacks Claude Code setup
 
 ## Approved (Awaiting Merge)
 
@@ -54,6 +55,7 @@ Issues carrying `loom:curated`.
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
 - **#168**: Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent) *(curated)*
 - **#175**: waker 3/3: squad install --waker service unit and squad doctor reporting *(curated)*
+- **#204**: A room can exist without Claude Code setup, and nothing says so *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -72,10 +74,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 2 |
-| PRs awaiting review | 0 |
+| In Progress (`loom:building`) | 3 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 2 |
-| Curated | 3 |
+| Curated | 4 |
 | Architect / Hermit proposals | 2 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->

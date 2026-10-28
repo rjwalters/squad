@@ -2,6 +2,10 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-28
+
+- **PR #203**: chore(deps): bump @modelcontextprotocol/sdk from 1.32.1 to 1.32.2 in the npm-minor-patch group
+
 ### 2026-10-24
 
 - **Issue #197** (closed): Older installs leave SQUAD_RUNTIME as a relative ../squad path that breaks when the target isn't a sibling
