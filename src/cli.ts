@@ -18,6 +18,7 @@ import {
 import { existsSync, statSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { formatRoomDoctorReport } from "./room-doctor.js";
+import { inspectRuntimeWiring, roomRepo, unwiredHarnessWarning } from "./runtime-wiring.js";
 import { WAKE_HANDLE_USAGE, runWakeHandle } from "./wake-handles.js";
 import { parseWakerArgs, runWakerCommand } from "./waker.js";
 import { HEAL_USAGE, formatHealReport, healRooms, parseHealArgs } from "./room-heal.js";
@@ -380,6 +381,8 @@ interface DoctorCheck {
   name: string;
   ok: boolean;
   detail: string;
+  /** Printed as [warn]: a gap worth fixing that does not break the tools. */
+  warn?: boolean;
 }
 
 /**
@@ -440,17 +443,35 @@ function checkPersona(): DoctorCheck {
  * a host came up with no squad_* tools instead of guessing. Exits non-zero
  * (and prints a summary) when any check fails.
  */
+/**
+ * Whether each runtime that might work in this room can actually hear it
+ * (#204). Warnings, not failures: a room is usable from the CLI without them,
+ * but a session missing its tools or notice hook never learns of replies.
+ */
+function checkRuntimeWiring(): DoctorCheck[] {
+  return inspectRuntimeWiring(roomRepo(squadDir())).map((w) => {
+    const gap = !w.tools || w.notice === "none";
+    return {
+      name: `${w.runtime} wiring`,
+      ok: true,
+      warn: gap,
+      detail: gap && w.fix ? `${w.detail} -- fix: ${w.fix}` : w.detail,
+    };
+  });
+}
+
 async function runDoctor(): Promise<void> {
-  const checks = [await checkDeps(), checkDatabase(), checkPersona()];
+  const checks = [await checkDeps(), checkDatabase(), checkPersona(), ...checkRuntimeWiring()];
   for (const c of checks) {
-    console.log(`[${c.ok ? "ok" : "FAIL"}] ${c.name}: ${c.detail}`);
+    console.log(`[${!c.ok ? "FAIL" : c.warn ? "warn" : "ok"}] ${c.name}: ${c.detail}`);
   }
   const failed = checks.filter((c) => !c.ok);
   if (failed.length > 0) {
     process.exitCode = 1;
     console.log(`\n${failed.length} check(s) failed -- squad_* tools will not work until fixed.`);
   } else {
-    console.log("\nall checks passed.");
+    const warned = checks.filter((c) => c.warn).length;
+    console.log(warned ? `\nall checks passed; ${warned} warning(s) above.` : "\nall checks passed.");
   }
 }
 
@@ -823,6 +844,12 @@ export async function runCli(argv: string[]): Promise<void> {
     return;
   }
 
+  if (cmd === "send" || cmd === "read") {
+    // Checked before openDb() creates the room: a fresh room has no peers
+    // whose replies could go unheard (#204).
+    const warning = unwiredHarnessWarning(squadDir());
+    if (warning) process.stderr.write(warning);
+  }
   const persona = process.env.SQUAD_PERSONA || (process.env.SQUAD_SESSION_ID ? undefined : "human");
   const db = openDb();
   // Import must inspect an untouched destination before any identity reservation.
