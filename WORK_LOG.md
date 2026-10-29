@@ -6,6 +6,7 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 - **PR #201**: feat: add opt-in waker service unit and doctor waker reporting
 - **Issue #175** (closed): waker 3/3: squad install --waker service unit and squad doctor reporting
+- **Issue #172** (closed): Wake stopped/departed agents when directed room messages arrive (opt-in squad waker, bounded by the reentry policy)
 
 ### 2026-10-28
 
