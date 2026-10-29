@@ -2,6 +2,11 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-10-29
+
+- **PR #201**: feat: add opt-in waker service unit and doctor waker reporting
+- **Issue #175** (closed): waker 3/3: squad install --waker service unit and squad doctor reporting
+
 ### 2026-10-28
 
 - **PR #206**: feat: warn and report when a room's repo lacks Claude Code setup
