@@ -40,6 +40,7 @@ function options() {
     dry: false,
     reentry: false,
     inbox: false,
+    waker: undefined,
   };
   let targetSeen = false;
   for (const arg of args) {
@@ -55,6 +56,8 @@ function options() {
     else if (arg === "--no-reentry") opts.reentry = false;
     else if (arg === "--inbox") opts.inbox = true;
     else if (arg === "--no-inbox") opts.inbox = false;
+    else if (arg === "--waker") opts.waker = true;
+    else if (arg === "--no-waker") opts.waker = false;
     else if (arg === "-h" || arg === "--help") {
       console.log(`usage: ./${action}.sh [options] [target-repo]
 Install/update copies canonical workflows for Claude and Codex. Modified or
@@ -66,6 +69,9 @@ unowned files are preserved and reported; resolve conflicts and rerun.
   --no-reentry    do not add a hook (existing managed hooks remain installed)
   --inbox         opt-in mid-turn inbox hook; same persona requirement
   --no-inbox      do not add it (existing managed hooks remain installed)
+  --waker         opt-in: install a launchd/systemd user unit running
+                  'squad waker --follow' (never enabled by a plain install)
+  --no-waker      remove that unit if present (uninstall also removes it)
   --check         read-only status against this source; nonzero means attention
   --dry-run       preflight and print planned changes without writing
   --global        uninstall only: also remove owned global Codex artifacts
@@ -88,6 +94,8 @@ uninstall never heal.`);
   }
   if (!["install", "uninstall"].includes(action))
     throw new Error("expected install or uninstall");
+  if (opts.waker === true && action !== "install")
+    throw new Error("--waker is an install option");
   if (opts.global && action !== "uninstall")
     throw new Error("--global is an uninstall option");
   if (opts.check && action !== "install")
@@ -918,12 +926,54 @@ async function main() {
       );
   }
   if (opts.action === "install") healDormantRooms();
+  await wakerUnit(opts);
   console.log(
     opts.action === "install"
       ? "installed both runtime workflows; start Claude or Codex inside the target repository"
       : "removed unchanged managed artifacts; room data and machine-wide CLI links remain",
   );
   process.exitCode = plan.conflicts.length ? 1 : 0;
+}
+
+/**
+ * Opt-in waker service unit (#175). Only `--waker` ever installs it; `--no-waker`
+ * and uninstall remove it. The unit runs this source checkout's built
+ * dist/index.js -- the same runtime path install already resolves for the MCP
+ * launcher -- and follows the target repo's room. SQUAD_WAKER_NO_SERVICE=1
+ * writes/removes the unit file but skips launchctl/systemctl (tests).
+ */
+async function wakerUnit(opts) {
+  const removing = opts.action === "uninstall" || opts.waker === false;
+  if (!removing && opts.waker !== true) return;
+  const unit = await import(join(source, "dist/waker-unit.js"));
+  const platform = unit.supportedPlatform();
+  if (!platform) {
+    console.error(`waker: unsupported platform ${process.platform}; unit not ${removing ? "removed" : "installed"}`);
+    return;
+  }
+  const deps = { platform, home: process.env.HOME || undefined };
+  if (process.env.SQUAD_WAKER_NO_SERVICE === "1") deps.run = () => ({ status: 0, stdout: "" });
+  if (removing) {
+    const r = unit.uninstallWakerUnit(deps);
+    if (r.removed) console.log(`removed waker unit: ${r.path}`);
+    return;
+  }
+  const squadDir = join(opts.target, ".squad");
+  const r = unit.installWakerUnit(
+    {
+      node: process.execPath,
+      entry: join(source, "dist/index.js"),
+      squadDir,
+      intervalSeconds: unit.DEFAULT_UNIT_INTERVAL_SECONDS,
+      logPath: join(squadDir, "waker", "waker.log"),
+    },
+    deps,
+  );
+  console.log(`waker unit ${r.action}: ${r.path}`);
+  if (r.error) {
+    console.error(`waker: ${r.error}`);
+    process.exitCode = 1;
+  }
 }
 
 /**

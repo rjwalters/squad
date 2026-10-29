@@ -736,3 +736,22 @@ test("installing from a development clone notes it unless SQUAD_DEV=1 (#168)", (
   quiet.env.SQUAD_DEV = "1";
   assert.doesNotMatch(quiet.run("install.sh", ["--dry-run"]), /installing from a development clone/);
 });
+
+test("waker unit is opt-in: plain install writes none, --waker installs, --no-waker and uninstall remove", () => {
+  const { home, env, run } = fixture("waker");
+  env.SQUAD_WAKER_NO_SERVICE = "1";
+  const unit =
+    process.platform === "darwin"
+      ? join(home, "Library/LaunchAgents/com.rjwalters.squad-waker.plist")
+      : join(home, ".config/systemd/user/squad-waker.service");
+  run();
+  assert.equal(existsSync(unit), false);
+  assert.match(run("install.sh", ["--waker"]), /waker unit installed/);
+  assert.match(readFileSync(unit, "utf8"), /waker/);
+  assert.match(run("install.sh", ["--waker"]), /waker unit unchanged/);
+  run("install.sh", ["--no-waker"]);
+  assert.equal(existsSync(unit), false);
+  run("install.sh", ["--waker"]);
+  run("uninstall.sh");
+  assert.equal(existsSync(unit), false);
+});

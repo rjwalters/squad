@@ -219,3 +219,16 @@ test("squad doctor warns, but passes, when the configured runtime is a dev clone
     },
   );
 });
+
+test("squad doctor reports waker unit health and per-persona wake handle state", () => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-doctor-"));
+  const home = mkdtempSync(join(tmpdir(), "squad-doctor-home-"));
+  try {
+    const res = runCli(["doctor"], { SQUAD_DIR: dir, HOME: home });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /waker unit: not installed/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+    rmSync(home, { recursive: true, force: true });
+  }
+});

@@ -1,6 +1,7 @@
 import { identityFromEnv } from "./identity.js";
 import { openDb, openDbReadOnly, openExistingRoom, dbPath, squadDir, findRepoRoot, canonicalRoomDir } from "./db.js";
 import { assertInboundAllowed } from "./routing.js";
+import { replyGapWarning, runtimeSetupLines } from "./runtime-setup.js";
 import {
   Squad,
   receiveCrossRoomRequest,
@@ -446,12 +447,38 @@ async function runDoctor(): Promise<void> {
   for (const c of checks) {
     console.log(`[${c.ok ? "ok" : "FAIL"}] ${c.name}: ${c.detail}`);
   }
+  for (const line of runtimeSetupLines()) console.log(line);
   const failed = checks.filter((c) => !c.ok);
   if (failed.length > 0) {
     process.exitCode = 1;
     console.log(`\n${failed.length} check(s) failed -- squad_* tools will not work until fixed.`);
   } else {
     console.log("\nall checks passed.");
+  }
+  await reportWaker();
+}
+
+/** Waker unit health and per-persona wake-handle state (#175); informational, never fails doctor. */
+async function reportWaker(): Promise<void> {
+  try {
+    const { inspectWaker, formatWakerHealth } = await import("./waker-unit.js");
+    const { listWakeHandles } = await import("./wake-handles.js");
+    const { formatWakeHandleLines } = await import("./room-doctor.js");
+    const { hostname } = await import("node:os");
+    console.log(`\n${formatWakerHealth(inspectWaker(squadDir(), Date.now()))}`);
+    const db = openDb();
+    try {
+      const host = hostname();
+      const handles = new Map(listWakeHandles(db, host).map((h) => [h.persona, h]));
+      const personas = new Set(handles.keys());
+      for (const r of db.prepare("SELECT persona FROM members").all() as unknown as { persona: string }[])
+        personas.add(r.persona);
+      for (const line of formatWakeHandleLines([...personas], handles, host)) console.log(line);
+    } finally {
+      db.close();
+    }
+  } catch (err) {
+    console.log(`waker: status unavailable (${err instanceof Error ? err.message : String(err)})`);
   }
 }
 
@@ -666,6 +693,12 @@ function guardImplicitHuman(): void {
     "squad: no SQUAD_PERSONA or SQUAD_SESSION_ID set -- posting as 'human' " +
       "(the operator). Set SQUAD_PERSONA=<name> to post under your own identity.\n",
   );
+}
+
+/** Warn once on stderr when this agent harness cannot receive replies in this repo (#204). */
+function warnReplyGap(): void {
+  const line = replyGapWarning(AGENT_HARNESS_MARKERS);
+  if (line) process.stderr.write(line);
 }
 
 /**
@@ -1055,6 +1088,7 @@ export async function runCli(argv: string[]): Promise<void> {
       const body = rest.join(" ").trim();
       if (!body) throw new Error(COMMAND_USAGE.send);
       guardImplicitHuman();
+      warnReplyGap();
       // A persona with no read state yet has an unseen backlog, not unread
       // news: consume it up front so the notice below counts only what peers
       // post after this persona first showed up.
@@ -1079,6 +1113,7 @@ export async function runCli(argv: string[]): Promise<void> {
       break;
     }
     case "read": {
+      warnReplyGap();
       if (rest.includes("--unread")) {
         for (const m of squad.check()) console.log(fmt(m));
         break;

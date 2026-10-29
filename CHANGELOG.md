@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.19.19
+## 0.19.21
 
 - Run agents' squad MCP from an installed release (#168). `scripts/release-install.sh`
   packs this checkout, installs it with production dependencies under
@@ -16,6 +16,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Installing from a git clone prints a note (`SQUAD_DEV=1` silences it), and
   `squad doctor` gains an `mcp-install` check that fails naming the missing
   package and warns when a configured runtime is a dev clone.
+
+## 0.19.20
+
+- Waker service unit and doctor reporting (#175, phase 3 of #172).
+  `install.sh --waker` writes and loads a launchd agent (macOS) or systemd user
+  unit (Linux) running `squad waker --follow` from this checkout's `dist/`;
+  `--no-waker` and uninstall remove it, and a plain install never adds it. The
+  follow loop writes `.squad/waker/heartbeat.json` each poll, and `squad doctor`
+  reports unit installed / running / last poll plus a per-persona wake handle
+  line (usable / missing / other-host / opted-out).
+
+## 0.19.19
+
+- `squad send`/`read` warn once on stderr when an agent harness is driving the
+  CLI in a repo where Claude Code lacks squad tools (`.mcp.json`) or a
+  new-message hook, naming `install.sh --inbox <repo>` (#204). `squad doctor`
+  gains informational Claude Code and Codex setup lines (never a failure). Both
+  share `src/runtime-setup.ts`.
 
 ## 0.19.18
 
