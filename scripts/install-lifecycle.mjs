@@ -6,10 +6,12 @@ import { spawnSync } from "node:child_process";
 import { createInterface } from "node:readline/promises";
 let parseToml;
 
-const source = fileURLToPath(new URL("../", import.meta.url)).replace(
-  /\/$/,
-  "",
-);
+// SQUAD_SOURCE keeps the stable `current` symlink of a release install (#168):
+// Node resolves symlinks for the main module, so import.meta.url alone would
+// record the versioned directory in every written MCP config.
+const source = (
+  process.env.SQUAD_SOURCE || fileURLToPath(new URL("../", import.meta.url))
+).replace(/\/$/, "");
 const workflows = ["join", "goals", "card", "clear", "fanout", "steward"];
 const localReceipt = ".claude/skills/squad/.install-local.json";
 const globalReceipt = ".squad-install.json";
@@ -563,6 +565,14 @@ async function main() {
   );
   const commit =
     commitResult.status === 0 ? commitResult.stdout.trim() : "unknown";
+  if (
+    opts.action === "install" &&
+    !process.env.SQUAD_DEV &&
+    fs.existsSync(join(source, ".git"))
+  )
+    plan.note(
+      "note: installing from a development clone; agents' squad MCP will break when it is cleaned or switched. Use scripts/release-install.sh and install from its 'current' path (SQUAD_DEV=1 silences this)",
+    );
   const artifacts = new Map();
   for (const runtime of [".claude", ".agents"]) {
     artifacts.set(
