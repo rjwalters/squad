@@ -600,3 +600,24 @@ export function formatRoomDoctorReport(report: RoomDoctorReport): string {
   );
   return lines.join("\n") + "\n";
 }
+
+/** The state of one persona's wake handle, as `squad doctor` reports it (#175). */
+export type WakeHandleState = "usable" | "missing" | "other-host" | "opted-out";
+
+export function wakeHandleState(
+  handle: { host: string; no_wake: boolean } | null,
+  host: string,
+): WakeHandleState {
+  if (!handle) return "missing";
+  if (handle.no_wake) return "opted-out";
+  return handle.host === host ? "usable" : "other-host";
+}
+
+/** One line per persona: `<persona>: wake handle <state>`. */
+export function formatWakeHandleLines(
+  personas: string[],
+  handles: Map<string, { host: string; no_wake: boolean }>,
+  host: string,
+): string[] {
+  return [...personas].sort().map((p) => `persona ${p}: wake handle ${wakeHandleState(handles.get(p) ?? null, host)}`);
+}
