@@ -106,3 +106,6 @@ yarn.lock
 .mcp.json
 # Per-machine Claude Code settings/permissions.
 .claude/settings.local.json
+
+# Repo Skills Codex-side machine-local install metadata (never committed)
+.agents/skills/repo/.install-local.json
