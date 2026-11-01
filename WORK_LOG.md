@@ -2,6 +2,10 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-01
+
+- **PR #213**: Bump Repo Skills 0.24.7 -> 0.25.1
+
 ### 2026-10-29
 
 - **PR #201**: feat: add opt-in waker service unit and doctor waker reporting
