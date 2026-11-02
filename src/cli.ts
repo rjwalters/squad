@@ -18,6 +18,7 @@ import {
 } from "./core.js";
 import { existsSync, statSync, rmSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { checkMcpInstall, configuredEntries } from "./mcp-install.js";
 import { formatRoomDoctorReport } from "./room-doctor.js";
 import { WAKE_HANDLE_USAGE, runWakeHandle } from "./wake-handles.js";
 import { parseWakerArgs, runWakerCommand } from "./waker.js";
@@ -442,7 +443,7 @@ function checkPersona(): DoctorCheck {
  * (and prints a summary) when any check fails.
  */
 async function runDoctor(): Promise<void> {
-  const checks = [await checkDeps(), checkDatabase(), checkPersona()];
+  const checks = [await checkDeps(), checkMcpInstall(configuredEntries(process.cwd())), checkDatabase(), checkPersona()];
   for (const c of checks) {
     console.log(`[${c.ok ? "ok" : "FAIL"}] ${c.name}: ${c.detail}`);
   }

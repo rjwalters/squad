@@ -14,7 +14,7 @@ import {
   realpathSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 const scratch = mkdtempSync(join(tmpdir(), "squad-lifecycle-"));
 test.after(() => rmSync(scratch, { recursive: true, force: true }));
@@ -709,6 +709,34 @@ test("a heal failure warns without undoing a successful install (#132)", () => {
 function escapeForRe(text) {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
+test("installing through a symlinked release path records that path, not its target (#168)", () => {
+  const { home, repo, env } = fixture("stable-source");
+  const link = join(home, "current");
+  symlinkSync(process.cwd(), link);
+  const result = spawnSync("bash", [join(link, "install.sh"), "-y", "--no-link", repo], {
+    env,
+    encoding: "utf8",
+  });
+  assert.equal(result.status, 0, result.stderr + result.stdout);
+  const mcp = JSON.parse(readFileSync(join(repo, ".mcp.json"), "utf8"));
+  assert.equal(
+    resolve(repo, mcp.mcpServers.squad.env.SQUAD_RUNTIME),
+    join(link, "dist/index.js"),
+  );
+  assert.match(
+    readFileSync(join(env.CODEX_HOME, "config.toml"), "utf8"),
+    new RegExp(`args = \\["${join(link, "dist/index.js").replaceAll("/", "\\\\?/")}"\\]`),
+  );
+});
+test("installing from a development clone notes it unless SQUAD_DEV=1 (#168)", () => {
+  const dev = fixture("dev-note");
+  const noted = dev.run("install.sh", ["--dry-run"]);
+  assert.match(noted, /installing from a development clone/);
+  const quiet = fixture("dev-quiet");
+  quiet.env.SQUAD_DEV = "1";
+  assert.doesNotMatch(quiet.run("install.sh", ["--dry-run"]), /installing from a development clone/);
+});
+
 test("waker unit is opt-in: plain install writes none, --waker installs, --no-waker and uninstall remove", () => {
   const { home, env, run } = fixture("waker");
   env.SQUAD_WAKER_NO_SERVICE = "1";
