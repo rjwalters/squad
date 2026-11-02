@@ -2,6 +2,11 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-02
+
+- **PR #170**: feat: run squad MCP from an installed release and check it in doctor
+- **Issue #168** (closed): Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
+
 ### 2026-11-01
 
 - **PR #213**: Bump Repo Skills 0.24.7 -> 0.25.1
