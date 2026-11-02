@@ -15,6 +15,12 @@ VERSION="$(tr -d '[:space:]' <"$CLONE/VERSION")"
 
 work="$(mktemp -d)"
 stage="$ROOT/.stage-$VERSION-$$"
+# Atomically repoint a symlink: rename $1 over $2 without descending into $2 when
+# it is a symlink to a directory. GNU mv spells that -T; BSD/macOS mv has no -T
+# and uses -h (#195). Without this, set -e aborts mid-swap on macOS.
+swap_link() {
+  if mv --version 2>/dev/null | grep -q GNU; then mv -Tf "$1" "$2"; else mv -fh "$1" "$2"; fi
+}
 cleanup() { rm -rf -- "$work" "$stage"; }
 trap cleanup EXIT
 
@@ -36,9 +42,9 @@ mv "$stage" "$ROOT/$VERSION"
 rm -rf -- "$ROOT/.old-$VERSION-$$"
 chmod +x "$ROOT/$VERSION/dist/index.js"
 ln -sfn "$VERSION" "$ROOT/.current.$$"
-mv -Tf "$ROOT/.current.$$" "$ROOT/current"
+swap_link "$ROOT/.current.$$" "$ROOT/current"
 ln -sfn "$ROOT/current/dist/index.js" "$BIN_DIR/.squad.$$"
-mv -Tf "$BIN_DIR/.squad.$$" "$BIN_DIR/squad"
+swap_link "$BIN_DIR/.squad.$$" "$BIN_DIR/squad"
 
 echo "squad $VERSION installed at $ROOT/$VERSION (current -> $VERSION)"
 echo "install into a repo with: $ROOT/current/install.sh <repo>"
