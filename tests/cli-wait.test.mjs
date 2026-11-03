@@ -283,6 +283,50 @@ test("exit codes: quiet suggestion is 2, park is 3, a fresh empty room is not pa
   assert.equal(skewed.next.kind, "propose");
 });
 
+test("a lone agent that posts before every wait still parks once the room is quiet 45m", async () => {
+  // Regression (#224 review): the caller's own chat must not reset its quiet
+  // clock, or an agent obeying "ask the room" every wake never parks.
+  const db = freshRoom();
+  const alice = new Squad(db, "alice");
+  const seen = [];
+  for (let minute = 0; minute <= 90; minute += 9) {
+    const clock = fakeClock(minute * 60_000);
+    // Stamp the post at the injected time so it lands after started_at.
+    const m = alice.send("anyone have something for me?");
+    db.prepare("UPDATE messages SET ts = ? WHERE id = ?").run(new Date(clock.now()).toISOString(), m.id);
+    const r = await runWait(alice, db, opts(clock, { maxSeconds: 0 }));
+    seen.push([minute, r.exit, r.next.kind]);
+    if (minute < 45) assert.deepEqual([r.exit, r.next.kind], [WAIT_EXIT.quiet, "propose"], JSON.stringify(seen));
+    else assert.deepEqual([r.exit, r.next.kind], [WAIT_EXIT.park, "park"], JSON.stringify(seen));
+  }
+  // A peer's chat still counts as activity and defers the park.
+  const clock = fakeClock(91 * 60_000);
+  const b = new Squad(db, "bob").send("I'm here");
+  db.prepare("UPDATE messages SET ts = ? WHERE id = ?").run(new Date(clock.now()).toISOString(), b.id);
+  const r = await runWait(alice, db, opts(clock, { maxSeconds: 0 }));
+  assert.equal(r.next.kind, "propose");
+});
+
+test("the caller's own goal add/done does not wake it; a peer's still does", async () => {
+  const db = freshRoom();
+  const alice = new Squad(db, "alice");
+  const bob = new Squad(db, "bob");
+  const peerGoal = bob.goalAdd("bob's goal");
+  await prime(alice, db);
+  const mine = alice.goalAdd("alice's goal");
+  alice.goalDone(peerGoal.id);
+  const quiet = await runWait(alice, db, opts(fakeClock()));
+  assert.equal(quiet.exit, WAIT_EXIT.quiet, JSON.stringify(quiet.reasons));
+  assert.ok(!quiet.reasons.includes("goals"));
+  alice.goalDone(mine.id);
+  const stillQuiet = await runWait(alice, db, opts(fakeClock()));
+  assert.ok(!stillQuiet.reasons.includes("goals"), "own done on own goal is not news");
+  const clock = fakeClock();
+  clock.at(10, () => bob.goalReopen(mine.id));
+  const woke = await runWait(alice, db, opts(clock));
+  assert.ok(woke.reasons.includes("goals"), `reasons ${woke.reasons}`);
+});
+
 test("a goal whose holder goes stale mid-wait is offered for takeover", async () => {
   const db = freshRoom();
   const alice = new Squad(db, "alice");

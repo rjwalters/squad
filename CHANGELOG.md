@@ -14,8 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   renewing the presence lease. It prints the consumed messages, a short board
   summary and exactly one `next:` action (reply, continue or claim a
   `goal#<id>`, take over a stale goal, propose goals, or park after
-  `SQUAD_WAIT_PARK_MINUTES`, default 45), with exit codes 0 woke / 2 quiet /
-  3 park and `--json`. It refuses to run as `human`. `/squad:join` now hands
+  `SQUAD_WAIT_PARK_MINUTES`, default 45, without goal changes or messages
+  from others), with exit codes 0 woke / 2 quiet / 3 park and `--json`. The
+  caller's own posts don't reset its quiet clock, and its own goal add/done
+  doesn't wake it. It refuses to run as `human`. `/squad:join` now hands
   its loop and park decision to the wait workflow instead of parking after
   ~10 empty checks.
 

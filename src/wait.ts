@@ -103,12 +103,48 @@ export interface WakeObservation {
   persona: string;
   /** Peeked (unconsumed) messages from others since the read cursor. */
   unread: Message[];
-  /** Goal board fingerprint now, and as stored by the previous call (null: none yet). */
-  board: string;
+  /** Goal board now, and its fingerprint as stored by the previous call (null: none yet). */
+  board: BoardRow[];
   storedBoard: string | null;
   /** Newest open review request for the caller, and the newest one already seen. */
   reviewMax: number;
   reviewSeen: number;
+}
+
+/** One goal as the wake check sees it. */
+export interface BoardRow {
+  id: number;
+  status: string;
+  created_by: string;
+  done_by: string | null;
+}
+
+/** `id:status` per goal, in id order: what `wait_state.board` stores. */
+export function fingerprintOf(rows: BoardRow[]): string {
+  return rows.map((r) => `${r.id}:${r.status}`).join(",");
+}
+
+/**
+ * Whether the board changed in a way the caller didn't cause itself. Its own
+ * goal add (absent -> open, created by it) and its own done (open -> done, done
+ * by it) are not news; anything else is, including any reopen (the schema
+ * does not record who reopened) and a goal that disappeared.
+ */
+export function boardNews(stored: string, rows: BoardRow[], persona: string): boolean {
+  const before = new Map<number, string>();
+  for (const part of stored ? stored.split(",") : []) {
+    const at = part.lastIndexOf(":");
+    before.set(Number(part.slice(0, at)), part.slice(at + 1));
+  }
+  for (const r of rows) {
+    const was = before.get(r.id);
+    before.delete(r.id);
+    if (was === r.status) continue;
+    if (was === undefined && r.status === "open" && r.created_by === persona) continue;
+    if (was === "open" && r.status === "done" && r.done_by === persona) continue;
+    return true;
+  }
+  return before.size > 0;
 }
 
 /** Why this poll should end the wait; empty means keep waiting. */
@@ -120,7 +156,7 @@ export function wakeReasons(o: WakeObservation): WakeReason[] {
     if (m.kind === "chat") reasons.add("chat");
   }
   if (o.reviewMax > o.reviewSeen) reasons.add("review");
-  if (o.storedBoard !== null && o.storedBoard !== o.board) reasons.add("goals");
+  if (o.storedBoard !== null && boardNews(o.storedBoard, o.board, o.persona)) reasons.add("goals");
   const order: WakeReason[] = ["mention", "review", "cross-room", "goals", "chat"];
   return order.filter((r) => reasons.has(r));
 }
@@ -269,8 +305,8 @@ export function chooseNext(i: NextInput): NextAction {
       kind: "assist",
       ref: g.id,
       text:
-        `every open goal is held by a live peer: offer ${g.holders[0]!.persona} help on #${g.id}, ` +
-        "or propose a new goal with squad_goal_add",
+        `every open goal is held by a live peer: if you haven't already, offer ${g.holders[0]!.persona} ` +
+        `help on #${g.id} or propose a new goal with squad_goal_add; otherwise keep waiting`,
     };
   }
   // 6. Nothing open and the room has been quiet long enough: park.
@@ -284,7 +320,8 @@ export function chooseNext(i: NextInput): NextAction {
   // 5. Empty board.
   return {
     kind: "propose",
-    text: "the board is empty: propose goals with squad_goal_add and ask the room what's next",
+    text: "the board is empty: propose goals with squad_goal_add, or ask the room once what's next " +
+      "(if you already asked, just keep waiting)",
   };
 }
 
@@ -343,12 +380,14 @@ interface StateRow {
   started_at: string;
 }
 
+function boardRows(db: DatabaseSync): BoardRow[] {
+  return db
+    .prepare("SELECT id, status, created_by, done_by FROM goals ORDER BY id ASC")
+    .all() as unknown as BoardRow[];
+}
+
 function boardFingerprint(db: DatabaseSync): string {
-  const rows = db.prepare("SELECT id, status FROM goals ORDER BY id ASC").all() as unknown as Array<{
-    id: number;
-    status: string;
-  }>;
-  return rows.map((r) => `${r.id}:${r.status}`).join(",");
+  return fingerprintOf(boardRows(db));
 }
 
 function reviewMax(db: DatabaseSync, persona: string, nowMs: number): number {
@@ -362,18 +401,21 @@ function reviewMax(db: DatabaseSync, persona: string, nowMs: number): number {
 }
 
 /**
- * Newest room activity: any message (the caller's own included, so a fresh
- * intro counts) and any goal change. Null for a room with no history at all.
+ * Newest room activity: any message from someone other than the caller, and
+ * any goal change. The caller's own posts are excluded, or an agent that
+ * posts on every wake would keep resetting its own quiet clock and never
+ * park; a fresh intro is covered by the session's `started_at` floor instead.
+ * Null for a room with no such history.
  */
-function lastActivityMs(db: DatabaseSync): number | null {
+function lastActivityMs(db: DatabaseSync, persona: string): number | null {
   const row = db
     .prepare(
       `SELECT MAX(t) AS t FROM (
-         SELECT MAX(ts) AS t FROM messages
+         SELECT MAX(ts) AS t FROM messages WHERE sender <> ?
          UNION ALL SELECT MAX(created_ts) FROM goals
          UNION ALL SELECT MAX(done_ts) FROM goals)`,
     )
-    .get() as { t: string | null };
+    .get(persona) as { t: string | null };
   return row.t ? Date.parse(row.t) : null;
 }
 
@@ -410,7 +452,7 @@ export async function runWait(squad: Squad, db: DatabaseSync, opts: WaitOptions 
     reasons = wakeReasons({
       persona,
       unread: squad.peekUnread(),
-      board: boardFingerprint(db),
+      board: boardRows(db),
       storedBoard,
       reviewMax: reviewMax(db, persona, clock.now()),
       reviewSeen,
@@ -436,7 +478,7 @@ export async function runWait(squad: Squad, db: DatabaseSync, opts: WaitOptions 
   // this session first waited: an agent arriving in a long-silent room (or
   // one with no history) gets a full park threshold of its own. Clamped at 0
   // so a clock skewed behind the room never reads as negative.
-  const last = Math.max(lastActivityMs(db) ?? startedAt, startedAt);
+  const last = Math.max(lastActivityMs(db, persona) ?? startedAt, startedAt);
   const quietMs = Math.max(0, end - last);
   const next = chooseNext({ persona, messages: consumed, reviews, crossRoom, goals, quietMs, parkMs });
 
