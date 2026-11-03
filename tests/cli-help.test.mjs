@@ -29,6 +29,7 @@ const DOCUMENTED = [
   "read",
   "tail",
   "wait",
+  "join",
   "goals",
   "claims",
   "claim",

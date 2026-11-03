@@ -4,13 +4,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.19.24
+## 0.19.26
 
 - Internal refactor (#232): `preLaunchStop`, the quiet-gap reset and the persona
   state/lock helpers are now shared across `src/codex-reentry.ts`,
   `src/reentry-state.ts`, `src/reentry.ts` and `src/waker.ts`. One small
   behavior change: the waker's state load now defaults `totalFired` to `attempt`
   (as the shared loader already did).
+
+## 0.19.25
+
+- `squad join --as <label>` gives shell-only agents (no MCP) a server-minted
+  identity (#229): it mints `<label>-<4 hex>` through the same automatic-identity
+  path as `squad_join` (`SQUAD_PROVIDER` prefixes, a trusted `SQUAD_MODEL` wins),
+  opens a presence lease, prints the compact room catch-up and the exact
+  `export SQUAD_PERSONA=... SQUAD_SESSION_ID=...` line for later `squad send` /
+  `read` / `wait` calls (which reuse the one session), and supports `--json`. It
+  refuses a missing label, `human`, reserved names, a label equal to an existing
+  persona, and a shell that already exports `SQUAD_PERSONA`.
+
+## 0.19.24
+
+- opencode is a third installed runtime (#227). `install.sh` merges a `squad`
+  MCP server into the repo's `opencode.json` (field-owned, so user keys and a
+  user-defined `squad` entry survive install and uninstall; `opencode.jsonc` is
+  left untouched with a note) and installs generated `/squad-<workflow>` commands
+  to `.opencode/commands/` from the new `opencode/commands/` source. `--no-opencode`
+  skips it, uninstall removes it, and `squad doctor` prints an informational
+  `opencode:` line. Schema verified against https://opencode.ai/config.json.
 
 ## 0.19.23
 

@@ -33,6 +33,7 @@ function options() {
     action,
     target: ".",
     codex: true,
+    opencode: true,
     link: true,
     global: false,
     yes: false,
@@ -48,7 +49,8 @@ function options() {
     else if (arg === "--no-codex") {
       opts.codex = false;
       opts.link = false;
-    } else if (arg === "--no-link") opts.link = false;
+    } else if (arg === "--no-opencode") opts.opencode = false;
+    else if (arg === "--no-link") opts.link = false;
     else if (arg === "--global") opts.global = true;
     else if (arg === "--check") opts.check = true;
     else if (arg === "--dry-run") opts.dry = true;
@@ -60,10 +62,11 @@ function options() {
     else if (arg === "--no-waker") opts.waker = false;
     else if (arg === "-h" || arg === "--help") {
       console.log(`usage: ./${action}.sh [options] [target-repo]
-Install/update copies canonical workflows for Claude and Codex. Modified or
+Install/update copies canonical workflows for Claude, Codex and opencode. Modified or
 unowned files are preserved and reported; resolve conflicts and rerun.
   -y              accept optional machine-wide Codex registration / npm link
   --no-codex      skip ALL global setup (repo-scoped Codex skills still install)
+  --no-opencode   skip repo-scoped opencode wiring (opencode.json + .opencode/commands)
   --no-link       skip the optional npm link
   --reentry       opt-in hook; requires SQUAD_CLAUDE_PERSONA=<unique-name>
   --no-reentry    do not add a hook (existing managed hooks remain installed)
@@ -592,6 +595,17 @@ async function main() {
       `.claude/commands/squad/${name}.md`,
       fs.readFileSync(join(source, `commands/squad/${name}.md`), "utf8"),
     );
+  // opencode commands. `--no-opencode` only stops adding/updating them: files
+  // an earlier install already owns stay owned (like --no-reentry); uninstall
+  // always removes them.
+  const opencodeRels = workflows.map((n) => `.opencode/commands/squad-${n}.md`);
+  const opencodeOn = opts.opencode || opts.action === "uninstall";
+  if (opencodeOn)
+    for (const name of workflows)
+      artifacts.set(
+        `.opencode/commands/squad-${name}.md`,
+        fs.readFileSync(join(source, `opencode/commands/squad-${name}.md`), "utf8"),
+      );
   // The project MCP launcher .mcp.json names instead of the runtime itself, so
   // that a linked git worktree can spawn the server at all: a worktree checkout
   // has this repository-relative file, but not the sibling squad checkout a
@@ -605,7 +619,7 @@ async function main() {
   );
   const hookRel = ".claude/hooks/squad-reentry.sh";
   const inboxRel = ".claude/hooks/squad-inbox.sh";
-  const allowed = new Set([...artifacts.keys(), ...metaPaths, hookRel, inboxRel]);
+  const allowed = new Set([...artifacts.keys(), ...opencodeRels, ...metaPaths, hookRel, inboxRel]);
   const scope = new Scope(plan, opts.target, localReceipt, allowed);
   // A cloned consumer has tracked artifact hashes but no machine-local config
   // receipt. Recover only file ownership; never infer config ownership.
@@ -634,6 +648,9 @@ async function main() {
     }
   }
   for (const [rel, body] of artifacts) scope.file(rel, body);
+  if (!opencodeOn)
+    for (const rel of opencodeRels)
+      if (scope.old.files?.[rel]) scope.next.files[rel] = scope.old.files[rel];
   const runtimePath = join(source, "dist/index.js");
   const siblingSource = dirname(source) === dirname(opts.target);
   const portableRuntime = siblingSource
@@ -747,6 +764,7 @@ async function main() {
         plan.attention.push(`stale/different Claude runtime source: ${spec}`);
     }
   }
+  opencodeConfig(scope, plan, opts, opencodeOn, launcherRel, portableRuntime);
   for (const flag of ["reentry", "inbox"])
     if (
       opts[flag] &&
@@ -929,7 +947,7 @@ async function main() {
   await wakerUnit(opts);
   console.log(
     opts.action === "install"
-      ? "installed both runtime workflows; start Claude or Codex inside the target repository"
+      ? "installed runtime workflows; start Claude, Codex or opencode inside the target repository"
       : "removed unchanged managed artifacts; room data and machine-wide CLI links remain",
   );
   process.exitCode = plan.conflicts.length ? 1 : 0;
@@ -1122,6 +1140,60 @@ function hookSettings(scope, specs) {
         : json(cfg),
     );
   return retained;
+}
+/**
+ * Repo-scoped opencode MCP wiring: a `mcp.squad` entry merged into
+ * opencode.json through the same field-ownership machinery as .mcp.json, so
+ * unrelated user keys survive install and uninstall. Schema checked against
+ * https://opencode.ai/config.json: {type:"local", command:[...], environment:{}}.
+ * An opencode.jsonc (comments) or unparseable opencode.json is never rewritten.
+ */
+function opencodeConfig(scope, plan, opts, on, launcherRel, portableRuntime) {
+  const rel = "opencode.json";
+  const prior = scope.old.fragments?.[rel];
+  if (!on && opts.action !== "uninstall") {
+    if (prior) scope.next.fragments[rel] = prior;
+    return;
+  }
+  const text = read(safePath(opts.target, rel));
+  let existing = null;
+  let skip = null;
+  if (text === null && read(safePath(opts.target, "opencode.jsonc")) !== null)
+    skip = "opencode.jsonc";
+  else {
+    try {
+      existing = parseJson(text, rel);
+    } catch {
+      skip = rel;
+    }
+  }
+  if (skip) {
+    plan.note(
+      `preserved ${skip} untouched (comments/unparseable); add the squad MCP server manually: "mcp": {"squad": {"type": "local", "command": ["node", "${launcherRel}"], "environment": {"SQUAD_DIR": ".squad", "SQUAD_RUNTIME": "${portableRuntime}"}}}`,
+    );
+    if (prior) scope.next.fragments[rel] = prior;
+    return;
+  }
+  const fields = {
+    "mcp/squad/type": "local",
+    "mcp/squad/command": ["node", launcherRel],
+    "mcp/squad/environment/SQUAD_DIR": ".squad",
+    "mcp/squad/environment/SQUAD_RUNTIME": portableRuntime,
+  };
+  const pinKey = "mcp/squad/environment/SQUAD_PERSONA";
+  const pin = process.env.SQUAD_OPENCODE_PERSONA || prior?.values?.[pinKey]?.installed;
+  if (pin) fields[pinKey] = pin;
+  // A squad server the user defined themselves is never adopted or completed.
+  const external =
+    existing.mcp?.squad?.command !== undefined &&
+    !prior?.values?.["mcp/squad/command"];
+  scope.jsonFields(
+    rel,
+    fields,
+    external
+      ? ["mcp/squad/type", "mcp/squad/command", "mcp/squad/environment/SQUAD_RUNTIME"]
+      : [],
+  );
 }
 function gitignore(scope) {
   const rel = ".gitignore",

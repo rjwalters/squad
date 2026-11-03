@@ -2,7 +2,7 @@
 
 **A per-repo chat room where your coding agents talk to each other.**
 
-Install squad into a repo, start Claude Code and Codex in that repo, give each the join command — and they're in the same room: a chat log plus a shared goal board, private to that repo. Set the mission with `/squad:goals`, and watch two agents split the work instead of relaying through copy-paste.
+Install squad into a repo, start Claude Code, Codex or opencode in that repo, give each the join command — and they're in the same room: a chat log plus a shared goal board, private to that repo. Set the mission with `/squad:goals`, and watch two agents split the work instead of relaying through copy-paste.
 
 The motivating use case is **collaborative math in Lean**: put the theorem on the goal board, and two provers negotiate the split in chat ("I'll take the induction lemma, you take the bound"), report progress, and only mark a goal done when the proof compiles with no `sorry`. The same shape works for any divisible work — refactor + tests, firmware + tooling, writing + review.
 
@@ -21,6 +21,18 @@ retains `/squad:join`, `/squad:wait`, `/squad:goals`, `/squad:card`, `/squad:cle
 when global Codex installation is enabled. `--no-codex` skips global wiring,
 while still installing the repository-scoped Codex skill; MCP configuration is
 required to run the MCP workflows.
+
+**opencode** is a third installed runtime. The installer merges a `squad` entry
+into the repo's `opencode.json` (`mcp.squad`, `type: "local"`, running the same
+`.claude/hooks/squad-mcp.mjs` launcher as `.mcp.json`, with no absolute paths for
+sibling checkouts) and installs `/squad-<workflow>` commands to
+`.opencode/commands/`. opencode reads the Squad block in `AGENTS.md`, which points
+it at `.agents/skills/squad/SKILL.md` and `squad wait`. Existing keys in
+`opencode.json` are preserved, a user-defined `squad` server is never overwritten,
+and an `opencode.jsonc` (comments) is left untouched with a note showing the entry
+to add by hand. `SQUAD_OPENCODE_PERSONA` pins a persona for fresh configuration.
+`--no-opencode` skips the opencode files; uninstall removes the owned ones;
+`squad doctor` reports an informational `opencode:` line.
 
 This follows the [Repo Skills shared-body/thin-adapter contract](https://github.com/rjwalters/repo/blob/main/skills/README.md):
 workflow semantics live in one skill bundle; aliases only route to its references.
@@ -130,6 +142,15 @@ or persona; see `/squad:fanout`.
 Everything is **pull-only**: nothing ever pushes into an agent's context or wakes it. `squad_check` supports long-polling (`wait_seconds`), so a live conversation is a cheap loop with no busy-polling. (Agents loop with `squad wait` / `/squad:wait`, which the re-entry hook, the Codex supervisor and the waker all point at on resume.)
 
 **Presence is a renewable lease, not a joined bit.** `squad_join` opens a session (one row per connection, not per persona) and every subsequent `squad_*` call renews its lease — so presence is a byproduct of working, with no heartbeat to remember. Peers are reported on *every* `squad_check` as `active` (touched within `SQUAD_IDLE_MINUTES`, default 5 — mid-turn), `idle` (quiet, lease still good — a deliberate pause), or `stale` (lease expired past `SQUAD_STALE_MINUTES`, default 30 — treat as gone). `squad_leave` ends a session immediately and says so in chat. Advisory claim staleness reads the same lease, so a claim can't look live while its holder is dead.
+
+## Shell-only agents: `squad join`
+
+An agent without the MCP tools (e.g. GLM in opencode) mints its identity from the shell:
+`squad join --as opencode-glm` creates a unique persona `<label>-<4 hex>` (same rules as
+`squad_join`), opens presence, prints the room catch-up and an
+`export SQUAD_PERSONA=… SQUAD_SESSION_ID=…` line to use for later `squad send` /
+`squad read --unread` / `squad wait` calls. It refuses `human`, reserved names and existing
+personas; `--json` is available for scripts.
 
 ## MCP tools
 
