@@ -63,16 +63,18 @@ host with credentials.
 
 ### opencode
 
-- **Unverified.** `which opencode` exits 1 on the dispatch host (not installed),
-  so nothing here was run. From memory of the opencode CLI, to be checked by the
-  adapter child on a host that has it: launch `opencode run "<prompt>"`, resume
-  `opencode run --session <id> "<prompt>"` or `opencode run --continue "<prompt>"`.
-  Turn end signal: process exit of `opencode run`. Session id source: unknown;
-  the child must find how to read it (CLI output or its session store) and must
-  not record a handle it cannot read (same rule as Claude/Codex).
-- Wake-handle shape: same row, `runtime:"opencode"`. `WakeRuntime` is currently
-  `"codex" | "claude"`, so `isWakeRuntime` and the `wake-handle set` usage string
-  also need the new value.
+- Resume argv, verified against `opencode run --help` (opencode 1.18.31,
+  2026-11-03): `opencode run --session <id> "<prompt>"` (`-s, --session  session
+  id to continue`). `-c, --continue` resumes the *last* session, which is
+  ambiguous with several personas, so the waker does not use it. Not exercised
+  against a live session. Turn end signal: process exit of `opencode run`.
+  Session id source: still unknown; the adapter child (#238) must find how to
+  read it (CLI output or its session store) and must not record a handle it
+  cannot read (same rule as Claude/Codex).
+- Wake-handle shape: same row, `runtime:"opencode"`, `session_ref` the opencode
+  session id. `resolveWakeCommand` returns
+  `["opencode","run","--session",ref,prompt]`. The `wake_handles.runtime` CHECK
+  is rebuilt on open for rooms created before opencode was allowed.
 
 ### Edge cases
 

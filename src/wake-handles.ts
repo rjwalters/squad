@@ -12,7 +12,7 @@ import { hostname } from "node:os";
  * and SCHEMA_VERSION does not move.
  */
 
-export type WakeRuntime = "codex" | "claude";
+export type WakeRuntime = "codex" | "claude" | "opencode";
 
 export interface WakeHandle {
   persona: string;
@@ -48,7 +48,7 @@ interface Row {
 }
 
 export function isWakeRuntime(value: unknown): value is WakeRuntime {
-  return value === "codex" || value === "claude";
+  return value === "codex" || value === "claude" || value === "opencode";
 }
 
 function toHandle(row: Row): WakeHandle {
@@ -134,6 +134,8 @@ export function resolveWakeCommand(
       return ["codex", "exec", "resume", ref, ...(prompt ? [prompt] : [])];
     case "claude":
       return ["claude", "--resume", ref, "-p", prompt];
+    case "opencode":
+      return ["opencode", "run", "--session", ref, ...(prompt ? [prompt] : [])];
     default:
       return null;
   }
@@ -147,7 +149,7 @@ export function codexSessionFromRollout(path: string): string | null {
 }
 
 export const WAKE_HANDLE_USAGE =
-  "usage: squad wake-handle set <persona> <codex|claude> <session-ref> [--cwd <dir>] | " +
+  "usage: squad wake-handle set <persona> <codex|claude|opencode> <session-ref> [--cwd <dir>] | " +
   "show <persona> | list | clear <persona> | opt-out <persona> | opt-in <persona>";
 
 /** Runs a `squad wake-handle` subcommand; returns the lines to print. */
@@ -163,7 +165,7 @@ export function runWakeHandle(db: DatabaseSync, args: string[]): string[] {
       let cwd: string | null = process.cwd();
       if (flags.length === 2 && flags[0] === "--cwd") cwd = flags[1]!;
       else if (flags.length) throw new Error(WAKE_HANDLE_USAGE);
-      if (!isWakeRuntime(runtime)) throw new Error(`wake-handle: runtime must be 'codex' or 'claude', got '${runtime}'`);
+      if (!isWakeRuntime(runtime)) throw new Error(`wake-handle: runtime must be 'codex', 'claude' or 'opencode', got '${runtime}'`);
       const h = upsertWakeHandle(db, { persona, runtime, sessionRef, cwd });
       if (!h) throw new Error("wake-handle: persona and session-ref must be non-empty");
       return [`wake handle set for ${h.persona} (${h.runtime}, ${h.host})`];
