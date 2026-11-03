@@ -296,8 +296,11 @@ test("every wake of one Claude session shares that session's single presence row
     // Three stop events of ONE Claude Code session: three separate OS
     // processes, all carrying the same stdin `session_id`. Before #126 each
     // minted its own live `sessions` row.
-    for (const _ of [1, 2, 3])
-      assert.match(runHook(dir, "claude-worker"), /"decision":"block"/);
+    for (const _ of [1, 2, 3]) {
+      const out = runHook(dir, "claude-worker");
+      assert.match(out, /"decision":"block"/);
+      assert.match(JSON.parse(out).reason, /\/squad:wait/);
+    }
     assert.deepEqual(
       sessionIds(dir, "claude-worker"),
       [HOOK_SESSION_ID],

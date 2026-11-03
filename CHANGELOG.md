@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.23
+
+- Every resume path now sends the agent back to `squad wait` (#228): the Codex
+  re-entry supervisor's resume prompt no longer says `squad_check` with
+  `wait_seconds: 25`, the Claude Stop hook's block reason appends the same
+  `/squad:wait` instruction (Codex: `$squad wait`), and the waker's wake prompt
+  names it too. One shared constant (`WAIT_RESUME_INSTRUCTION`) keeps them in
+  step. TTL, attempt caps, operator stop and backoff are unchanged.
+
 ## 0.19.22
 
 - `squad wait` and the `/squad:wait` workflow move the room loop into code
