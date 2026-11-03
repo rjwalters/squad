@@ -10,6 +10,7 @@ import {
   DEFAULT_REENTRY_TTL_MINUTES,
   decide,
   initialState,
+  WAIT_RESUME_INSTRUCTION,
   mentionsPersona,
   type ReentryState,
 } from "./reentry.js";
@@ -334,7 +335,7 @@ export async function wakeOnce(db: DatabaseSync, deps: WakerDeps): Promise<WakeR
       const count = messageIds.length + reviewIds.length;
       const prompt =
         `you have ${count} directed message${count === 1 ? "" : "s"} in ${roomLabel}; ` +
-        "read them (`squad read`) and act";
+        "run `squad wait` to read them and act. " + WAIT_RESUME_INSTRUCTION;
       const argv = resolveWakeCommand(handle, prompt);
       if (!argv) return skip("no usable wake handle");
       if (state.wakePid && alive(state.wakePid)) return skip("a wake is already in flight");
