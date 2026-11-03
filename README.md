@@ -16,8 +16,8 @@ The canonical Squad skill is `skills/squad/SKILL.md`, with shared procedures in
 `skills/squad/references/`. The installer copies the same bundle to
 `.claude/skills/squad/` and `.agents/skills/squad/` in each target repository.
 Codex can discover `$squad` or select it from a natural-language request; Claude
-retains `/squad:join`, `/squad:goals`, `/squad:card`, `/squad:clear`, and
-`/squad:fanout` and `/squad:steward`. All six legacy Codex `/squad-<workflow>` prompts remain available
+retains `/squad:join`, `/squad:wait`, `/squad:goals`, `/squad:card`, `/squad:clear`, and
+`/squad:fanout` and `/squad:steward`. All seven legacy Codex `/squad-<workflow>` prompts remain available
 when global Codex installation is enabled. `--no-codex` skips global wiring,
 while still installing the repository-scoped Codex skill; MCP configuration is
 required to run the MCP workflows.
@@ -323,9 +323,9 @@ The hook requires an explicit unique `SQUAD_CLAUDE_PERSONA`, matching its MCP
 configuration; its separate process cannot discover an automatically generated
 session identity. Existing managed hooks remain installed on ordinary refresh.
 
-A Claude Code session's own conversation loop (`/squad:join`) is turn-based: it
-goes idle and stops after ~10 empty checks, and nothing brings it back without
-a human re-invoking it. `./install.sh --reentry` (off by default — the flag
+A Claude Code session's own conversation loop (`/squad:join`, then
+`/squad:wait`) is turn-based: it parks when `squad wait` recommends it (exit 3),
+and nothing brings it back without a human re-invoking it. `./install.sh --reentry` (off by default — the flag
 must be passed explicitly) installs a Claude Code `Stop` hook
 (`.claude/hooks/squad-reentry.sh`, wired into `.claude/settings.json`) that
 re-arms the session itself, bounded so it can never hold a session open
@@ -555,20 +555,60 @@ terminal 3:  squad tail                    # watch the room live
              squad send "@<joined-name> take exp_bound"
 ```
 
-All six workflows use the same references in both harnesses. Claude retains
+All seven workflows use the same references in both harnesses. Claude retains
 `/squad:<workflow>`; Codex can use `$squad` with a natural-language request or the
 legacy `/squad-<workflow>` prompts when installed:
 
-- **join** — enter the room, introduce yourself, work the check/respond loop until stopped (agents go idle on their own after ~10 empty checks)
+- **join** — enter the room, introduce yourself, then hand off to the wait loop
+- **wait** — the room loop: run `squad wait`, do what its `next:` line says, repeat; parks on exit 3. Also resumes a lapsed agent without re-joining
 - **goals** — show the shared board, or add goals from arguments
 - **card** — create, inspect, transition, or attach evidence to a Science Card
 - **steward** — inspect durable bank/review/map state and send bounded reminders as the configured steward
 - **fanout** — coordinate separately identified workers on distinct assignments
 - **clear** — wipe the room for a fresh session when the user explicitly requests a reset
 
-Human CLI: `squad send [--room <repo> | --reply <id> | --retry <delivery-id>] | read [--unread] | tail | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | relay [--once|--follow|status] | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
+Human CLI: `squad send [--room <repo> | --reply <id> | --retry <delivery-id>] | read [--unread] | tail | wait [--max <s>] [--json] | goals [add|done|reopen] | claims | claim <path> | release <path> | diverge [open|submit|status|close] | card [create|list|show|transition|evidence|edit] | review [open|list|show|claim|resolve|cancel] | who | leave | clear | export <path> | import <path> | relay [--once|--follow|status] | path | doctor` (persona defaults to `human`; if the install step's `npm link` was skipped or failed, replace `squad` with `node <path-to-squad>/dist/index.js`). Each repo's room is just `<repo>/.squad` — deleting that directory is a full reset. `squad export`/`squad import` move a room's full history between repos (see "Moving a room between repos" above). `squad card` manages Science Cards, the structured tracker for a claim moving through `QUESTION` → … → `SUPPORTED`/`FALSIFIED`/`INCONCLUSIVE`/`ABANDONED`; `squad card edit <id> --field value ...` changes fields set at creation (title, confidence, novelty, prior-art status, etc.) without touching phase — see `squad help` for the full subcommand list.
 
 `squad doctor` is a preflight/diagnostic: it checks that the runtime dependencies resolve (`@modelcontextprotocol/sdk`, `zod` — the packages `mcp.js` needs but no other module does), that the database is reachable, and reports how the persona will resolve. It also prints informational `[info]` lines for this repo's Claude Code setup (squad tools in `.mcp.json`, inbox/reentry hook) and Codex setup (`~/.codex/config.toml`; no new-message notice, by design), with a fix command when something is missing; these never fail the run. `squad send`/`read` print the same gap as a single stderr warning when an agent harness is detected. Run it whenever a harness comes up with no `squad_*` tools and you can't tell whether the room just isn't configured or the server is actually broken. It works even when the dependencies it's checking are missing — see below.
+
+### The room loop: `squad wait` and `/squad:wait`
+
+Agents used to poll the room from their own turn: one `squad_check` per 25s,
+each costing a model turn, parking after ~10 empty checks. `squad wait` moves
+that loop into code. It is a plain CLI command, so it works the same from
+Claude Code, Codex or opencode's shell, and it is not bound by MCP tool
+timeouts. `/squad:wait` (and the `squad-wait` Codex prompt) just runs it, does
+what it says, and repeats.
+
+```
+SQUAD_PERSONA=opus-1f2e squad wait            # or SQUAD_SESSION_ID=<identity_id>
+woke: mention, chat after 37s (next quiet wait 60s)
+14:02:11 <codex-ab12> @opus-1f2e can you check the parser change?
+goals: #1 Fix parser [codex-ab12] · #2 Write docs [unclaimed]
+peers: codex-ab12 active
+next: reply to codex-ab12 (message #42): squad_send, or squad send --reply 42 "<text>"
+```
+
+- **Identity:** needs `SQUAD_PERSONA` or `SQUAD_SESSION_ID`; refuses `human`.
+- **Backoff:** successive quiet calls wait 60s, 120s, 240s, 480s, capped by
+  `--max` (default 540, under Claude Code's 10-minute Bash limit; pass less if
+  your shell times out sooner). The step is stored per session in the room's
+  database and resets after a call that wakes on activity. The database is
+  polled every couple of seconds, and the presence lease is renewed while
+  waiting, so peers see the agent as live.
+- **Early return:** unread peer chat, an `@mention` of you or `@repo`, a new
+  review request for you, a goal added/done/reopened, an inbound cross-room
+  request.
+- **Output:** the new messages (consumed, like `squad read --unread`), a short
+  board summary, and exactly one `next:` line, chosen in this order: directed
+  work (mention, review, cross-room request); a goal you hold; an open goal
+  nobody holds (claim it as `goal#<id>`); a goal whose holder is stale; an
+  empty board (propose goals); quiet for `SQUAD_WAIT_PARK_MINUTES` (default 45)
+  with nothing open (park). When every open goal is held by a live peer, it
+  suggests offering help instead. Goal ownership is an ordinary advisory claim
+  on `goal#<id>`.
+- **Exit codes:** `0` woke on activity, `2` quiet with a suggestion, `3` park
+  recommended. `--json` prints the same as one JSON object.
 
 ### Cross-room requests and replies
 

@@ -7,7 +7,7 @@ and follow the installed Squad skill, including its room/identity conventions:
 - Claude: `.claude/skills/squad/SKILL.md`
 - Codex: `.agents/skills/squad/SKILL.md` (invoke `$squad` or ask naturally)
 
-Both expose join, goals, card, fanout, steward, and clear workflows. Claude aliases are
+Both expose join, wait, goals, card, fanout, steward, and clear workflows. Claude aliases are
 `/squad:<workflow>`; legacy Codex prompts are `/squad-<workflow>`.
 
 **Other channels:** in a squad-enabled repo, coordinate in the room, including

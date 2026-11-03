@@ -12,7 +12,7 @@ let parseToml;
 const source = (
   process.env.SQUAD_SOURCE || fileURLToPath(new URL("../", import.meta.url))
 ).replace(/\/$/, "");
-const workflows = ["join", "goals", "card", "clear", "fanout", "steward"];
+const workflows = ["join", "wait", "goals", "card", "clear", "fanout", "steward"];
 const localReceipt = ".claude/skills/squad/.install-local.json";
 const globalReceipt = ".squad-install.json";
 const metaPaths = [".claude", ".agents"].map(
