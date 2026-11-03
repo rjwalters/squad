@@ -581,7 +581,7 @@ test(
           assert.equal(result.isError, true, `${name} must fail explicitly`);
         }
       }
-      for (const command of ["join", "check"]) {
+      for (const command of ["connect", "check"]) {
         const result = spawnSync(process.execPath, [cliPath, command], {
           cwd: repo,
           env: baseEnv,

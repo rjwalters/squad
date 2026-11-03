@@ -1,4 +1,4 @@
-import { identityFromEnv } from "./identity.js";
+import { identityFromEnv, isReservedPersona, reservedPersonaReason, reserveAutomaticPersona } from "./identity.js";
 import { openDb, openDbReadOnly, openExistingRoom, dbPath, squadDir, findRepoRoot, canonicalRoomDir } from "./db.js";
 import { assertInboundAllowed } from "./routing.js";
 import { replyGapWarning, runtimeSetupLines } from "./runtime-setup.js";
@@ -121,6 +121,14 @@ const SUB_USAGE: Record<string, string> = {
   "send --retry": "usage: squad send --retry <delivery-id>",
 };
 
+const JOIN_USAGE =
+  "usage: squad join --as <label> [--json]\n" +
+  "  Shell-only agents: mint a unique persona '<label>-<4 hex>' (same rules as squad_join:\n" +
+  "  SQUAD_PROVIDER prefixes the label, a trusted SQUAD_MODEL takes precedence), open a\n" +
+  "  presence lease, print the room catch-up and the exact 'export SQUAD_PERSONA=... SQUAD_SESSION_ID=...'\n" +
+  "  line to use for later squad send / read / wait calls. Refuses 'human', reserved names,\n" +
+  "  an existing persona's exact name, and a shell that already has SQUAD_PERSONA set.";
+
 const COMMAND_USAGE: Record<string, string> = {
   bank: "usage: squad bank <attempt-id> [--build-timeout-ms N]",
   card: "usage: squad card [create|list|show|transition|evidence|edit] ...",
@@ -133,6 +141,7 @@ const COMMAND_USAGE: Record<string, string> = {
   doctor: "usage: squad doctor [--room]",
   export: "usage: squad export <path>",
   heal: HEAL_USAGE,
+  join: JOIN_USAGE,
   "wake-handle": WAKE_HANDLE_USAGE,
   goals: "usage: squad goals [add <text...> | done <id> | reopen <id>]",
   import: "usage: squad import <path>",
@@ -181,6 +190,10 @@ Human CLI usage:
   squad read --unread         Show only peers' messages since your last read; advances
                                the cursor (a second call prints nothing)
   squad tail                  Follow the room live (Ctrl-C to stop)
+  squad join --as <label> [--json]
+                               Shell-only agents: mint a unique persona, open
+                               presence, print the catch-up and the export line
+                               (SQUAD_PERSONA, SQUAD_SESSION_ID) for later calls
   squad wait [--max <seconds>] [--json]
                                Agent loop step: block until something concerns
                                you (backoff 60/120/240/480s, capped by --max,
@@ -747,6 +760,67 @@ function runRoutedSend(rest: string[], plan: RoomSendPlan): void {
   }
 }
 
+/** Parse `squad join` flags. Throws the usage string on anything else. */
+export function parseJoinArgs(args: string[]): { label: string; json: boolean } {
+  let label: string | undefined;
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--json") json = true;
+    else if (a === "--as" && args[i + 1] !== undefined) label = args[++i];
+    else if (a.startsWith("--as=")) label = a.slice(5);
+    else throw new Error(JOIN_USAGE);
+  }
+  if (label === undefined || !label.trim()) throw new Error(`squad join needs a non-empty --as <label>\n${JOIN_USAGE}`);
+  return { label: label.trim(), json };
+}
+
+/**
+ * `squad join --as <label>` (#229): the CLI twin of `squad_join` for shell-only
+ * agents. Mints through the automatic-identity path, then joins as that
+ * persona with the identity id as its session id, so later calls made with
+ * only the printed SQUAD_PERSONA + SQUAD_SESSION_ID reuse this one session.
+ */
+async function runJoinCommand(rest: string[]): Promise<void> {
+  const { label, json } = parseJoinArgs(rest);
+  if (process.env.SQUAD_PERSONA)
+    throw new Error("squad join: SQUAD_PERSONA is already set; unset it (it pins an identity, join would mint a second one)");
+  const wanted = label.toLowerCase();
+  if (wanted === "human") throw new Error("squad join refuses 'human' (the operator's seat)");
+  if (isReservedPersona(label)) throw new Error(reservedPersonaReason(label));
+  const db = openDb();
+  try {
+    const taken = db
+      .prepare("SELECT persona FROM agent_identities WHERE lower(persona) = ? UNION SELECT persona FROM members WHERE lower(persona) = ?")
+      .get(wanted, wanted);
+    if (taken)
+      throw new Error(`squad join: '${label}' is an existing persona; --as takes a label (a '-<hex>' suffix is added), not a seat to borrow`);
+    const env = identityFromEnv();
+    const reserved = reserveAutomaticPersona(db, { ...env, sessionId: undefined, label });
+    const row = db.prepare("SELECT identity_id FROM agent_identities WHERE persona = ?").get(reserved.persona) as unknown as { identity_id: string };
+    const identityId = row.identity_id;
+    const squad = new Squad(db, reserved.persona, { ...env, sessionId: identityId });
+    const joined = squad.join();
+    if (json) {
+      process.stdout.write(`${JSON.stringify({ persona: squad.persona, identity_id: identityId, session_id: joined.session_id, lease_expires_at: joined.lease_expires_at, join: joined })}\n`);
+      return;
+    }
+    const out = [`joined as ${squad.persona} (lease until ${joined.lease_expires_at})`];
+    out.push(`members: ${joined.members.map((m) => `${m.persona} (${m.state})`).join(", ") || "none"}`);
+    const open = joined.goals.filter((g) => g.status === "open");
+    out.push(open.length ? "open goals:" : "open goals: none");
+    for (const g of open) out.push(`  #${g.id} ${g.body.slice(0, 80)}`);
+    out.push(joined.claims.length ? "claims:" : "claims: none");
+    for (const c of joined.claims) out.push(`  ${c.path}\t${c.persona}${c.stale ? " (stale)" : ""}`);
+    out.push(joined.recent.length ? "recent:" : "recent: none");
+    for (const m of joined.recent.slice(-10)) out.push(`  ${fmt(m)}`);
+    out.push("", "Use this identity for later calls:", `export SQUAD_PERSONA=${squad.persona} SQUAD_SESSION_ID=${identityId}`);
+    process.stdout.write(`${out.join("\n")}\n`);
+  } finally {
+    db.close();
+  }
+}
+
 /** Parse `squad wait` flags. Throws the usage string on anything else. */
 export function parseWaitArgs(args: string[]): { maxSeconds?: number; json: boolean } {
   let maxSeconds: number | undefined;
@@ -900,6 +974,10 @@ export async function runCli(argv: string[]): Promise<void> {
     return;
   }
 
+  if (cmd === "join") {
+    await runJoinCommand(rest);
+    return;
+  }
   if (cmd === "wait") {
     await runWaitCommand(rest);
     return;
@@ -1655,6 +1733,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "codex-reentry",
       "relay",
       "wait",
+      "join",
       "help",
       "--help",
       "-h",
