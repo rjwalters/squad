@@ -7,6 +7,8 @@ import { join } from "node:path";
 const { openDb } = await import("../dist/db.js");
 const { Squad } = await import("../dist/core.js");
 const wh = await import("../dist/wake-handles.js");
+const { loadState, withPersonaLock, LOCK_STALE_MS } = await import("../dist/reentry-state.js");
+const { resetOnQuietGap, initialState } = await import("../dist/reentry.js");
 const { wakeOnce, parseWakerArgs, WAKER_SENDER } = await import("../dist/waker.js");
 
 const T0 = Date.parse("2026-01-01T00:00:00Z");
@@ -250,3 +252,55 @@ test("two wakers polling at once spawn a single instance", () =>
     await Promise.all([wakeOnce(db, deps), wakeOnce(db, deps)]);
     assert.equal(spawns.length, 1);
   }));
+
+test("loadState (waker subdir) reads a pre-refactor state with no totalFired", () => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-legacy-"));
+  try {
+    mkdirSync(join(dir, "waker"), { recursive: true });
+    writeFileSync(
+      join(dir, "waker", "p.json"),
+      JSON.stringify({ attempt: 3, firstArmedAt: "2026-01-01T00:00:00.000Z", nextFireAt: null, lastFiredAt: null, wokenThrough: 7 }),
+    );
+    const s = loadState(dir, "p", "2026-02-02T00:00:00.000Z", "waker");
+    assert.equal(s.attempt, 3);
+    assert.equal(s.totalFired, 3);
+    assert.equal(s.wokenThrough, 7);
+    assert.equal(loadState(dir, "missing", "2026-02-02T00:00:00.000Z", "waker").firstArmedAt, "2026-02-02T00:00:00.000Z");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resetOnQuietGap resets only when the gap is at least the TTL", () => {
+  const armed = "2026-01-01T00:00:00.000Z";
+  const state = { ...initialState(armed), lastFiredAt: armed };
+  const t0 = Date.parse(armed);
+  assert.equal(resetOnQuietGap(state, t0 + 59 * 60_000, 60), state);
+  const reset = resetOnQuietGap(state, t0 + 60 * 60_000, 60);
+  assert.notEqual(reset, state);
+  assert.equal(reset.firstArmedAt, new Date(t0 + 60 * 60_000).toISOString());
+  assert.equal(resetOnQuietGap(state, t0 + 1e9, 0), state);
+  assert.equal(resetOnQuietGap(state, t0 + 1e9, -5), state);
+});
+
+test("withPersonaLock is exclusive, releases, and takes over a stale lock", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-lock-"));
+  try {
+    const lock = join(dir, "waker", "p.lock");
+    let inner = "unset";
+    const out = await withPersonaLock(dir, "p", 1, async () => {
+      inner = await withPersonaLock(dir, "p", 2, async () => "nested");
+      return "outer";
+    });
+    assert.equal(out, "outer");
+    assert.equal(inner, null);
+    assert.equal(existsSync(lock), false);
+    writeFileSync(lock, "1");
+    const old = new Date(Date.now() - LOCK_STALE_MS - 1000);
+    (await import("node:fs")).utimesSync(lock, old, old);
+    assert.equal(await withPersonaLock(dir, "p", 3, async () => "took"), "took");
+    assert.equal(existsSync(lock), false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

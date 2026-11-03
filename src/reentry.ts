@@ -109,6 +109,49 @@ export function initialState(nowIso: string): ReentryState {
   return { totalFired: 0, attempt: 0, firstArmedAt: nowIso, nextFireAt: null, lastFiredAt: null };
 }
 
+/**
+ * The pre-launch gate, checked before the *first* run of an adapter that
+ * launches processes (Codex) and mirrored by `decide()` before every later one.
+ * Returns a human-readable reason to refuse to launch, or `null` to proceed.
+ * Same precedence as `decide()`: operator-stop, stored stop reason, TTL, then
+ * the attempt cap.
+ */
+export function preLaunchStop(opts: {
+  state: ReentryState;
+  nowMs: number;
+  ttlMinutes: number;
+  maxAttempts: number;
+  operatorStopped: boolean;
+}): string | null {
+  if (opts.operatorStopped) return "operator stop requested";
+  if (opts.state.stoppedReason) return opts.state.stoppedReason;
+  if (ttlExceeded(opts.state.firstArmedAt, opts.ttlMinutes, opts.nowMs)) {
+    return `TTL of ${opts.ttlMinutes}m exceeded since ${opts.state.firstArmedAt}`;
+  }
+  if (opts.maxAttempts > 0 && (opts.state.totalFired ?? opts.state.attempt) >= opts.maxAttempts) {
+    return `attempt cap of ${opts.maxAttempts} reached (${opts.state.totalFired ?? opts.state.attempt} re-entries since ${opts.state.firstArmedAt})`;
+  }
+  return null;
+}
+
+/**
+ * A quiet gap as long as the TTL starts a new arm cycle; a continuous wake
+ * chain longer than the TTL is what the TTL is there to cut off. Returns
+ * `state` itself when no reset applies (`ttlMinutes <= 0` never resets), else a
+ * fresh `initialState`. Callers carry any adapter-specific fields across.
+ */
+export function resetOnQuietGap<T extends ReentryState>(
+  state: T,
+  nowMs: number,
+  ttlMinutes: number,
+): T | ReentryState {
+  const lastActive = Date.parse(state.lastFiredAt ?? state.firstArmedAt);
+  if (ttlMinutes > 0 && !Number.isNaN(lastActive) && nowMs - lastActive >= ttlMinutes * 60_000) {
+    return initialState(new Date(nowMs).toISOString());
+  }
+  return state;
+}
+
 export interface DecideInput {
   state: ReentryState;
   nowMs: number;
