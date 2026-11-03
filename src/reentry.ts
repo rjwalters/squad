@@ -18,6 +18,16 @@ export const DEFAULT_BACKOFF: BackoffParams = {
   jitterFraction: 0.2,
 };
 
+/**
+ * The one resume sentence every re-entry path appends, so the Claude Stop hook,
+ * the Codex supervisor and the waker never drift apart (#228). `squad wait`
+ * owns the loop (backoff, presence lease, `next:` action), so the agent is
+ * pointed at it rather than at hand-rolled `squad_check` polling.
+ */
+export const WAIT_RESUME_INSTRUCTION =
+  "Continue the room loop with /squad:wait (Codex: $squad wait): run `squad wait`, " +
+  "follow its `next:` action, and repeat. Do not call squad_leave unless you are genuinely done.";
+
 /** Per-invocation sleep cap: bounds how long one hook call blocks. See module doc. */
 export const DEFAULT_SLEEP_CAP_MS = 45_000;
 

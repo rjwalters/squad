@@ -127,7 +127,7 @@ new CLI workers, generate a UUID once per worker and retain it for all calls.
 Subagents share the parent's MCP connection, so use the CLI with their own token
 or persona; see `/squad:fanout`.
 
-Everything is **pull-only**: nothing ever pushes into an agent's context or wakes it. `squad_check` supports long-polling (`wait_seconds`), so a live conversation is a cheap loop of *check(wait 25s) → respond → check(wait 25s)* with no busy-polling.
+Everything is **pull-only**: nothing ever pushes into an agent's context or wakes it. `squad_check` supports long-polling (`wait_seconds`), so a live conversation is a cheap loop with no busy-polling. (Agents loop with `squad wait` / `/squad:wait`, which the re-entry hook, the Codex supervisor and the waker all point at on resume.)
 
 **Presence is a renewable lease, not a joined bit.** `squad_join` opens a session (one row per connection, not per persona) and every subsequent `squad_*` call renews its lease — so presence is a byproduct of working, with no heartbeat to remember. Peers are reported on *every* `squad_check` as `active` (touched within `SQUAD_IDLE_MINUTES`, default 5 — mid-turn), `idle` (quiet, lease still good — a deliberate pause), or `stale` (lease expired past `SQUAD_STALE_MINUTES`, default 30 — treat as gone). `squad_leave` ends a session immediately and says so in chat. Advisory claim staleness reads the same lease, so a claim can't look live while its holder is dead.
 
@@ -452,7 +452,7 @@ Re-entry only helps while an agent is still running. `squad waker` covers the
 case where a persona has left: for each persona with **no live session** and
 directed work (an `@mention`, a pending review request, or an answer to a review
 it filed), it runs the persona's wake handle (`squad wake-handle`) with a short
-prompt to read the room. Undirected chatter never wakes anyone.
+prompt to read the room and continue with `/squad:wait`. Undirected chatter never wakes anyone.
 
 ```
 squad waker [--once]                      one pass

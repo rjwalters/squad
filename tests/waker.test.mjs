@@ -57,7 +57,7 @@ test("directed @mention wakes a departed persona once, with argv and a room line
     assert.equal(r.outcomes[0].result, "woke");
     assert.equal(spawns.length, 1);
     assert.deepEqual(spawns[0].argv.slice(0, 4), ["claude", "--resume", "sess-bob", "-p"]);
-    assert.match(spawns[0].argv[4], /1 directed message in room; read them/);
+    assert.match(spawns[0].argv[4], /1 directed message in room; run `squad wait` to read them.*\/squad:wait/);
     assert.match(lines()[0], /^woke bob for @mention #\d+$/);
     // Same messages are not woken for again.
     await wakeOnce(db, deps);

@@ -28,6 +28,7 @@ const {
   supervise,
   FALLBACK_JOIN_PROMPT,
   NATIVE_JOIN_PROMPT,
+  resumePrompt,
 } = await import("../dist/codex-reentry.js");
 
 const { initialState, decide } = await import("../dist/reentry.js");
@@ -92,6 +93,13 @@ test("buildCodexArgs uses `exec` (the mode that exits at end of turn)", () => {
     buildCodexArgs({ mode: "fresh", prompt: "p", extraArgs: ["--model", "x"] }),
     ["exec", "--model", "x", "p"],
   );
+});
+
+test("resumePrompt points at the wait workflow, not hand-rolled squad_check polling (#228)", () => {
+  const p = resumePrompt("codex-worker");
+  assert.match(p, /codex-worker/);
+  assert.match(p, /squad wait/);
+  assert.doesNotMatch(p, /wait_seconds|squad_check/);
 });
 
 test("buildCodexArgs resumes the last session when the local codex supports it", () => {
