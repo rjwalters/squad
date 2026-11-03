@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.24
+
+- Internal refactor (#232): `preLaunchStop`, the quiet-gap reset and the persona
+  state/lock helpers are now shared across `src/codex-reentry.ts`,
+  `src/reentry-state.ts`, `src/reentry.ts` and `src/waker.ts`. One small
+  behavior change: the waker's state load now defaults `totalFired` to `attempt`
+  (as the shared loader already did).
+
 ## 0.19.23
 
 - Every resume path now sends the agent back to `squad wait` (#228): the Codex
