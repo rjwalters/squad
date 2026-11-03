@@ -95,3 +95,18 @@ test("doctor reports claude and codex setup lines and still exits 0", () => {
     cleanup(repo, codexHome);
   }
 });
+
+test("doctor reports an informational opencode line whether or not it is configured", () => {
+  const { repo, codexHome } = setup();
+  try {
+    let res = run(repo, codexHome, ["doctor"]);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /\[info\] opencode: tools no .*fix: install\.sh/);
+    writeFileSync(join(repo, "opencode.json"), JSON.stringify({ mcp: { squad: { type: "local" } } }));
+    res = run(repo, codexHome, ["doctor"]);
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /\[info\] opencode: tools yes /);
+  } finally {
+    cleanup(repo, codexHome);
+  }
+});

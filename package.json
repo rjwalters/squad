@@ -1,6 +1,6 @@
 {
   "name": "@rjwalters/squad",
-  "version": "0.19.23",
+  "version": "0.19.25",
   "description": "Local cross-agent chat room with shared goals — so Codex and Claude can collaborate on one machine",
   "repository": "github:rjwalters/squad",
   "license": "MIT",
@@ -15,6 +15,7 @@
     "commands",
     "skills",
     "codex",
+    "opencode",
     "VERSION",
     "install.sh",
     "uninstall.sh"

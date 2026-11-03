@@ -13,6 +13,7 @@ export interface RepoRuntimeSetup {
   repo: string;
   claude: RuntimeSetup;
   codex: RuntimeSetup;
+  opencode: RuntimeSetup;
 }
 
 const HOOK_SCRIPTS = ["squad-inbox.sh", "squad-reentry.sh"];
@@ -57,6 +58,16 @@ function codexSetup(): RuntimeSetup {
   }
 }
 
+/** opencode reads a repo-scoped opencode.json; a comment-bearing opencode.jsonc is unknown. */
+function opencodeSetup(repo: string): RuntimeSetup {
+  // opencode has no mid-turn hook event either, so no new-message notice.
+  const cfg = readJson(join(repo, "opencode.json"));
+  if (cfg === null) return { tools: null, notice: false };
+  if (cfg === undefined)
+    return { tools: existsSync(join(repo, "opencode.jsonc")) ? null : false, notice: false };
+  return { tools: Boolean(cfg.mcp?.squad), notice: false };
+}
+
 /** The repo a room belongs to: the parent of `.squad`, else the repo around the cwd. */
 export function roomRepo(): string | null {
   const dir = squadDir();
@@ -67,7 +78,7 @@ export function roomRepo(): string | null {
 /** Per-runtime setup for the current room's repo. Read-only file checks. */
 export function detectRuntimeSetup(repo: string | null = roomRepo()): RepoRuntimeSetup | null {
   if (!repo) return null;
-  return { repo, claude: claudeSetup(repo), codex: codexSetup() };
+  return { repo, claude: claudeSetup(repo), codex: codexSetup(), opencode: opencodeSetup(repo) };
 }
 
 /** What Claude Code is missing in this repo (empty when complete or unknown). */
@@ -103,6 +114,8 @@ export function runtimeSetupLines(setup: RepoRuntimeSetup | null = detectRuntime
       (claudeGap.length ? ` -- fix: ${installFix(setup.repo)}` : ""),
     `[info] codex: tools ${yn(setup.codex.tools)} (~/.codex/config.toml), notice none, by design` +
       (setup.codex.tools === false ? " -- fix: install.sh (without --no-codex)" : ""),
+    `[info] opencode: tools ${yn(setup.opencode.tools)} (opencode.json), notice none, by design` +
+      (setup.opencode.tools === false ? " -- fix: install.sh (without --no-opencode)" : ""),
   ];
   return lines;
 }

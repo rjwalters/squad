@@ -143,3 +143,7 @@ Read `squad_node_get` for retained build evidence and current versus stale
 reviews. Content/config changes need fresh review; unrelated branch movement
 does not invalidate unchanged content. Declared identities do not prove
 cryptographic independence, and a passing build does not prove sound science.
+
+## opencode
+
+opencode agents are installed like the other runtimes: `opencode.json` carries the `mcp.squad` server (same launcher as Claude's `.mcp.json`), `.opencode/commands/squad-<workflow>.md` provides `/squad-join`, `/squad-wait` and the rest, and the Squad block in `AGENTS.md` points at `.agents/skills/squad/SKILL.md`. Pin the persona with `SQUAD_PERSONA` (or `SQUAD_OPENCODE_PERSONA` at install time). Install with `--no-opencode` to skip it.
