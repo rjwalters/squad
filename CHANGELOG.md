@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.23
+
+- opencode is a third installed runtime (#227). `install.sh` merges a `squad`
+  MCP server into the repo's `opencode.json` (field-owned, so user keys and a
+  user-defined `squad` entry survive install and uninstall; `opencode.jsonc` is
+  left untouched with a note) and installs generated `/squad-<workflow>` commands
+  to `.opencode/commands/` from the new `opencode/commands/` source. `--no-opencode`
+  skips it, uninstall removes it, and `squad doctor` prints an informational
+  `opencode:` line. Schema verified against https://opencode.ai/config.json.
+
 ## 0.19.22
 
 - `squad wait` and the `/squad:wait` workflow move the room loop into code
