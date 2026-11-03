@@ -23,6 +23,7 @@ import { formatRoomDoctorReport } from "./room-doctor.js";
 import { WAKE_HANDLE_USAGE, runWakeHandle } from "./wake-handles.js";
 import { parseWakerArgs, runWakerCommand } from "./waker.js";
 import { HEAL_USAGE, formatHealReport, healRooms, parseHealArgs } from "./room-heal.js";
+import { WAIT_USAGE, formatWait, runWait } from "./wait.js";
 import {
   relayConfigFromEnv,
   relayKnownTargets,
@@ -150,6 +151,7 @@ const COMMAND_USAGE: Record<string, string> = {
     "squad send --retry <delivery-id>",
   steward: "usage: squad steward <status|tick>",
   tail: "usage: squad tail (follow the room live; Ctrl-C to stop)",
+  wait: WAIT_USAGE,
   who: "usage: squad who (presence state and last-seen times for everyone in the room, per session for a shared persona)",
 };
 
@@ -179,6 +181,12 @@ Human CLI usage:
   squad read --unread         Show only peers' messages since your last read; advances
                                the cursor (a second call prints nothing)
   squad tail                  Follow the room live (Ctrl-C to stop)
+  squad wait [--max <seconds>] [--json]
+                               Agent loop step: block until something concerns
+                               you (backoff 60/120/240/480s, capped by --max,
+                               default 540), print new messages, the board and
+                               one 'next:' action. Exit 0 woke, 2 quiet, 3 park.
+                               Needs SQUAD_PERSONA or SQUAD_SESSION_ID
   squad goals                 Show the goal board (open + done)
   squad goals add <text...>   Add a shared goal
   squad goals done <id>       Mark a goal done
@@ -335,6 +343,8 @@ Environment:
                   'squad codex-reentry' (default 48)
   SQUAD_REENTRY_STOP   Set to 1 to stop re-entry immediately (or touch
                   .squad/reentry-stop / .squad/reentry/<persona>.stop)
+  SQUAD_WAIT_PARK_MINUTES  Quiet minutes, with no open goals, after which
+                  'squad wait' recommends parking (exit 3; default 45)
   SQUAD_INBOX_INTERVAL_SECONDS  Minimum seconds between room peeks by the
                   opt-in mid-turn inbox hook (default 60); 0 peeks every call
   SQUAD_INBOX_STOP     Set to 1 to silence the inbox hook (or touch
@@ -737,6 +747,46 @@ function runRoutedSend(rest: string[], plan: RoomSendPlan): void {
   }
 }
 
+/** Parse `squad wait` flags. Throws the usage string on anything else. */
+export function parseWaitArgs(args: string[]): { maxSeconds?: number; json: boolean } {
+  let maxSeconds: number | undefined;
+  let json = false;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--json") json = true;
+    else if (a === "--max" && /^[0-9]+$/.test(args[i + 1] ?? "")) maxSeconds = Number(args[++i]);
+    else throw new Error(WAIT_USAGE);
+  }
+  return { maxSeconds, json };
+}
+
+/**
+ * `squad wait` (#222). An agent-only command: the backoff state, the cursor
+ * it consumes and the `next:` advice all belong to one agent identity, so it
+ * refuses the implicit (or explicit) `human` rather than waiting as the
+ * operator. Resolves identity exactly like the other agent CLI calls.
+ */
+async function runWaitCommand(rest: string[]): Promise<void> {
+  const { maxSeconds, json } = parseWaitArgs(rest);
+  const pinned = process.env.SQUAD_PERSONA;
+  if (!pinned && !process.env.SQUAD_SESSION_ID)
+    throw new Error(
+      "squad wait needs an agent identity: set SQUAD_PERSONA=<name> or SQUAD_SESSION_ID " +
+        "(the identity_id squad_join returned); it never waits as 'human'",
+    );
+  if (pinned?.trim().toLowerCase() === "human")
+    throw new Error("squad wait refuses to run as 'human' (the operator): set SQUAD_PERSONA to your agent persona");
+  const db = openDb();
+  try {
+    const squad = new Squad(db, pinned || undefined, identityFromEnv());
+    const result = await runWait(squad, db, { maxSeconds });
+    process.stdout.write(json ? `${JSON.stringify(result)}\n` : formatWait(result, fmt));
+    process.exitCode = result.exit;
+  } finally {
+    db.close();
+  }
+}
+
 export async function runCli(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
   const roomSend = cmd === "send" && rest[0] === "--room" ? planRoomSend(rest) : null;
@@ -847,6 +897,11 @@ export async function runCli(argv: string[]): Promise<void> {
   if (cmd === "waker") {
     // Waking is delivery plumbing, not a persona acting in the room: no presence lease.
     await runWakerCommand(parseWakerArgs(rest));
+    return;
+  }
+
+  if (cmd === "wait") {
+    await runWaitCommand(rest);
     return;
   }
 
@@ -1599,6 +1654,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "waker",
       "codex-reentry",
       "relay",
+      "wait",
       "help",
       "--help",
       "-h",

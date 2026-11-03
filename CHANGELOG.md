@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.22
+
+- `squad wait` and the `/squad:wait` workflow move the room loop into code
+  (#222). `squad wait` blocks from any harness's shell until something concerns
+  the caller (peer chat, an `@mention` or `@repo`, a review request, a goal
+  change, a cross-room request), backing off 60/120/240/480s across quiet calls
+  (capped by `--max`, default 540; kept per session, reset on activity) while
+  renewing the presence lease. It prints the consumed messages, a short board
+  summary and exactly one `next:` action (reply, continue or claim a
+  `goal#<id>`, take over a stale goal, propose goals, or park after
+  `SQUAD_WAIT_PARK_MINUTES`, default 45, without goal changes or messages
+  from others), with exit codes 0 woke / 2 quiet / 3 park and `--json`. The
+  caller's own posts don't reset its quiet clock, and its own goal add/done
+  doesn't wake it. It refuses to run as `human`. `/squad:join` now hands
+  its loop and park decision to the wait workflow instead of parking after
+  ~10 empty checks.
+
 ## 0.19.21
 
 - Run agents' squad MCP from an installed release (#168). `scripts/release-install.sh`

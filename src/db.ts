@@ -455,6 +455,21 @@ CREATE TABLE IF NOT EXISTS wake_handles (
   no_wake INTEGER NOT NULL DEFAULT 0,
   updated_at TEXT NOT NULL
 );
+-- 'squad wait' loop state per logical session (#222): the backoff step that
+-- carries across calls, plus what the previous call already saw (the goal
+-- board fingerprint, the newest directed review id) so a change since then
+-- wakes the next call. started_at is when this session first waited: the
+-- floor for "quiet since", so a room with no history can still be parked. state_key is a hash of persona and SQUAD_SESSION_ID,
+-- never the raw resume token. Loop bookkeeping, not room content: outside
+-- ROOM_TABLES like relay_cursors, so SCHEMA_VERSION does not move.
+CREATE TABLE IF NOT EXISTS wait_state (
+  state_key TEXT PRIMARY KEY,
+  step INTEGER NOT NULL DEFAULT 0,
+  board TEXT,
+  review_seen INTEGER NOT NULL DEFAULT 0,
+  started_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
 `;
 
 /** True when `<dir>/.git` is a pointer file, i.e. dir is a linked worktree. */
