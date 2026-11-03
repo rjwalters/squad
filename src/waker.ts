@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { hostname } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { presenceState } from "./core.js";
@@ -9,12 +9,12 @@ import {
   DEFAULT_REENTRY_MAX_ATTEMPTS,
   DEFAULT_REENTRY_TTL_MINUTES,
   decide,
-  initialState,
+  resetOnQuietGap,
   WAIT_RESUME_INSTRUCTION,
   mentionsPersona,
   type ReentryState,
 } from "./reentry.js";
-import { operatorStopped } from "./reentry-state.js";
+import { loadState, operatorStopped, saveState, withPersonaLock } from "./reentry-state.js";
 import { writeWakerHeartbeat } from "./waker-unit.js";
 import { getWakeHandle, resolveWakeCommand, usableHere, type WakeHandle } from "./wake-handles.js";
 
@@ -39,7 +39,6 @@ export const WAKER_SENDER = "waker";
 
 export const DEFAULT_WAKER_COOLDOWN_MINUTES = 10;
 export const DEFAULT_WAKER_INTERVAL_MS = 15_000;
-const LOCK_STALE_MS = 60_000;
 
 export const WAKER_USAGE =
   "usage: squad waker [--once] | squad waker --follow [--interval <seconds>] | squad waker status";
@@ -143,58 +142,6 @@ export interface WakerState extends ReentryState {
   /** The last skip reason posted to the room; an identical one is not re-posted. */
   lastSkip?: string | null;
   lastError?: string | null;
-}
-
-function wakerStatePath(dir: string, persona: string): string {
-  return join(dir, "waker", `${persona}.json`);
-}
-
-function loadWakerState(dir: string, persona: string, nowIso: string): WakerState {
-  try {
-    const parsed = JSON.parse(readFileSync(wakerStatePath(dir, persona), "utf8")) as Partial<WakerState>;
-    if (
-      typeof parsed.attempt === "number" &&
-      typeof parsed.firstArmedAt === "string" &&
-      (parsed.nextFireAt === null || typeof parsed.nextFireAt === "string") &&
-      (parsed.lastFiredAt === null || typeof parsed.lastFiredAt === "string")
-    ) {
-      return parsed as WakerState;
-    }
-  } catch {
-    // Missing or corrupt -- start a fresh arm cycle.
-  }
-  return initialState(nowIso);
-}
-
-function saveWakerState(dir: string, persona: string, state: WakerState): void {
-  mkdirSync(join(dir, "waker"), { recursive: true });
-  writeFileSync(wakerStatePath(dir, persona), JSON.stringify(state, null, 2) + "\n");
-}
-
-/** Serialises concurrent wakers on one persona; a lock older than LOCK_STALE_MS is taken over. */
-function withPersonaLock<T>(dir: string, persona: string, nowMs: number, fn: () => Promise<T>): Promise<T | null> {
-  const lock = join(dir, "waker", `${persona}.lock`);
-  mkdirSync(join(dir, "waker"), { recursive: true });
-  const acquire = (): boolean => {
-    try {
-      writeFileSync(lock, String(nowMs), { flag: "wx" });
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  if (!acquire()) {
-    let ageMs = 0;
-    try {
-      ageMs = Date.now() - statSync(lock).mtimeMs;
-    } catch {
-      /* vanished: retry below */
-    }
-    if (ageMs < LOCK_STALE_MS) return Promise.resolve(null);
-    rmSync(lock, { force: true });
-    if (!acquire()) return Promise.resolve(null);
-  }
-  return fn().finally(() => rmSync(lock, { force: true }));
 }
 
 interface DirectedWork {
@@ -305,13 +252,10 @@ export async function wakeOnce(db: DatabaseSync, deps: WakerDeps): Promise<WakeR
     const outcome = await withPersonaLock(deps.squadDir, persona, startMs, async (): Promise<WakeOutcome | null> => {
       const nowMs = deps.now();
       const nowIso = new Date(nowMs).toISOString();
-      let state = loadWakerState(deps.squadDir, persona, nowIso);
-      // A quiet gap as long as the TTL starts a new arm cycle; a continuous
-      // wake chain longer than the TTL is what the TTL is there to cut off.
-      const lastActive = Date.parse(state.lastFiredAt ?? state.firstArmedAt);
-      if (deps.ttlMinutes > 0 && !Number.isNaN(lastActive) && nowMs - lastActive >= deps.ttlMinutes * 60_000) {
-        state = { ...initialState(nowIso), lastSkip: state.lastSkip };
-      }
+      let state = loadState<WakerState>(deps.squadDir, persona, nowIso, "waker");
+      // A quiet gap as long as the TTL starts a new arm cycle (lastSkip carries over).
+      const cycle = resetOnQuietGap(state, nowMs, deps.ttlMinutes);
+      if (cycle !== state) state = { ...cycle, lastSkip: state.lastSkip };
 
       // Re-observe under the lock: another waker may have just handled it.
       if (hasLiveSession(db, persona, nowMs)) return null;
@@ -324,7 +268,7 @@ export async function wakeOnce(db: DatabaseSync, deps: WakerDeps): Promise<WakeR
         if (next.lastSkip !== reason) {
           postSystemLine(db, `not woken: ${persona} -- ${reason}`, nowMs);
         }
-        saveWakerState(deps.squadDir, persona, { ...next, lastSkip: reason });
+        saveState(deps.squadDir, persona, { ...next, lastSkip: reason }, "waker");
         return { persona, result: "skipped", reason };
       };
 
@@ -360,7 +304,7 @@ export async function wakeOnce(db: DatabaseSync, deps: WakerDeps): Promise<WakeR
           cwd: handle.cwd,
           env: { SQUAD_PERSONA: persona, SQUAD_DIR: deps.squadDir },
         });
-        saveWakerState(deps.squadDir, persona, {
+        saveState(deps.squadDir, persona, {
           ...(decision.nextState as WakerState),
           attempt: 0,
           failing: false,
@@ -369,21 +313,21 @@ export async function wakeOnce(db: DatabaseSync, deps: WakerDeps): Promise<WakeR
           wakePid: proc.pid,
           lastSkip: null,
           lastError: null,
-        });
+        }, "waker");
         postSystemLine(db, `woke ${persona} for ${what}`, nowMs);
         return { persona, result: "woke", reason: what };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         // A failed launch is not a wake: keep lastFiredAt so no cooldown applies,
         // but the attempt still counts toward the cap and arms the failure backoff.
-        saveWakerState(deps.squadDir, persona, {
+        saveState(deps.squadDir, persona, {
           ...(decision.nextState as WakerState),
           lastFiredAt: state.lastFiredAt,
           failing: true,
           nextFireAt: null,
           lastError: message,
           lastSkip: `wake failed: ${message}`,
-        });
+        }, "waker");
         if (state.lastSkip !== `wake failed: ${message}`) {
           postSystemLine(db, `not woken: ${persona} -- wake failed: ${message}`, nowMs);
         }
@@ -408,7 +352,7 @@ export function wakerStatus(db: DatabaseSync, deps: WakerDeps): string[] {
   for (const persona of [...personas].sort()) {
     const handle = getWakeHandle(db, persona);
     if (!handle) continue;
-    const state = loadWakerState(deps.squadDir, persona, new Date(nowMs).toISOString());
+    const state = loadState<WakerState>(deps.squadDir, persona, new Date(nowMs).toISOString(), "waker");
     const live = hasLiveSession(db, persona, nowMs);
     const work = observeDirectedWork(db, persona, nowMs);
     lines.push(

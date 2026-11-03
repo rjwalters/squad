@@ -72,7 +72,7 @@ import {
   DEFAULT_SLEEP_CAP_MS,
   WAIT_RESUME_INSTRUCTION,
   decide,
-  ttlExceeded,
+  preLaunchStop,
   type BackoffParams,
   type ReentryState,
   type WakeParams,
@@ -174,30 +174,6 @@ export function buildCodexArgs(opts: {
   return opts.mode === "resume"
     ? ["exec", "resume", "--last", ...extra, opts.prompt]
     : ["exec", ...extra, opts.prompt];
-}
-
-/**
- * The pre-launch gate, checked before the *first* run and (via `decide()`)
- * before every subsequent one. Returns a human-readable reason to refuse to
- * launch, or `null` to proceed. Same precedence as `decide()`:
- * operator-stop, then TTL, then the attempt cap.
- */
-export function preLaunchStop(opts: {
-  state: ReentryState;
-  nowMs: number;
-  ttlMinutes: number;
-  maxAttempts: number;
-  operatorStopped: boolean;
-}): string | null {
-  if (opts.operatorStopped) return "operator stop requested";
-  if (opts.state.stoppedReason) return opts.state.stoppedReason;
-  if (ttlExceeded(opts.state.firstArmedAt, opts.ttlMinutes, opts.nowMs)) {
-    return `TTL of ${opts.ttlMinutes}m exceeded since ${opts.state.firstArmedAt}`;
-  }
-  if (opts.maxAttempts > 0 && (opts.state.totalFired ?? opts.state.attempt) >= opts.maxAttempts) {
-    return `attempt cap of ${opts.maxAttempts} reached (${opts.state.totalFired ?? opts.state.attempt} re-entries since ${opts.state.firstArmedAt})`;
-  }
-  return null;
 }
 
 /** Default floor between two `codex` runs. See the module doc's "Bounds". */

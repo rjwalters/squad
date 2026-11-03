@@ -20,7 +20,6 @@ const {
   classifyRolloutTail,
   pickLatestRollout,
   buildCodexArgs,
-  preLaunchStop,
   isCleanPark,
   parkAnnouncement,
   crashAnnouncement,
@@ -31,7 +30,7 @@ const {
   resumePrompt,
 } = await import("../dist/codex-reentry.js");
 
-const { initialState, decide } = await import("../dist/reentry.js");
+const { initialState, decide, preLaunchStop } = await import("../dist/reentry.js");
 const { classifyRunFromLogs, joinPromptText } = await import("../dist/codex-reentry-driver.js");
 
 const FAST_BACKOFF = { baseMs: 1000, multiplier: 2, capMs: 4000, jitterFraction: 0 };
