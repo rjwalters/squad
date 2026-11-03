@@ -371,6 +371,7 @@ test("checkout-backed development detects same-version edits and refreshes owned
     "skills",
     "commands",
     "codex",
+    "opencode",
     "hooks",
     "dist",
     "VERSION",
@@ -455,7 +456,7 @@ test("sibling project launcher survives relocation and preserves equivalent path
   const repo = join(original, "consumer");
   mkdirSync(sourceCopy, { recursive: true });
   mkdirSync(repo);
-  for (const path of ["scripts", "skills", "commands", "codex", "hooks", "dist", "VERSION", "install.sh", "uninstall.sh"])
+  for (const path of ["scripts", "skills", "commands", "codex", "opencode", "hooks", "dist", "VERSION", "install.sh", "uninstall.sh"])
     cpSync(resolve(path), join(sourceCopy, path), { recursive: true });
   symlinkSync(realpathSync("node_modules"), join(sourceCopy, "node_modules"));
   const env = { ...process.env, HOME: original };
@@ -572,7 +573,7 @@ test("a session in a linked worktree spawns the server and joins the primary clo
   const repo = join(home, "consumer");
   mkdirSync(sourceCopy, { recursive: true });
   mkdirSync(repo);
-  for (const path of ["scripts", "skills", "commands", "codex", "hooks", "dist", "VERSION", "install.sh", "uninstall.sh"])
+  for (const path of ["scripts", "skills", "commands", "codex", "opencode", "hooks", "dist", "VERSION", "install.sh", "uninstall.sh"])
     cpSync(resolve(path), join(sourceCopy, path), { recursive: true });
   symlinkSync(realpathSync("node_modules"), join(sourceCopy, "node_modules"));
   const env = { ...process.env, HOME: home };
@@ -754,4 +755,63 @@ test("waker unit is opt-in: plain install writes none, --waker installs, --no-wa
   run("install.sh", ["--waker"]);
   run("uninstall.sh");
   assert.equal(existsSync(unit), false);
+});
+const OPENCODE_CMDS = ["join", "wait", "goals", "card", "clear", "fanout", "steward"].map(
+  (n) => `.opencode/commands/squad-${n}.md`,
+);
+test("opencode: install wires mcp + commands, is idempotent, and uninstall removes them", () => {
+  const { repo, run } = fixture("opencode");
+  run();
+  const cfg = JSON.parse(readFileSync(join(repo, "opencode.json"), "utf8"));
+  assert.equal(cfg.mcp.squad.type, "local");
+  assert.deepEqual(cfg.mcp.squad.command, ["node", ".claude/hooks/squad-mcp.mjs"]);
+  assert.equal(cfg.mcp.squad.environment.SQUAD_DIR, ".squad");
+  assert.ok(!JSON.stringify(cfg).includes(repo), "no machine-specific absolute paths");
+  for (const rel of OPENCODE_CMDS) assert.ok(existsSync(join(repo, rel)), rel);
+  assert.match(readFileSync(join(repo, "AGENTS.md"), "utf8"), /opencode/);
+  run("install.sh", ["--check"]);
+  run("uninstall.sh");
+  assert.ok(!existsSync(join(repo, "opencode.json")));
+  for (const rel of OPENCODE_CMDS) assert.ok(!existsSync(join(repo, rel)), rel);
+});
+test("opencode: --no-opencode installs nothing for opencode", () => {
+  const { repo, run } = fixture("opencode-skip");
+  run("install.sh", ["--no-opencode"]);
+  assert.ok(!existsSync(join(repo, "opencode.json")));
+  assert.ok(!existsSync(join(repo, ".opencode")));
+  assert.ok(existsSync(join(repo, ".agents/skills/squad/SKILL.md")));
+  run("install.sh", ["--check", "--no-opencode"]);
+});
+test("opencode: a pre-existing user config survives install and uninstall", () => {
+  const { repo, run } = fixture("opencode-user");
+  const original = {
+    $schema: "https://opencode.ai/config.json",
+    model: "zai/glm",
+    mcp: { other: { type: "local", command: ["x"] } },
+  };
+  writeFileSync(join(repo, "opencode.json"), JSON.stringify(original, null, 2) + "\n");
+  run();
+  const during = JSON.parse(readFileSync(join(repo, "opencode.json"), "utf8"));
+  assert.deepEqual(during.mcp.other, original.mcp.other);
+  assert.equal(during.model, "zai/glm");
+  assert.ok(during.mcp.squad);
+  run("uninstall.sh");
+  assert.deepEqual(JSON.parse(readFileSync(join(repo, "opencode.json"), "utf8")), original);
+});
+test("opencode: jsonc and user-defined squad servers are preserved, not rewritten", () => {
+  const a = fixture("opencode-jsonc");
+  const jsonc = '{\n  // mine\n  "model": "x"\n}\n';
+  writeFileSync(join(a.repo, "opencode.jsonc"), jsonc);
+  const out = a.run();
+  assert.match(out, /opencode\.jsonc untouched/);
+  assert.equal(readFileSync(join(a.repo, "opencode.jsonc"), "utf8"), jsonc);
+  assert.ok(!existsSync(join(a.repo, "opencode.json")));
+  a.run("uninstall.sh");
+  const b = fixture("opencode-own");
+  const own = { mcp: { squad: { type: "local", command: ["mine"] } } };
+  writeFileSync(join(b.repo, "opencode.json"), JSON.stringify(own));
+  b.run();
+  assert.deepEqual(JSON.parse(readFileSync(join(b.repo, "opencode.json"), "utf8")).mcp.squad.command, ["mine"]);
+  b.run("uninstall.sh");
+  assert.deepEqual(JSON.parse(readFileSync(join(b.repo, "opencode.json"), "utf8")).mcp.squad.command, ["mine"]);
 });
