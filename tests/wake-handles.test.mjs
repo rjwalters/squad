@@ -57,6 +57,10 @@ test("resolveWakeCommand returns argv arrays for both runtimes, null otherwise",
   assert.deepEqual(wh.resolveWakeCommand({ runtime: "claude", session_ref: "S" }, "go"), [
     "claude", "--resume", "S", "-p", "go",
   ]);
+  assert.deepEqual(wh.resolveWakeCommand({ runtime: "opencode", session_ref: "ses_1" }, "go"), [
+    "opencode", "run", "--session", "ses_1", "go",
+  ]);
+  assert.equal(wh.resolveWakeCommand({ runtime: "opencode", session_ref: "  " }, "go"), null);
   assert.equal(wh.resolveWakeCommand({ runtime: "claude", session_ref: "" }), null);
   assert.equal(wh.resolveWakeCommand({ runtime: "bash", session_ref: "S" }), null);
 });
@@ -130,6 +134,46 @@ test("CLI: set/show/list/opt-out/clear round trip", () => {
     assert.equal(run("set", "bob", "nope", "x").status, 1);
     assert.match(run("clear", "bob").stdout, /cleared/);
   } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("opencode handles: set accepts it, empty ref is refused, bad runtime lists all three", () =>
+  withDb((db) => {
+    assert.equal(wh.isWakeRuntime("opencode"), true);
+    assert.equal(wh.upsertWakeHandle(db, { persona: "o", runtime: "opencode", sessionRef: " " }), null);
+    assert.equal(wh.getWakeHandle(db, "o"), null);
+    assert.equal(wh.runWakeHandle(db, ["set", "o", "opencode", "ses_1"]).length, 1);
+    assert.equal(wh.getWakeHandle(db, "o").runtime, "opencode");
+    assert.throws(() => wh.runWakeHandle(db, ["set", "p", "bash", "x"]), /'codex', 'claude' or 'opencode'/);
+    assert.match(wh.WAKE_HANDLE_USAGE, /codex\|claude\|opencode/);
+  }));
+
+test("a db with the old two-value CHECK is rebuilt on open, keeping rows; reopen is a no-op", () => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-wake-mig-"));
+  process.env.SQUAD_DIR = dir;
+  try {
+    const db = openDb();
+    db.exec("DROP TABLE wake_handles");
+    db.exec(`CREATE TABLE wake_handles (
+      persona TEXT PRIMARY KEY,
+      runtime TEXT NOT NULL CHECK (runtime IN ('codex', 'claude')),
+      session_ref TEXT NOT NULL, cwd TEXT, host TEXT NOT NULL,
+      no_wake INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)`);
+    db.prepare("INSERT INTO wake_handles VALUES ('old','codex','s1','/x','h',1,'t')").run();
+    db.close();
+    const db2 = openDb();
+    assert.ok(wh.upsertWakeHandle(db2, { persona: "new", runtime: "opencode", sessionRef: "ses_2" }));
+    const old = wh.getWakeHandle(db2, "old");
+    assert.equal(old.session_ref, "s1");
+    assert.equal(old.no_wake, true);
+    db2.close();
+    const db3 = openDb();
+    assert.equal(wh.getWakeHandle(db3, "new").runtime, "opencode");
+    assert.equal(wh.listWakeHandles(db3).length, 2);
+    db3.close();
+  } finally {
+    delete process.env.SQUAD_DIR;
     rmSync(dir, { recursive: true, force: true });
   }
 });

@@ -448,7 +448,7 @@ CREATE TABLE IF NOT EXISTS mcp_holders (
 -- relay_cursors: outside ROOM_TABLES, so SCHEMA_VERSION does not move.
 CREATE TABLE IF NOT EXISTS wake_handles (
   persona TEXT PRIMARY KEY,
-  runtime TEXT NOT NULL CHECK (runtime IN ('codex', 'claude')),
+  runtime TEXT NOT NULL CHECK (runtime IN ('codex', 'claude', 'opencode')),
   session_ref TEXT NOT NULL,
   cwd TEXT,
   host TEXT NOT NULL,
@@ -824,6 +824,42 @@ function ensureRelayErrorColumns(db: DatabaseSync): void {
     db.exec("ALTER TABLE relay_cursors ADD COLUMN last_error_at TEXT");
 }
 
+/**
+ * `wake_handles.runtime` gained 'opencode' (#233). SQLite cannot ALTER a CHECK
+ * and CREATE TABLE IF NOT EXISTS leaves an existing table alone, so a room
+ * created with the two-value constraint is rebuilt (create, copy, swap) in one
+ * transaction. Idempotent: a no-op once the stored DDL names 'opencode'.
+ * wake_handles is outside ROOM_TABLES, so SCHEMA_VERSION does not move.
+ */
+function ensureWakeHandlesRuntimeCheck(db: DatabaseSync): void {
+  const row = db
+    .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'wake_handles'")
+    .get() as { sql?: string } | undefined;
+  if (!row?.sql || row.sql.includes("'opencode'")) return;
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    db.exec(`CREATE TABLE wake_handles_new (
+  persona TEXT PRIMARY KEY,
+  runtime TEXT NOT NULL CHECK (runtime IN ('codex', 'claude', 'opencode')),
+  session_ref TEXT NOT NULL,
+  cwd TEXT,
+  host TEXT NOT NULL,
+  no_wake INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL
+)`);
+    db.exec(
+      "INSERT INTO wake_handles_new (persona, runtime, session_ref, cwd, host, no_wake, updated_at) " +
+        "SELECT persona, runtime, session_ref, cwd, host, no_wake, updated_at FROM wake_handles",
+    );
+    db.exec("DROP TABLE wake_handles");
+    db.exec("ALTER TABLE wake_handles_new RENAME TO wake_handles");
+    db.exec("COMMIT");
+  } catch (err) {
+    db.exec("ROLLBACK");
+    throw err;
+  }
+}
+
 export function openDb(): DatabaseSync {
   if (!warnedRoomSplit) {
     warnedRoomSplit = true;
@@ -862,6 +898,7 @@ function migrateDb(db: DatabaseSync): void {
   ensureMessagesOccurrencesColumn(db);
   ensureMessagesSessionIdColumn(db);
   ensureRelayErrorColumns(db);
+  ensureWakeHandlesRuntimeCheck(db);
   adoptNodes(db);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }

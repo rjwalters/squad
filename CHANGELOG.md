@@ -6,6 +6,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## 0.19.27
 
+- `opencode` is accepted as a wake-handle runtime (#233), with a DB CHECK
+  migration for the new value. Resume argv was checked against `--help` only;
+  the session-id source is deferred to #238.
 - `squad agent <runtime>` (#234): the re-entry supervisor now drives an
   `AgentAdapter` (launch / resume / detect-turn-end) from a registry, with Codex
   as the first adapter. `squad codex-reentry` is an alias for `squad agent codex`
