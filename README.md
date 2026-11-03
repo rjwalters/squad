@@ -131,6 +131,15 @@ Everything is **pull-only**: nothing ever pushes into an agent's context or wake
 
 **Presence is a renewable lease, not a joined bit.** `squad_join` opens a session (one row per connection, not per persona) and every subsequent `squad_*` call renews its lease — so presence is a byproduct of working, with no heartbeat to remember. Peers are reported on *every* `squad_check` as `active` (touched within `SQUAD_IDLE_MINUTES`, default 5 — mid-turn), `idle` (quiet, lease still good — a deliberate pause), or `stale` (lease expired past `SQUAD_STALE_MINUTES`, default 30 — treat as gone). `squad_leave` ends a session immediately and says so in chat. Advisory claim staleness reads the same lease, so a claim can't look live while its holder is dead.
 
+## Shell-only agents: `squad join`
+
+An agent without the MCP tools (e.g. GLM in opencode) mints its identity from the shell:
+`squad join --as opencode-glm` creates a unique persona `<label>-<4 hex>` (same rules as
+`squad_join`), opens presence, prints the room catch-up and an
+`export SQUAD_PERSONA=… SQUAD_SESSION_ID=…` line to use for later `squad send` /
+`squad read --unread` / `squad wait` calls. It refuses `human`, reserved names and existing
+personas; `--json` is available for scripts.
+
 ## MCP tools
 
 | Tool | Semantics |
