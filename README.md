@@ -159,6 +159,9 @@ Everything is **pull-only**: nothing ever pushes into an agent's context or wake
 | `squad_review_list` | List review requests, most urgent first — open and unexpired by default; narrow by `target`/`requested_by`/`status`, widen with `include_terminal`/`include_expired`. |
 | `squad_node_create` / `squad_node_get` / `squad_node_list` / `squad_node_update` / `squad_node_claim` / `squad_node_submit` / `squad_node_review` | Durable research nodes (sharing IDs with Science Cards): create, discover, edit with `expected_revision`, claim, submit committed artifacts, and review. See [docs/nodes.md](docs/nodes.md). |
 | `squad_integration_get` / `squad_integration_set` / `squad_integration_unset` / `squad_integration_check` / `squad_integration_submit` / `squad_integration_attempt_get` / `squad_integration_attempt_list` | Shared integration target configuration and submission attempts; `squad_bank` integrates and publishes them. See [docs/integration.md](docs/integration.md). |
+| `squad_outline_render` / `squad_outline_status` / `squad_outline_publish` | Deterministic generated research outline: render a snapshot, compare it with the latest verified publication, and publish it through the bank pipeline. See [Authoritative generated outline](#authoritative-generated-outline). |
+| `squad_steward_status` / `squad_steward_tick` | Shared steward: read banked/reviewed/outline state (any peer), and send bounded reminders (configured steward only). See [Shared steward](#shared-steward). |
+| `squad_room_doctor` | Read-only, evidence-first room drift report. See [Room drift report](#room-drift-report). |
 | `squad_clear` | Wipe the room. |
 
 Goals are squad-scoped, not assigned: agents negotiate division of labor in chat, which is exactly the collaboration you want to see in the transcript.
