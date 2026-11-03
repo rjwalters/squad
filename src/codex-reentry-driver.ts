@@ -13,27 +13,22 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { envMinutes, findRepoRoot, openDb, squadDir } from "./db.js";
-import { Squad } from "./core.js";
+import { envMinutes, findRepoRoot, openDb } from "./db.js";
+import type { AgentAdapter } from "./agent.js";
 import {
-  DEFAULT_MIN_RUN_INTERVAL_MS,
   FALLBACK_JOIN_PROMPT,
   NATIVE_JOIN_PROMPT,
   classifyRolloutTail,
   pickLatestRollout,
+  buildCodexArgs,
   resumePrompt,
-  supervise,
   type RolloutOutcome,
-  type SuperviseConfig,
-  type SuperviseDeps,
   type SuperviseSummary,
 } from "./codex-reentry.js";
 import {
   DEFAULT_REENTRY_MAX_ATTEMPTS,
   DEFAULT_REENTRY_TTL_MINUTES,
 } from "./reentry.js";
-import { observeWakeWork } from "./reentry-room.js";
-import { loadState, operatorStopped, saveState } from "./reentry-state.js";
 import { codexSessionFromRollout, upsertWakeHandle } from "./wake-handles.js";
 
 export const CODEX_REENTRY_USAGE =
@@ -82,7 +77,7 @@ function rolloutCandidates(root: string, depth = 0): { path: string; mtimeMs: nu
  * Best-effort: a missing log, unparseable name or unreachable room records
  * nothing -- never a guessed handle, never a supervisor failure.
  */
-function recordCodexWakeHandle(persona: string, startedAtMs: number): void {
+export function recordCodexWakeHandle(persona: string, startedAtMs: number): void {
   try {
     const sessions = join(codexHome(), "sessions");
     if (!existsSync(sessions)) return;
@@ -149,7 +144,11 @@ export function joinPromptText(repoRoot: string | null = findRepoRoot(process.cw
   return FALLBACK_JOIN_PROMPT;
 }
 
-function runCodexProcess(bin: string, args: string[]): Promise<number | null> {
+function runCodexProcess(
+  bin: string,
+  args: string[],
+  onSpawnError?: (err: NodeJS.ErrnoException) => void,
+): Promise<number | null> {
   return new Promise((resolve) => {
     const child = spawn(bin, args, {
       stdio: "inherit",
@@ -157,6 +156,11 @@ function runCodexProcess(bin: string, args: string[]): Promise<number | null> {
     });
     child.on("error", (err) => {
       process.stderr.write(`squad codex-reentry: failed to launch ${bin}: ${err.message}\n`);
+      try {
+        onSpawnError?.(err);
+      } catch {
+        // best-effort announcement
+      }
       resolve(null);
     });
     child.on("close", (code) => resolve(code));
@@ -170,7 +174,7 @@ function runCodexProcess(bin: string, args: string[]): Promise<number | null> {
  * every re-entry into an instant usage error (a crash loop the backoff would
  * ride out pointlessly).
  */
-function probeResumeSupport(bin: string): Promise<boolean> {
+export function probeResumeSupport(bin: string): Promise<boolean> {
   return new Promise((resolve) => {
     const child = spawn(bin, ["exec", "resume", "--help"], { stdio: "ignore" });
     child.on("error", () => resolve(false));
@@ -257,110 +261,26 @@ export function parseCodexReentryArgs(rest: string[]): CodexReentryOptions {
   return opts;
 }
 
+/** The Codex adapter: the existing helpers behind the `AgentAdapter` seam, no logic change. */
+export const codexAdapter: AgentAdapter = {
+  runtime: "codex",
+  usage: CODEX_REENTRY_USAGE,
+  parseArgs: parseCodexReentryArgs,
+  joinPrompt: (opts) => opts.prompt ?? joinPromptText(),
+  resumePrompt: (opts) => opts.prompt ?? resumePrompt(opts.persona),
+  launch: (prompt, extraArgs) => buildCodexArgs({ mode: "fresh", prompt, extraArgs }),
+  resume: (prompt, extraArgs) => buildCodexArgs({ mode: "resume", prompt, extraArgs }),
+  supportsResume: probeResumeSupport,
+  run: runCodexProcess,
+  detectTurnEnd: async (startedAtMs) => classifyRunFromLogs(startedAtMs),
+  recordWakeHandle: recordCodexWakeHandle,
+};
+
 /**
- * `squad codex-reentry` — start a Codex persona under the re-entry
- * supervisor. Blocks (this is a foreground process, deliberately: see the
- * "not a shared daemon" note in codex-reentry.ts) until a bound fires.
+ * `squad codex-reentry` — alias for `squad agent codex`. Kept as a thin
+ * wrapper so existing callers and tests keep their import.
  */
 export async function runCodexReentry(rest: string[]): Promise<SuperviseSummary> {
-  const opts = parseCodexReentryArgs(rest);
-  const dir = squadDir();
-  const persona = opts.persona;
-
-  const cfg: SuperviseConfig = {
-    persona,
-    ttlMinutes: opts.ttlMinutes,
-    maxAttempts: opts.maxAttempts,
-    joinPrompt: opts.prompt ?? joinPromptText(),
-    reentryPrompt: opts.prompt ?? resumePrompt(persona),
-    extraArgs: opts.extraArgs,
-    minRunIntervalMs: opts.minRunIntervalMs ?? DEFAULT_MIN_RUN_INTERVAL_MS,
-  };
-
-  let resumeCache: boolean | null = opts.allowResume ? null : false;
-
-  // One room connection for the whole supervised run, opened lazily on first
-  // use and reused until shutdown — the same single-connection pattern
-  // `src/mcp.ts` uses for the long-running MCP server.
-  //
-  // Opening per call would leak: `node:sqlite`'s `DatabaseSync` does not
-  // release its file descriptors on GC, and `waitForReentry()` polls
-  // `hasDirectedWork()` once per sleep slice (~45s by default) for the whole
-  // multi-hour TTL — on the order of hundreds of opens per supervised run,
-  // enough to hit a container's `ulimit -n` and crash the supervisor with
-  // EMFILE during exactly the long unattended runs it exists to protect. It
-  // also minted a fresh `sessions` row per poll, since `Squad` creates its
-  // session lazily per instance.
-  //
-  // Lazy rather than eager so a supervisor that never launches (preLaunchStop
-  // blocks it before the first `announce`) still never touches the room, and
-  // so an unopenable room degrades exactly as before: `announce` swallows the
-  // throw, and `waitForReentry` treats a throwing `hasDirectedWork` as quiet.
-  let roomDb: import("node:sqlite").DatabaseSync | null = null;
-  let room: Squad | null = null;
-  const openRoom = (): Squad => {
-    if (!room) {
-      const db = openDb();
-      roomDb = db;
-      room = new Squad(db, persona);
-    }
-    return room;
-  };
-  const closeRoom = (): void => {
-    const db = roomDb;
-    // Cleared before the close attempt so a throwing close (or a second call)
-    // can never double-close the same handle.
-    roomDb = null;
-    room = null;
-    if (!db) return;
-    try {
-      db.close();
-    } catch {
-      // Already closed, or never fully usable — nothing left to release.
-    }
-  };
-
-  const deps: SuperviseDeps = {
-    runCodex: (args) => runCodexProcess(opts.bin, args),
-    classifyRun: async (startedAtMs) => {
-      recordCodexWakeHandle(persona, startedAtMs);
-      return classifyRunFromLogs(startedAtMs);
-    },
-    resumeSupported: async () => {
-      if (resumeCache === null) resumeCache = await probeResumeSupport(opts.bin);
-      return resumeCache;
-    },
-    now: () => Date.now(),
-    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
-    loadState: () => loadState(dir, persona, new Date().toISOString()),
-    saveState: (state) => {
-      try {
-        saveState(dir, persona, state);
-      } catch {
-        // Persistence failure must not stop the supervisor — worst case the
-        // next start re-derives a fresh arm cycle.
-      }
-    },
-    operatorStopped: () => operatorStopped(dir, persona),
-    hasDirectedWork: async () => observeWakeWork(openRoom(), persona).directed,
-    hasHeldClaims: async () => observeWakeWork(openRoom(), persona).held,
-    announce: (body) => {
-      try {
-        openRoom().send(body, "system");
-      } catch {
-        // Room unreachable — the terminal log below is still the operator's
-        // signal; never let an announcement failure kill the supervisor.
-      }
-    },
-    log: (line) => process.stderr.write(`squad codex-reentry [${persona}]: ${line}\n`),
-  };
-
-  try {
-    return await supervise(cfg, deps);
-  } finally {
-    // Release the connection on every exit path — normal stop, throw, or the
-    // caller's own error handling. `supervise` is the process's whole
-    // lifetime, so this is the shutdown hook.
-    closeRoom();
-  }
+  const { runAgent } = await import("./agent.js");
+  return runAgent("codex", rest);
 }
