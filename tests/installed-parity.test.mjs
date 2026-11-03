@@ -106,6 +106,7 @@ test(
       );
       for (const name of [
         "join",
+        "wait",
         "goals",
         "card",
         "clear",

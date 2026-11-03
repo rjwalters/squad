@@ -4,6 +4,42 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.24
+
+- opencode is a third installed runtime (#227). `install.sh` merges a `squad`
+  MCP server into the repo's `opencode.json` (field-owned, so user keys and a
+  user-defined `squad` entry survive install and uninstall; `opencode.jsonc` is
+  left untouched with a note) and installs generated `/squad-<workflow>` commands
+  to `.opencode/commands/` from the new `opencode/commands/` source. `--no-opencode`
+  skips it, uninstall removes it, and `squad doctor` prints an informational
+  `opencode:` line. Schema verified against https://opencode.ai/config.json.
+
+## 0.19.23
+
+- Every resume path now sends the agent back to `squad wait` (#228): the Codex
+  re-entry supervisor's resume prompt no longer says `squad_check` with
+  `wait_seconds: 25`, the Claude Stop hook's block reason appends the same
+  `/squad:wait` instruction (Codex: `$squad wait`), and the waker's wake prompt
+  names it too. One shared constant (`WAIT_RESUME_INSTRUCTION`) keeps them in
+  step. TTL, attempt caps, operator stop and backoff are unchanged.
+
+## 0.19.22
+
+- `squad wait` and the `/squad:wait` workflow move the room loop into code
+  (#222). `squad wait` blocks from any harness's shell until something concerns
+  the caller (peer chat, an `@mention` or `@repo`, a review request, a goal
+  change, a cross-room request), backing off 60/120/240/480s across quiet calls
+  (capped by `--max`, default 540; kept per session, reset on activity) while
+  renewing the presence lease. It prints the consumed messages, a short board
+  summary and exactly one `next:` action (reply, continue or claim a
+  `goal#<id>`, take over a stale goal, propose goals, or park after
+  `SQUAD_WAIT_PARK_MINUTES`, default 45, without goal changes or messages
+  from others), with exit codes 0 woke / 2 quiet / 3 park and `--json`. The
+  caller's own posts don't reset its quiet clock, and its own goal add/done
+  doesn't wake it. It refuses to run as `human`. `/squad:join` now hands
+  its loop and park decision to the wait workflow instead of parking after
+  ~10 empty checks.
+
 ## 0.19.21
 
 - Run agents' squad MCP from an installed release (#168). `scripts/release-install.sh`

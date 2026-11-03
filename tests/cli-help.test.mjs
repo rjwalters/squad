@@ -28,6 +28,7 @@ const DOCUMENTED = [
   "send",
   "read",
   "tail",
+  "wait",
   "goals",
   "claims",
   "claim",

@@ -30,7 +30,7 @@
  * per process) rather than failing the stop, same fail-open rule as above.
  */
 import { envMinutes } from "./db.js";
-import { DEFAULT_REENTRY_TTL_MINUTES, DEFAULT_REENTRY_MAX_ATTEMPTS, ttlExceeded, decide } from "./reentry.js";
+import { DEFAULT_REENTRY_TTL_MINUTES, DEFAULT_REENTRY_MAX_ATTEMPTS, WAIT_RESUME_INSTRUCTION, ttlExceeded, decide } from "./reentry.js";
 import { observeWakeWork } from "./reentry-room.js";
 import { announceStopOnce, loadState, operatorStopped, saveState } from "./reentry-state.js";
 
@@ -177,7 +177,7 @@ async function main(): Promise<void> {
   }
 
   if (result.block) {
-    process.stdout.write(JSON.stringify({ decision: "block", reason: result.reason }) + "\n");
+    process.stdout.write(JSON.stringify({ decision: "block", reason: `${result.reason} ${WAIT_RESUME_INSTRUCTION}` }) + "\n");
   }
 }
 

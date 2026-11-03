@@ -2347,6 +2347,20 @@ export class Squad {
   }
 
   /**
+   * `check({ peek: true })` without the presence write: a cheap read for
+   * callers that poll often and renew the lease on their own schedule
+   * (`squad wait`, src/wait.ts). Before this connection's first touch there
+   * is no session, and so no cursor, to read against: it returns [] then.
+   */
+  peekUnread(): Message[] {
+    if (!this._sessionId) return [];
+    const rows = this.db
+      .prepare("SELECT * FROM messages WHERE id > ? AND sender != ? ORDER BY id ASC")
+      .all(this.cursor(), this.persona) as unknown as Message[];
+    return this.withRoutes(rows);
+  }
+
+  /**
    * Long-poll variant of check: waits up to waitSeconds for something new
    * before returning. Still pull-only — the caller always initiates.
    */

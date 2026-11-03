@@ -70,6 +70,7 @@
  */
 import {
   DEFAULT_SLEEP_CAP_MS,
+  WAIT_RESUME_INSTRUCTION,
   decide,
   ttlExceeded,
   type BackoffParams,
@@ -224,9 +225,8 @@ export const NATIVE_JOIN_PROMPT =
 export function resumePrompt(persona: string): string {
   return (
     `You are ${persona} in the squad room and your previous turn ended. ` +
-    `Resume the /squad-join conversation loop: call squad_check with wait_seconds: 25, ` +
-    `respond to anything addressed to you, do the work a claimed goal calls for, and keep looping. ` +
-    `Do not call squad_leave unless you are genuinely done.`
+    `Respond to anything addressed to you and do the work a claimed goal calls for. ` +
+    WAIT_RESUME_INSTRUCTION
   );
 }
 

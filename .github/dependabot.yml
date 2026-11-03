@@ -1,9 +1,31 @@
 version: 2
 updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    # Routine version updates wait 14 days (org policy); security updates are not delayed.
+    cooldown:
+      default-days: 14
+    labels: ["dependencies"]
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: ["major", "minor", "patch"]
+
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Los_Angeles"
+    cooldown:
+      default-days: 14
+    labels: ["dependencies"]
     groups:
       npm-minor-patch:
         patterns: ["*"]
