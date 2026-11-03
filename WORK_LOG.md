@@ -2,8 +2,21 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-03
+
+- **PR #225**: chore(deps): bump the github-actions group with 2 updates
+- **PR #224**: feat: squad wait + /squad:wait move the room loop into code (#222)
+- **PR #223**: chore(deps): align dependabot.yml with org policy (add GitHub Actions, 14-day cooldown)
+- **PR #219**: docs: list outline, steward, and room-doctor tools in README MCP table
+- **Issue #222** (closed): Move the room loop into code: squad wait (exponential backoff + next-action) and a /squad:wait workflow
+- **Issue #218** (closed): Verify release-install.sh swap_link (mv -fh) on real macOS/BSD
+
 ### 2026-11-02
 
+- **PR #217**: fix: use BSD-compatible mv flag for release symlink swap
+- **Issue #195** (closed): release-install.sh uses GNU-only 'mv -T', likely fails on macOS
+- **Issue #92** (closed): Champion: Merge-Risk Hold Digest
+- **Issue #58** (closed): Champion: Merge-Risk Hold Digest
 - **PR #170**: feat: run squad MCP from an installed release and check it in doctor
 - **Issue #168** (closed): Run agents' squad MCP from an installed release, not the dev clone (cleanups/edits break every agent)
 
