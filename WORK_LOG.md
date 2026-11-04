@@ -2,6 +2,11 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-04
+
+- **PR #250**: fix: chmod install.sh and uninstall.sh in release-install
+- **Issue #247** (closed): release-install.sh: packed release's install.sh loses its exec bit, so the printed install command fails
+
 ### 2026-11-03
 
 - **PR #243**: feat: accept opencode as a wake-handle runtime
