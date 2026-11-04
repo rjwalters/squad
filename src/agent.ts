@@ -24,6 +24,7 @@ import {
 import { observeWakeWork } from "./reentry-room.js";
 import { loadState, operatorStopped, saveState } from "./reentry-state.js";
 import { codexAdapter } from "./codex-reentry-driver.js";
+import { claudeAdapter } from "./claude-reentry-driver.js";
 
 /** Flags every adapter's parser yields (the Codex flag set is the baseline). */
 export interface AgentOptions {
@@ -62,7 +63,10 @@ export interface AgentAdapter {
   recordWakeHandle?(persona: string, startedAtMs: number): void;
 }
 
-const ADAPTERS: ReadonlyMap<string, AgentAdapter> = new Map([[codexAdapter.runtime, codexAdapter]]);
+const ADAPTERS: ReadonlyMap<string, AgentAdapter> = new Map([
+  [codexAdapter.runtime, codexAdapter],
+  [claudeAdapter.runtime, claudeAdapter],
+]);
 
 export function registeredRuntimes(): string[] {
   return [...ADAPTERS.keys()];

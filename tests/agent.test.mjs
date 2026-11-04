@@ -15,11 +15,12 @@ const { Squad } = await import("../dist/core.js");
 const run = (args) =>
   spawnSync(process.execPath, [entry, ...args], { encoding: "utf8", cwd: root });
 
-test("registry lists codex and resolves case-insensitively", () => {
-  assert.deepEqual(registeredRuntimes(), ["codex"]);
+test("registry lists codex and claude and resolves case-insensitively", () => {
+  assert.deepEqual(registeredRuntimes(), ["codex", "claude"]);
   assert.equal(getAdapter("CODEX")?.runtime, "codex");
-  assert.equal(getAdapter("claude"), undefined);
-  assert.match(agentUsage(), /registered runtimes: codex/);
+  assert.equal(getAdapter("Claude")?.runtime, "claude");
+  assert.equal(getAdapter("opencode"), undefined);
+  assert.match(agentUsage(), /registered runtimes: codex, claude/);
 });
 
 test("codex adapter builds the same argv as buildCodexArgs", () => {
@@ -31,13 +32,13 @@ test("codex adapter builds the same argv as buildCodexArgs", () => {
 test("squad agent with no runtime exits 1 and lists runtimes", () => {
   const r = run(["agent"]);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /registered runtimes: codex/);
+  assert.match(r.stderr, /registered runtimes: codex, claude/);
 });
 
 test("squad agent with an unregistered runtime exits 1 without launching", () => {
-  const r = run(["agent", "claude"]);
+  const r = run(["agent", "opencode"]);
   assert.equal(r.status, 1);
-  assert.match(r.stderr, /no adapter for runtime 'claude'/);
+  assert.match(r.stderr, /no adapter for runtime 'opencode'/);
 });
 
 test("squad agent --help and agent codex --help print usage; alias help matches", () => {
