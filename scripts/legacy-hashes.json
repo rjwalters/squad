@@ -1,0 +1,24 @@
+{
+  "covers": ["v0.1.0", "v0.2.0"],
+  "files": {
+    ".claude/skills/squad/SKILL.md": [
+      "08f5ee34b7a1877d688792bd5cd2b47a4a25c2926e9f76603860601f31ee2614",
+      "e9f7a737ef70b0b951abd96d628f4b9dd6e53604e20dbaed3a69603671b6d45c"
+    ],
+    ".claude/commands/squad/join.md": [
+      "d362a8b0382f4fac7c1d355aa26f9ecf9445da48036fbadd3ca9b1b5e078536a",
+      "81f369749532876a4b83f544e4b365c48df2201c995bcab8d1b993babbb9dbd4"
+    ],
+    ".claude/commands/squad/goals.md": [
+      "5f6747b1f601627af43d42dd0d50951280e5e404b05c8342c2fd8d3cf8b50b27",
+      "a4b4dff49dd05ddbf6cb869a3ce67d808cc17913384069bb07e93864c1a983ab"
+    ],
+    ".claude/commands/squad/clear.md": [
+      "5d45729aa272e323719c8a9b55f027f95b05336884fbaac14f84e2a5b1b4de07"
+    ]
+  },
+  "blocks": [
+    "1af9a02a6cee9132278939201366b5d160c7ce22ad368b9c29b9497ba3616e6c",
+    "68e79afed4b052be6145bdee8d24cfdfb7fdd61c58392391bcf70a54e018ec85"
+  ]
+}
