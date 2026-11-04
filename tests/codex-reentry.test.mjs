@@ -225,7 +225,7 @@ function fakeDeps(overrides = {}) {
   let now = Date.parse("2026-01-01T00:00:00.000Z");
   let state = initialState(new Date(now).toISOString());
   const deps = {
-    runCodex: async (args) => {
+    runAgent: async (args) => {
       calls.runs.push(args);
       return 0;
     },
@@ -287,7 +287,7 @@ test("supervise resumes rather than rejoining once the binary supports it", asyn
 test("supervise: operator-stop quiets a live supervisor within one sleep slice", async () => {
   let stopped = false;
   const { deps, calls } = fakeDeps({ operatorStopped: () => stopped });
-  deps.runCodex = async (args) => {
+  deps.runAgent = async (args) => {
     calls.runs.push(args);
     stopped = true; // operator touches .squad/reentry-stop while the run is in flight
     return 0;
@@ -321,7 +321,7 @@ test("supervise: a crashing codex is announced and never re-entered on directed 
       throw new Error("hasDirectedWork must not be consulted after a crash");
     },
   });
-  deps.runCodex = async (args) => {
+  deps.runAgent = async (args) => {
     calls.runs.push(args);
     return 1;
   };
@@ -402,7 +402,7 @@ test("supervise re-invokes a real stub process that ends in a task_complete reco
         minRunIntervalMs: 0,
       },
       {
-        runCodex: (args) =>
+        runAgent: (args) =>
           new Promise((resolve) => {
             const child = spawn(process.execPath, [stub, ...args], { stdio: "ignore" });
             child.on("error", () => resolve(null));
@@ -459,7 +459,7 @@ test("supervisor honors claims, notices directed work during idle and deduplicat
   let held = true;
   const { deps, calls } = fakeDeps({ hasHeldClaims: async () => held });
   const launchTimes = [];
-  deps.runCodex = async () => { launchTimes.push(deps.now()); held = launchTimes.length === 1; return 0; };
+  deps.runAgent = async () => { launchTimes.push(deps.now()); held = launchTimes.length === 1; return 0; };
   // Directed work arrives during the second (idle) window, bypassing its later due time.
   deps.hasDirectedWork = async () => launchTimes.length > 1 && deps.now() - launchTimes[1] >= 1000;
   const cfg = { ...baseCfg, maxAttempts: 2, wake: { claimMs: 500, idleMinMs: 10_000, idleMaxMs: 10_000 } };

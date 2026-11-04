@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.30
+
+- `squad agent <runtime>` (#234): the re-entry supervisor now drives an
+  `AgentAdapter` (launch / resume / detect-turn-end) from a registry, with Codex
+  as the first adapter. `squad codex-reentry` is an alias for `squad agent codex`
+  (same flags, summary line, exit codes and state files). `squad agent` with no
+  or an unregistered runtime exits 1 and launches nothing. A missing runtime
+  binary posts `not woken: <persona> -- <bin> not found` to the room and counts
+  as a failure for backoff. The persona default stays `SQUAD_PERSONA`, else the
+  runtime name (the design note's `<runtime>-<model>` default is not adopted: it
+  would rename the per-persona state files the alias reads).
+
 ## 0.19.29
 
 - Release installs record the real source commit (#249): `release-install.sh`

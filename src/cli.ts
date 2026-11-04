@@ -276,6 +276,10 @@ Human CLI usage:
                                'squad export' into this room; refuses on a
                                schema-version mismatch or a non-empty
                                destination room (run 'squad clear' first)
+  squad agent <runtime> [flags] [-- <extra args>]
+                               Run an agent runtime under the re-entry
+                               supervisor ('squad agent --help' lists the
+                               registered runtimes; today: codex)
   squad codex-reentry [--persona <name>] [--codex <bin>] [--ttl-minutes <n>]
                       [--max-attempts <n>] [--no-resume] [--prompt <text>]
                       [-- <extra codex exec args>]
@@ -940,18 +944,42 @@ export async function runCli(argv: string[]): Promise<void> {
     if (report.failed.length) process.exitCode = 1;
     return;
   }
-  if (cmd === "codex-reentry") {
+  if (cmd === "agent" || cmd === "codex-reentry") {
     // Handled before the shared `Squad` below: the supervisor is not a
-    // human-persona command (it acts as the Codex persona it supervises) and
-    // it holds the process for hours, so it opens its own connections.
-    const { runCodexReentry, CODEX_REENTRY_USAGE } = await import("./codex-reentry-driver.js");
-    if (rest.includes("--help") || rest.includes("-h")) {
-      console.log(CODEX_REENTRY_USAGE);
+    // human-persona command (it acts as the persona it supervises) and it
+    // holds the process for hours, so it opens its own connections.
+    // `codex-reentry` is an alias for `agent codex`.
+    const { runAgent, getAdapter, agentUsage } = await import("./agent.js");
+    let runtime = "codex";
+    let args = rest;
+    if (cmd === "agent") {
+      const first = rest[0];
+      if (first === undefined || first === "--help" || first === "-h") {
+        const text = agentUsage();
+        if (first === undefined) {
+          console.error(text);
+          process.exitCode = 1;
+        } else {
+          console.log(text);
+        }
+        return;
+      }
+      runtime = first;
+      args = rest.slice(1);
+      if (!getAdapter(runtime)) {
+        console.error(`${agentUsage()}\nno adapter for runtime '${runtime}'`);
+        process.exitCode = 1;
+        return;
+      }
+    }
+    if (args.includes("--help") || args.includes("-h")) {
+      console.log(getAdapter(runtime)!.usage);
       return;
     }
-    const summary = await runCodexReentry(rest);
+    const summary = await runAgent(runtime, args);
+    const name = getAdapter(runtime)!.runtime;
     console.log(
-      `codex re-entry supervisor stopped after ${summary.runs} run(s) / ` +
+      `${name} re-entry supervisor stopped after ${summary.runs} run(s) / ` +
         `${summary.attempts} re-entry(ies): ${summary.stopReason}`,
     );
     return;
@@ -1731,6 +1759,7 @@ export function knownCommand(cmd: string | undefined): boolean {
       "wake-handle",
       "waker",
       "codex-reentry",
+      "agent",
       "relay",
       "wait",
       "join",

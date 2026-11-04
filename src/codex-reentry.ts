@@ -221,11 +221,18 @@ export interface SuperviseConfig {
   /** Per-slice sleep cap: how often the escape hatches are re-checked while waiting. */
   sleepCapMs?: number;
   minRunIntervalMs?: number;
+  /** Runtime name used in logs and announcements. Defaults to `codex`. */
+  runtime?: string;
 }
 
 export interface SuperviseDeps {
-  /** Launch `codex` with `args`; resolve with its exit code (null if signalled). */
-  runCodex(args: string[]): Promise<number | null>;
+  /** Launch the runtime with `args`; resolve with its exit code (null if signalled). */
+  runAgent(args: string[]): Promise<number | null>;
+  /**
+   * Compose the child argv for a run (the adapter's `launch`/`resume`).
+   * Defaults to `buildCodexArgs`, so Codex callers need not set it.
+   */
+  buildArgs?(opts: { mode: RunMode; prompt: string; extraArgs: readonly string[] }): string[];
   /** Read back how the run that started at `startedAtMs` ended. */
   classifyRun(startedAtMs: number): Promise<RolloutOutcome>;
   /** True when the local `codex` supports `exec resume`. Probed once, cached by the driver. */
@@ -256,7 +263,7 @@ export interface SuperviseSummary {
 
 export function startAnnouncement(cfg: SuperviseConfig): string {
   return (
-    `${cfg.persona} is running under the squad codex re-entry supervisor: if its turn ends while ` +
+    `${cfg.persona} is running under the squad ${cfg.runtime ?? "codex"} re-entry supervisor: if its turn ends while ` +
     `the room is quiet it will re-enter itself (5m with claims, 30–45m idle; mentions/reviews take priority). Bounded by a ` +
     `${cfg.ttlMinutes}m TTL and ${cfg.maxAttempts} re-entries — it will attempt to post here when it stops ` +
     `for good, so a silent gap means a crash, not a park.`
@@ -265,26 +272,28 @@ export function startAnnouncement(cfg: SuperviseConfig): string {
 
 export function parkAnnouncement(opts: {
   persona: string;
+  runtime?: string;
   reason: string;
   runs: number;
   attempts: number;
 }): string {
   return (
-    `${opts.persona}'s codex re-entry supervisor is stopping after ${opts.runs} run(s) / ` +
+    `${opts.persona}'s ${opts.runtime ?? "codex"} re-entry supervisor is stopping after ${opts.runs} run(s) / ` +
     `${opts.attempts} re-entry(ies): ${opts.reason}. ${opts.persona} will NOT return without an ` +
     `operator re-arming it: stop the controller, remove its .squad/reentry/<persona>.json ` +
-    `and stop markers, then restart (\`squad codex-reentry\`). Do not wait on it.`
+    `and stop markers, then restart (\`${(opts.runtime ?? "codex") === "codex" ? "squad codex-reentry" : `squad agent ${opts.runtime}`}\`). Do not wait on it.`
   );
 }
 
 export function crashAnnouncement(opts: {
   persona: string;
+  runtime?: string;
   run: number;
   exitCode: number | null;
   outcome: RolloutOutcome;
 }): string {
   return (
-    `${opts.persona}'s codex run #${opts.run} ended abnormally (exit ${opts.exitCode ?? "signal"}, ` +
+    `${opts.persona}'s ${opts.runtime ?? "codex"} run #${opts.run} ended abnormally (exit ${opts.exitCode ?? "signal"}, ` +
     `session log: ${opts.outcome}) — this is a failure, not a clean park. The supervisor will ` +
     `retry with backoff.`
   );
@@ -387,6 +396,7 @@ export async function supervise(
 ): Promise<SuperviseSummary> {
   let state = deps.loadState();
   const outcomes: RolloutOutcome[] = [];
+  const runtime = cfg.runtime ?? "codex";
   let runs = 0;
 
   const blocked = preLaunchStop({
@@ -399,7 +409,7 @@ export async function supervise(
   if (blocked) {
     deps.log(`not launching: ${blocked}`);
     state = announceStopOnce(state, deps.saveState, deps.announce,
-      parkAnnouncement({ persona: cfg.persona, reason: blocked, runs: 0,
+      parkAnnouncement({ persona: cfg.persona, runtime: cfg.runtime, reason: blocked, runs: 0,
         attempts: state.totalFired ?? state.attempt }), blocked);
     return { runs: 0, attempts: state.totalFired ?? state.attempt, stopReason: blocked, outcomes };
   }
@@ -411,9 +421,9 @@ export async function supervise(
     const prompt = mode === "resume" ? cfg.reentryPrompt : cfg.joinPrompt;
     const startedAt = deps.now();
 
-    deps.log(`launching codex (${mode}), run ${runs + 1}`);
-    const exitCode = await deps.runCodex(
-      buildCodexArgs({ mode, prompt, extraArgs: cfg.extraArgs }),
+    deps.log(`launching ${runtime} (${mode}), run ${runs + 1}`);
+    const exitCode = await deps.runAgent(
+      (deps.buildArgs ?? buildCodexArgs)({ mode, prompt, extraArgs: cfg.extraArgs }),
     );
     runs++;
 
@@ -422,7 +432,7 @@ export async function supervise(
     const clean = isCleanPark(outcome, exitCode);
     deps.log(`run ${runs} exited ${exitCode ?? "on a signal"} — session log: ${outcome}`);
     if (!clean) {
-      deps.announce(crashAnnouncement({ persona: cfg.persona, run: runs, exitCode, outcome }));
+      deps.announce(crashAnnouncement({ persona: cfg.persona, runtime: cfg.runtime, run: runs, exitCode, outcome }));
     }
 
     const waited = await waitForReentry(cfg, deps, state, clean);
@@ -432,6 +442,7 @@ export async function supervise(
       state = announceStopOnce(state, deps.saveState, deps.announce,
         parkAnnouncement({
           persona: cfg.persona,
+          runtime: cfg.runtime,
           reason: waited.reason,
           runs,
           attempts: state.totalFired ?? state.attempt,

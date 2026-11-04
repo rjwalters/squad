@@ -23,7 +23,7 @@ const entry = join(repoRoot, "dist", "index.js");
  * (their parser/supervisor prints its own usage); `nuke` is deliberately
  * undocumented and out of scope for #119.
  */
-const SELF_DOCUMENTING = new Set(["help", "relay", "waker", "codex-reentry"]);
+const SELF_DOCUMENTING = new Set(["help", "relay", "waker", "codex-reentry", "agent"]);
 const DOCUMENTED = [
   "send",
   "read",
