@@ -84,7 +84,7 @@ dist/
 .loom/gh-config-by-owner/
 .loom/gh-config-by-owner.*/
 .loom/gh-config-by-owner-*/
-.loom-local/
+/.loom-local/
 # <<< loom-managed <<<
 
 # Foreign lockfiles. package.json declares packageManager pnpm@11.20.0, so a
