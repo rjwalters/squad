@@ -58,3 +58,9 @@ test("chmods install.sh and uninstall.sh so the printed command runs as-is", () 
     /^chmod \+x .*"\$ROOT\/\$VERSION\/install\.sh".*"\$ROOT\/\$VERSION\/uninstall\.sh"/m,
   );
 });
+
+test("writes a COMMIT file into the staged release, omitted when HEAD is unresolvable", () => {
+  const text = readFileSync(script, "utf8");
+  assert.match(text, /rev-parse --short HEAD[\s\S]*?>"\$stage\/COMMIT"/);
+  assert.match(text, /if commit="\$\(git -C "\$CLONE" rev-parse --short HEAD/);
+});
