@@ -4,6 +4,10 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-04
 
+- **PR #254**: fix: record release commit via COMMIT file instead of unknown
+- **PR #252**: fix: adopt receipt-less v0.1.0 installs by historical artifact hash
+- **Issue #249** (closed): Release installs record commit "unknown" in install-metadata.json
+- **Issue #248** (closed): Installer cannot adopt a receipt-less v0.1.0 install even when files are byte-identical to that release
 - **PR #250**: fix: chmod install.sh and uninstall.sh in release-install
 - **Issue #247** (closed): release-install.sh: packed release's install.sh loses its exec bit, so the printed install command fails
 
