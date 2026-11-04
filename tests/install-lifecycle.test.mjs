@@ -564,6 +564,32 @@ test("pre-launcher installations migrate to the in-repo launcher", () => {
   f.run("install.sh", ["--check"]);
 });
 
+test("install records COMMIT from a release dir without .git, else unknown", () => {
+  const record = (name, commitFile) => {
+    const home = join(scratch, name);
+    const source = join(home, "squad");
+    const repo = join(home, "consumer");
+    mkdirSync(source, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    for (const path of ["scripts", "skills", "commands", "codex", "opencode", "hooks", "dist", "VERSION", "install.sh", "uninstall.sh"])
+      cpSync(resolve(path), join(source, path), { recursive: true });
+    symlinkSync(realpathSync("node_modules"), join(source, "node_modules"));
+    if (commitFile !== undefined) writeFileSync(join(source, "COMMIT"), commitFile);
+    const env = { ...process.env, HOME: home, SQUAD_HEAL_ROOT: home };
+    const result = spawnSync("bash", [join(source, "install.sh"), "-y", "--no-link", "--no-codex", repo], {
+      cwd: scratch, env, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return [".claude", ".agents"].map(
+      (r) => JSON.parse(readFileSync(join(repo, r, "skills/squad/install-metadata.json"))).commit,
+    );
+  };
+  assert.deepEqual(record("commit-file", "abc1234\n"), ["abc1234", "abc1234"]);
+  // Empty/whitespace COMMIT falls through; scratch is not in a git repo.
+  assert.deepEqual(record("commit-blank", "  \n"), ["unknown", "unknown"]);
+  assert.deepEqual(record("commit-none"), ["unknown", "unknown"]);
+});
+
 test("a session in a linked worktree spawns the server and joins the primary clone's room", async () => {
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
   const { StdioClientTransport } = await import("@modelcontextprotocol/sdk/client/stdio.js");

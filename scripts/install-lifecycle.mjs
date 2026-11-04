@@ -561,13 +561,19 @@ async function main() {
   const plan = new Plan(opts);
   const version = fs.readFileSync(join(source, "VERSION"), "utf8").trim();
   if (!version) throw new Error("VERSION is empty");
-  const commitResult = spawnSync(
-    "git",
-    ["-C", source, "rev-parse", "--short", "HEAD"],
-    { encoding: "utf8" },
-  );
-  const commit =
-    commitResult.status === 0 ? commitResult.stdout.trim() : "unknown";
+  // A release dir has no .git; release-install.sh records the commit in COMMIT.
+  let commit = "";
+  try {
+    commit = fs.readFileSync(join(source, "COMMIT"), "utf8").trim();
+  } catch {}
+  if (!commit) {
+    const commitResult = spawnSync(
+      "git",
+      ["-C", source, "rev-parse", "--short", "HEAD"],
+      { encoding: "utf8" },
+    );
+    commit = commitResult.status === 0 ? commitResult.stdout.trim() : "unknown";
+  }
   if (
     opts.action === "install" &&
     !process.env.SQUAD_DEV &&
