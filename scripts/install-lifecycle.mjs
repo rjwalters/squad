@@ -19,6 +19,11 @@ const metaPaths = [".claude", ".agents"].map(
   (r) => `${r}/skills/squad/install-metadata.json`,
 );
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+// Hashes of artifacts shipped by past releases that predate ownership receipts.
+// A byte-identical match proves the installer wrote it, so it can be adopted.
+const legacy = JSON.parse(
+  fs.readFileSync(new URL("./legacy-hashes.json", import.meta.url), "utf8"),
+);
 const json = (value) => JSON.stringify(value, null, 2) + "\n";
 const shellQuote = (value) =>
   "'" + String(value).replaceAll("'", "'\"'\"'") + "'";
@@ -324,7 +329,8 @@ class Scope {
       if (desired !== null) this.plan.change(path, desired, mode);
     } else if (
       (prior && hash(current) === prior) ||
-      (!removing && current === desired)
+      (!removing && current === desired) ||
+      (!removing && !prior && legacy.files[rel]?.includes(hash(current)))
     )
       this.plan.change(path, desired, mode);
     else if (removing && !prior) return;
@@ -355,7 +361,14 @@ class Scope {
     if (old && (old.kind !== "block" || typeof old.text !== "string"))
       throw new Error(`invalid block receipt: ${rel}`);
     const removing = this.plan.opts.action === "uninstall";
-    if (existing !== null && existing !== old?.text && existing !== desired) {
+    const legacyBlock =
+      !old && existing !== null && legacy.blocks.includes(hash(existing));
+    if (
+      existing !== null &&
+      existing !== old?.text &&
+      existing !== desired &&
+      !legacyBlock
+    ) {
       this.plan.conflict(`${path} has a modified or legacy unmanaged block`);
       if (old) this.next.fragments[rel] = old;
       return;
@@ -384,7 +397,14 @@ class Scope {
       };
     }
   }
-  jsonFields(rel, fields, preserve = [], retain = [], equivalent = []) {
+  jsonFields(
+    rel,
+    fields,
+    preserve = [],
+    retain = [],
+    equivalent = [],
+    adopt = [],
+  ) {
     const path = safePath(this.root, rel),
       text = read(path),
       cfg = parseJson(text, path),
@@ -411,7 +431,9 @@ class Scope {
         continue;
       }
       if (preserve.includes(key) && !prior?.values[key]) {
-        this.plan.note(`preserved external launcher: ${path}:${key}`);
+        this.plan.note(
+          `preserved external launcher: ${path}:${key} (it names neither the managed launcher nor this checkout's runtime; to migrate, point args at this checkout's dist/index.js or remove the squad entry and reinstall)`,
+        );
         continue;
       }
       const parts = key.split("/");
@@ -460,9 +482,10 @@ class Scope {
           changed ||= !equal(existing, desired);
           next.values[key] = { installed: desired };
         }
-      } else if (existing === undefined) {
+      } else if (existing === undefined || (adopt.includes(key) && !removing)) {
+        // `adopt` is only passed for an entry a receipt-less release wrote.
+        changed ||= !equal(existing, desired);
         node[leaf] = desired;
-        changed = true;
         next.values[key] = { installed: desired };
       } else {
         this.plan.note(`preserved external config: ${path}:${key}`);
@@ -690,7 +713,26 @@ async function main() {
     ".mcp.json",
   );
   const previousLauncher = scope.old.fragments?.[".mcp.json"]?.values;
+  // A receipt-less entry in the exact form a pre-receipt release wrote
+  // (`node <this runtime>`) is ours to migrate; any other is the user's.
+  const legacyServer = beforeMcp.mcpServers?.squad;
+  const legacyLauncher =
+    !previousLauncher &&
+    opts.action === "install" &&
+    legacyServer?.command === "node" &&
+    Array.isArray(legacyServer.args) &&
+    legacyServer.args.length === 1 &&
+    typeof legacyServer.args[0] === "string" &&
+    resolve(opts.target, legacyServer.args[0]) === runtimePath;
+  if (
+    legacyLauncher &&
+    !process.env.SQUAD_CLAUDE_PERSONA &&
+    typeof legacyServer.env?.SQUAD_PERSONA === "string"
+  )
+    fields["mcpServers/squad/env/SQUAD_PERSONA"] =
+      legacyServer.env.SQUAD_PERSONA;
   const externalLauncher =
+    !legacyLauncher &&
     (beforeMcp.mcpServers?.squad?.command !== undefined ||
       beforeMcp.mcpServers?.squad?.args !== undefined) &&
     !previousLauncher?.["mcpServers/squad/command"] &&
@@ -739,6 +781,7 @@ async function main() {
     externalLauncher ? launcherFields : [],
     changedLauncher ? launcherFields : [],
     equivalentPaths,
+    legacyLauncher ? Object.keys(fields) : [],
   );
   if (opts.check && externalLauncher)
     plan.attention.push(

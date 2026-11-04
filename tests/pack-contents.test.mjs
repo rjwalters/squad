@@ -16,6 +16,7 @@ test("packed release ships the installer inputs", () => {
     "install.sh",
     "uninstall.sh",
     "scripts/install-lifecycle.mjs",
+    "scripts/legacy-hashes.json",
     "VERSION",
     "dist/index.js",
     "hooks/squad-mcp.mjs",
