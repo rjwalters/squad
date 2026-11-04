@@ -281,7 +281,7 @@ export function parkAnnouncement(opts: {
     `${opts.persona}'s ${opts.runtime ?? "codex"} re-entry supervisor is stopping after ${opts.runs} run(s) / ` +
     `${opts.attempts} re-entry(ies): ${opts.reason}. ${opts.persona} will NOT return without an ` +
     `operator re-arming it: stop the controller, remove its .squad/reentry/<persona>.json ` +
-    `and stop markers, then restart (\`${(opts.runtime ?? "codex") === "codex" ? "squad codex-reentry" : `squad agent ${opts.runtime}`}\`). Do not wait on it.`
+    `and stop markers, then restart (\`squad agent ${opts.runtime ?? "codex"}\`). Do not wait on it.`
   );
 }
 

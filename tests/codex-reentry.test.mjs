@@ -189,7 +189,7 @@ test("parkAnnouncement is unambiguous that nothing will bring the persona back",
     attempts: 3,
   });
   assert.match(body, /will NOT return without an operator/);
-  assert.match(body, /squad codex-reentry/);
+  assert.match(body, /squad agent codex/);
   assert.match(body, /TTL of 240m/);
 });
 

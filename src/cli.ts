@@ -279,8 +279,9 @@ Human CLI usage:
   squad agent <runtime> [flags] [-- <extra args>]
                                Run an agent runtime under the re-entry
                                supervisor ('squad agent --help' lists the
-                               registered runtimes; today: codex)
-  squad codex-reentry [--persona <name>] [--codex <bin>] [--ttl-minutes <n>]
+                               registered runtimes)
+  squad codex-reentry (deprecated; use 'squad agent codex')
+                      [--persona <name>] [--codex <bin>] [--ttl-minutes <n>]
                       [--max-attempts <n>] [--no-resume] [--prompt <text>]
                       [-- <extra codex exec args>]
                                Run a Codex persona under the re-entry
