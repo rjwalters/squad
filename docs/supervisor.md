@@ -33,6 +33,11 @@ live `codex exec` was not attempted for the same reason, so no end-to-end turn i
 claimed for either. The Builder of the adapter children must re-run these on a
 host with credentials.
 
+> **#236 status:** `squad agent claude` is implemented (`src/claude-reentry-driver.ts`)
+> and unit tested against a fake `claude` shim. The live `claude -p` / `--resume`
+> run is **not yet recorded** here: it needs a host with working Claude credentials
+> and is tracked as an operator step on #236.
+
 ### Claude Code
 
 - CLI: `claude 2.1.317 (Claude Code)` (`claude --version`).

@@ -24,6 +24,7 @@ import {
 import { observeWakeWork } from "./reentry-room.js";
 import { loadState, operatorStopped, saveState } from "./reentry-state.js";
 import { codexAdapter } from "./codex-reentry-driver.js";
+import { claudeAdapter } from "./claude-reentry-driver.js";
 import { opencodeAdapter } from "./opencode-agent.js";
 
 /** Flags every adapter's parser yields (the Codex flag set is the baseline). */
@@ -65,6 +66,7 @@ export interface AgentAdapter {
 
 const ADAPTERS: ReadonlyMap<string, AgentAdapter> = new Map([
   [codexAdapter.runtime, codexAdapter],
+  [claudeAdapter.runtime, claudeAdapter],
   [opencodeAdapter.runtime, opencodeAdapter],
 ]);
 
