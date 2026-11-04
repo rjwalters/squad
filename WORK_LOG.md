@@ -4,6 +4,21 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-03
 
+- **PR #243**: feat: accept opencode as a wake-handle runtime
+- **PR #242**: refactor: share preLaunchStop, quiet-gap reset and persona state/lock helpers
+- **PR #241**: feat: install opencode as a third runtime
+- **PR #240**: docs: add cross-runtime supervisor design note
+- **PR #237**: feat: add squad join --as to mint a shell agent identity
+- **PR #231**: fix: point resume prompts at squad wait across Codex, Claude hook and waker
+- **PR #221**: chore(deps): bump transitive fast-uri to 3.1.9
+- **PR #220**: chore: resync Repo Skills to v0.25.4 and Loom to v0.19.1260
+- **Issue #235** (closed): refactor: consolidate shared re-entry policy and state in reentry.ts
+- **Issue #233** (closed): feat: add opencode to wake handles
+- **Issue #232** (closed): refactor: consolidate shared re-entry policy and state in reentry.ts
+- **Issue #230** (closed): One cross-runtime agent supervisor (Claude Code, Codex, opencode) replacing the separate re-entry hook, codex-reentry and waker
+- **Issue #229** (closed): CLI squad join --as <runtime>-<model>: unique identity and catch-up for shell-only agents
+- **Issue #228** (closed): Resume agents into /squad:wait: Codex re-entry, the Claude Stop hook and the waker still resume the old squad_check loop
+- **Issue #227** (closed): Support opencode as an installed runtime (squad MCP server, squad-* commands, AGENTS.md)
 - **PR #225**: chore(deps): bump the github-actions group with 2 updates
 - **PR #224**: feat: squad wait + /squad:wait move the room loop into code (#222)
 - **PR #223**: chore(deps): align dependabot.yml with org policy (add GitHub Actions, 14-day cooldown)

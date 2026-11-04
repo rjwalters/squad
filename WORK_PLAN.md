@@ -31,13 +31,13 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-_None._
+- **#234**: feat: squad agent <runtime> supervisor entry point with Codex adapter
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#244**: feat: add AgentAdapter seam and squad agent <runtime> with Codex adapter
 
 ## Approved (Awaiting Merge)
 
@@ -50,6 +50,7 @@ _None._
 Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
+- **#234**: feat: squad agent <runtime> supervisor entry point with Codex adapter *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -68,10 +69,10 @@ Issues carrying `loom:curated`.
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 0 |
-| PRs awaiting review | 0 |
+| In Progress (`loom:building`) | 1 |
+| PRs awaiting review | 1 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 1 |
+| Curated | 2 |
 | Architect / Hermit proposals | 2 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
