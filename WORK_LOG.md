@@ -4,6 +4,10 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-04
 
+- **PR #259**: feat: add Claude adapter for squad agent claude
+- **PR #258**: feat: add opencode adapter behind squad agent
+- **Issue #55** (closed): Epic: research rooms need a merge point — 'banked' as integration, a steward role, node-level review, cards as state (lessons from the Erdős-85 room)
+- **Issue #128** (closed): Remove dead find_repo_root/REPO_ROOT from loom-attach.sh and loom-send.sh
 - **PR #256**: test: cover missing-binary 'not woken' line and backoff failure in runAgent
 - **PR #244**: feat: add AgentAdapter seam and squad agent <runtime> with Codex adapter
 - **Issue #245** (closed): Add automated test for 'not woken: <persona> -- <bin> not found' room line
