@@ -4,8 +4,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
-
 ## 0.19.33
 
 - `squad codex-reentry` (#239): prints a one-line deprecation note to stderr
@@ -513,6 +511,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve schema 5 and existing configuration/ledger history.
 
 ## [Unreleased]
+
+### Changed
+- Point operator-facing strings (park announcement, README, capabilities, `--help`) at `squad agent codex`; tag `squad codex-reentry` as deprecated in help (#270).
 
 ### Added
 - Directed review requests (#39): `squad_review_open` / `squad_review_claim` /

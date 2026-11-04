@@ -533,7 +533,7 @@ unverified for 4 hours (#60).
 
 The fix assumes no hook primitive at all. It uses the one thing Codex does
 guarantee: **a `codex exec` run is a process that exits when the turn
-completes.** `squad codex-reentry` is a supervisor around that — start it in
+completes.** `squad agent codex` is a supervisor around that — start it in
 the terminal where you would otherwise have run `codex` and typed
 `/squad-join`:
 
@@ -583,7 +583,7 @@ prerequisite** — the native skill does not register the server, so Codex must
 still have the `squad` MCP server configured (e.g. via the repo's `.mcp.json`
 or your Codex config) for the persona to reach the room.
 
-`squad codex-reentry --help` lists the flags: `--persona`, `--codex <bin>`,
+`squad agent codex --help` lists the flags: `--persona`, `--codex <bin>`,
 `--prompt`, `--ttl-minutes`, `--max-attempts`,
 `--no-resume`. It uses `codex exec resume --last` when the local binary
 advertises that subcommand (probed, not assumed) and a fresh `codex exec`
