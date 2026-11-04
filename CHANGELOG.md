@@ -4,12 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## 0.19.31
+## 0.19.32
 
 - `squad agent claude` (#236, part of): Claude adapter for the re-entry
   supervisor, driving `claude -p` / `--resume` through
   `src/claude-reentry-driver.ts`. Live verification against a real `claude`
   run (`session_id` / `is_error` field names) is still outstanding.
+
+## 0.19.31
+
 - `squad agent opencode` (#238, part of): registers an opencode `AgentAdapter`
   (run argv, exit-code turn end, fail-closed on a missing binary). No wake
   handle or resume until a session id source is verified on a live host;
