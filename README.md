@@ -268,9 +268,19 @@ For a configuration field intentionally taken over by the user, back up the loca
 receipt and remove that field's entry from its `fragments` ownership record;
 custom launchers must relinquish both `command` and `args`. The installer then
 preserves it as external configuration. Do not delete receipts indiscriminately:
-they are the evidence used for safe removal. Legacy installations lacking hashes
-can adopt exact matching artifacts; unknown old prompts or modified blocks are
-preserved for review. Existing unmanaged Codex config is never rewritten; update
+they are the evidence used for safe removal. Unknown old prompts or modified
+blocks are preserved for review.
+
+Upgrading from a receipt-less install (v0.1.0 predates ownership receipts): the
+installer ships `scripts/legacy-hashes.json`, the sha256 of the skill, the
+`/squad:*` command files and the CLAUDE.md/AGENTS.md block as released in v0.1.0
+and v0.2.0, the only tagged releases (later untagged versions are not covered).
+A byte-identical match is adopted and updated normally, and a v0.1.0-form
+`.mcp.json` entry (`node <this checkout's dist/index.js>`) is migrated to the
+launcher, keeping its `SQUAD_PERSONA`. Anything that differs by even one byte,
+or an `.mcp.json` entry naming another runtime, is preserved and reported as a
+conflict: back it up, remove it, and rerun the installer (set
+`SQUAD_CLAUDE_PERSONA` to keep a persona pin you removed). Existing unmanaged Codex config is never rewritten; update
 its source path manually if moving the checkout.
 
 Development uses the same checkout-backed installation: edit the canonical

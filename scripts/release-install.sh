@@ -32,6 +32,11 @@ tarball="$(ls "$work"/*.tgz)"
 
 mkdir -p "$ROOT" "$BIN_DIR" "$stage"
 tar -xzf "$tarball" -C "$stage" --strip-components=1
+# A release dir has no .git; record the source commit so the installer can
+# write it to install-metadata.json. Omit the file if HEAD can't be resolved.
+if commit="$(git -C "$CLONE" rev-parse --short HEAD 2>/dev/null)" && [ -n "$commit" ]; then
+  printf '%s\n' "$commit" >"$stage/COMMIT"
+fi
 cp "$CLONE/pnpm-lock.yaml" "$stage/"
 (cd "$stage" && CI=true pnpm install --prod --frozen-lockfile)
 
@@ -40,7 +45,7 @@ cp "$CLONE/pnpm-lock.yaml" "$stage/"
 if [ -d "$ROOT/$VERSION" ]; then mv "$ROOT/$VERSION" "$ROOT/.old-$VERSION-$$"; fi
 mv "$stage" "$ROOT/$VERSION"
 rm -rf -- "$ROOT/.old-$VERSION-$$"
-chmod +x "$ROOT/$VERSION/dist/index.js"
+chmod +x "$ROOT/$VERSION/dist/index.js" "$ROOT/$VERSION/install.sh" "$ROOT/$VERSION/uninstall.sh"
 ln -sfn "$VERSION" "$ROOT/.current.$$"
 swap_link "$ROOT/.current.$$" "$ROOT/current"
 ln -sfn "$ROOT/current/dist/index.js" "$BIN_DIR/.squad.$$"

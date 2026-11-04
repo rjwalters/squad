@@ -235,6 +235,77 @@ test("legacy matching artifacts migrate; unknown stale global prompts are not si
     2,
   );
 });
+const v1 = (name) =>
+  readFileSync(new URL(`./fixtures/v0.1.0/${name}`, import.meta.url), "utf8");
+function seedV010(f, persona = "old-pin") {
+  const put = (rel, text) => {
+    mkdirSync(join(f.repo, rel, ".."), { recursive: true });
+    writeFileSync(join(f.repo, rel), text);
+  };
+  put(".claude/skills/squad/SKILL.md", v1("SKILL.md"));
+  for (const n of ["join", "goals", "clear"])
+    put(`.claude/commands/squad/${n}.md`, v1(`${n}.md`));
+  put("CLAUDE.md", `# mine\n\n${v1("block.txt")}\n`);
+  put("AGENTS.md", `${v1("block.txt")}\n`);
+  put(
+    ".mcp.json",
+    JSON.stringify({
+      mcpServers: {
+        other: { command: "x" },
+        squad: {
+          command: "node",
+          args: [resolve("dist/index.js")],
+          env: { SQUAD_PERSONA: persona, SQUAD_DIR: join(f.repo, ".squad") },
+        },
+      },
+    }),
+  );
+}
+test("a receipt-less v0.1.0 install is adopted without conflict, keeping the persona pin", () => {
+  const f = fixture("v010");
+  seedV010(f);
+  f.run();
+  const mcp = JSON.parse(readFileSync(join(f.repo, ".mcp.json")));
+  assert.deepEqual(mcp.mcpServers.squad.args, [".claude/hooks/squad-mcp.mjs"]);
+  assert.equal(mcp.mcpServers.squad.env.SQUAD_PERSONA, "old-pin");
+  assert.equal(mcp.mcpServers.other.command, "x");
+  assert.equal(
+    readFileSync(join(f.repo, ".claude/skills/squad/SKILL.md"), "utf8"),
+    readFileSync("skills/squad/SKILL.md", "utf8"),
+  );
+  assert.ok(!readFileSync(join(f.repo, "CLAUDE.md"), "utf8").includes("Join commands: `/squad:join` (Claude) or `/squad-join` (Codex) — then hold\nthe loop"));
+  assert.ok(readFileSync(join(f.repo, "CLAUDE.md"), "utf8").startsWith("# mine"));
+  f.run("install.sh", ["--check"]);
+  f.run("uninstall.sh");
+  assert.ok(!existsSync(join(f.repo, ".claude/commands/squad/join.md")));
+  assert.ok(!existsSync(join(f.repo, ".claude/skills/squad/SKILL.md")));
+  assert.ok(!readFileSync(join(f.repo, "CLAUDE.md"), "utf8").includes("BEGIN SQUAD"));
+});
+test("a one-byte edit to a v0.1.0 file or block is still a conflict and is left untouched", () => {
+  for (const target of [".claude/commands/squad/goals.md", "CLAUDE.md"]) {
+    const f = fixture(`v010-edit-${target.replace(/\W/g, "")}`);
+    seedV010(f);
+    const path = join(f.repo, target);
+    const edited = readFileSync(path, "utf8").replace(/squad/i, "Squad!");
+    writeFileSync(path, edited);
+    const out = f.run("install.sh", [], 1);
+    assert.ok(out.includes(path), out);
+    assert.equal(readFileSync(path, "utf8"), edited);
+  }
+});
+test("a v0.1.0-form .mcp.json entry pointing at another runtime is preserved and explained", () => {
+  const f = fixture("v010-foreign");
+  seedV010(f);
+  const path = join(f.repo, ".mcp.json");
+  const cfg = JSON.parse(readFileSync(path));
+  cfg.mcpServers.squad.args = ["/elsewhere/dist/index.js"];
+  writeFileSync(path, JSON.stringify(cfg));
+  const out = f.run("install.sh", [], 0);
+  assert.deepEqual(JSON.parse(readFileSync(path)).mcpServers.squad.args, [
+    "/elsewhere/dist/index.js",
+  ]);
+  assert.match(out, /preserved external launcher/);
+});
 test("customized hook entries retain the script they still invoke", () => {
   const f = fixture("custom-hook");
   f.env.SQUAD_CLAUDE_PERSONA = "hook-worker";
@@ -562,6 +633,32 @@ test("pre-launcher installations migrate to the in-repo launcher", () => {
   assert.deepEqual(after.args, [".claude/hooks/squad-mcp.mjs"]);
   assert.equal(after.env.SQUAD_RUNTIME, runtime);
   f.run("install.sh", ["--check"]);
+});
+
+test("install records COMMIT from a release dir without .git, else unknown", () => {
+  const record = (name, commitFile) => {
+    const home = join(scratch, name);
+    const source = join(home, "squad");
+    const repo = join(home, "consumer");
+    mkdirSync(source, { recursive: true });
+    mkdirSync(repo, { recursive: true });
+    for (const path of ["scripts", "skills", "commands", "codex", "opencode", "hooks", "dist", "VERSION", "install.sh", "uninstall.sh"])
+      cpSync(resolve(path), join(source, path), { recursive: true });
+    symlinkSync(realpathSync("node_modules"), join(source, "node_modules"));
+    if (commitFile !== undefined) writeFileSync(join(source, "COMMIT"), commitFile);
+    const env = { ...process.env, HOME: home, SQUAD_HEAL_ROOT: home };
+    const result = spawnSync("bash", [join(source, "install.sh"), "-y", "--no-link", "--no-codex", repo], {
+      cwd: scratch, env, encoding: "utf8",
+    });
+    assert.equal(result.status, 0, result.stdout + result.stderr);
+    return [".claude", ".agents"].map(
+      (r) => JSON.parse(readFileSync(join(repo, r, "skills/squad/install-metadata.json"))).commit,
+    );
+  };
+  assert.deepEqual(record("commit-file", "abc1234\n"), ["abc1234", "abc1234"]);
+  // Empty/whitespace COMMIT falls through; scratch is not in a git repo.
+  assert.deepEqual(record("commit-blank", "  \n"), ["unknown", "unknown"]);
+  assert.deepEqual(record("commit-none"), ["unknown", "unknown"]);
 });
 
 test("a session in a linked worktree spawns the server and joins the primary clone's room", async () => {

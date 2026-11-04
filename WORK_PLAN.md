@@ -25,19 +25,22 @@ _None._
 
 Human-approved issues ready for implementation (`loom:issue`).
 
-_None._
+- **#248**: Installer cannot adopt a receipt-less v0.1.0 install even when files are byte-identical to that release
+- **#249**: Release installs record commit "unknown" in install-metadata.json
 
 ## In Progress
 
 Issues currently being built (`loom:building`).
 
-_None._
+- **#234**: feat: squad agent <runtime> supervisor entry point with Codex adapter
+- **#247**: release-install.sh: packed release's install.sh loses its exec bit, so the printed install command fails
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#244**: feat: add AgentAdapter seam and squad agent <runtime> with Codex adapter
+- **#250**: fix: chmod install.sh and uninstall.sh in release-install
 
 ## Approved (Awaiting Merge)
 
@@ -50,6 +53,10 @@ _None._
 Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
+- **#234**: feat: squad agent <runtime> supervisor entry point with Codex adapter *(curated)*
+- **#247**: release-install.sh: packed release's install.sh loses its exec bit, so the printed install command fails *(curated)*
+- **#248**: Installer cannot adopt a receipt-less v0.1.0 install even when files are byte-identical to that release *(curated)*
+- **#249**: Release installs record commit "unknown" in install-metadata.json *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -67,11 +74,11 @@ Issues carrying `loom:curated`.
 | Operator merge-risk holds | 0 |
 | Very important | 0 |
 | Important | 0 |
-| Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 0 |
-| PRs awaiting review | 0 |
+| Ready (`loom:issue`) | 2 |
+| In Progress (`loom:building`) | 2 |
+| PRs awaiting review | 2 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 1 |
+| Curated | 5 |
 | Architect / Hermit proposals | 2 |
 | Active epics | 1 |
 <!-- guide:plan-body:end -->
