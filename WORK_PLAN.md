@@ -50,17 +50,14 @@ _None._
 Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
-- **#236**: feat: squad agent claude adapter for headless claude -p / --resume *(curated)*
-- **#238**: feat: squad agent opencode adapter *(curated)*
 
 ## Proposed (Architect / Hermit)
 
-- **#128**: Remove dead find_repo_root/REPO_ROOT from loom-attach.sh and loom-send.sh *(hermit)*
-- **#193**: Split src/core.ts (3.8k lines, one 2.8k-line Squad class) into domain modules *(hermit)*
+_None._
 
 ## Epics
 
-- **#55**: Epic: research rooms need a merge point — 'banked' as integration, a steward role, node-level review, cards as state (lessons from the Erdős-85 room)
+_None._
 
 ## Backlog Balance
 
@@ -73,7 +70,7 @@ Issues carrying `loom:curated`.
 | In Progress (`loom:building`) | 0 |
 | PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 0 |
-| Curated | 3 |
-| Architect / Hermit proposals | 2 |
-| Active epics | 1 |
+| Curated | 1 |
+| Architect / Hermit proposals | 0 |
+| Active epics | 0 |
 <!-- guide:plan-body:end -->

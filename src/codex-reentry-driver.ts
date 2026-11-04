@@ -23,7 +23,6 @@ import {
   buildCodexArgs,
   resumePrompt,
   type RolloutOutcome,
-  type SuperviseSummary,
 } from "./codex-reentry.js";
 import { parseAgentArgs } from "./agent-args.js";
 import { codexSessionFromRollout, upsertWakeHandle } from "./wake-handles.js";
@@ -120,7 +119,7 @@ export function classifyRunFromLogs(startedAtMs: number): RolloutOutcome {
  *     present even after `--no-codex`), `NATIVE_JOIN_PROMPT`;
  *  3. the literal `/squad-join` (harmless if unexpanded: the persona still
  *     gets told what to do by AGENTS.md's squad block).
- * An explicit `--prompt` bypasses this entirely (see `runCodexReentry`).
+ * An explicit `--prompt` bypasses this entirely (see `runAgent` in agent.ts).
  */
 export function joinPromptText(repoRoot: string | null = findRepoRoot(process.cwd())): string {
   const candidates = [
@@ -213,12 +212,3 @@ export const codexAdapter: AgentAdapter = {
   detectTurnEnd: async (startedAtMs) => classifyRunFromLogs(startedAtMs),
   recordWakeHandle: recordCodexWakeHandle,
 };
-
-/**
- * `squad codex-reentry` — alias for `squad agent codex`. Kept as a thin
- * wrapper so existing callers and tests keep their import.
- */
-export async function runCodexReentry(rest: string[]): Promise<SuperviseSummary> {
-  const { runAgent } = await import("./agent.js");
-  return runAgent("codex", rest);
-}

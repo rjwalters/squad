@@ -4,6 +4,12 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-04
 
+- **PR #264**: refactor: extract review-request domain from core.ts into reviews.ts
+- **PR #263**: refactor: share one agent arg parser across codex, opencode and claude adapters
+- **Issue #261** (closed): Dedupe agent adapter arg parsers: opencode copies the Codex parser
+- **Issue #238** (closed): feat: squad agent opencode adapter
+- **Issue #236** (closed): feat: squad agent claude adapter for headless claude -p / --resume
+- **Issue #193** (closed): Extract the reviews domain from src/core.ts into its own module
 - **PR #259**: feat: add Claude adapter for squad agent claude
 - **PR #258**: feat: add opencode adapter behind squad agent
 - **Issue #55** (closed): Epic: research rooms need a merge point — 'banked' as integration, a steward role, node-level review, cards as state (lessons from the Erdős-85 room)
