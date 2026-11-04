@@ -10,6 +10,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   supervisor, driving `claude -p` / `--resume` through
   `src/claude-reentry-driver.ts`. Live verification against a real `claude`
   run (`session_id` / `is_error` field names) is still outstanding.
+- `squad agent opencode` (#238, part of): registers an opencode `AgentAdapter`
+  (run argv, exit-code turn end, fail-closed on a missing binary). No wake
+  handle or resume until a session id source is verified on a live host;
+  `docs/supervisor.md` says so.
 
 ## 0.19.30
 

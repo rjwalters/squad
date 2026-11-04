@@ -73,9 +73,18 @@ host with credentials.
   id to continue`). `-c, --continue` resumes the *last* session, which is
   ambiguous with several personas, so the waker does not use it. Not exercised
   against a live session. Turn end signal: process exit of `opencode run`.
-  Session id source: still unknown; the adapter child (#238) must find how to
-  read it (CLI output or its session store) and must not record a handle it
-  cannot read (same rule as Claude/Codex).
+- Adapter (`src/opencode-agent.ts`, #238): `squad agent opencode` launches
+  `opencode run [extra...] "<prompt>"`. **All of this is unverified (live):** no
+  host with opencode installed (and credentials) was available when the adapter
+  was written, so neither the fresh-launch argv nor the resume argv has been run
+  against a real session. Verify and replace this note with the version and date
+  when a host has opencode.
+- Session id source: **still unknown, left unverified** (CLI output vs. its
+  session store was not inspected, for the reason above). Consequently the
+  adapter records no wake handle (never a guess) and reports `supportsResume`
+  false, so each supervised re-entry is a fresh `opencode run`. Once a source is
+  verified, add `recordWakeHandle` and enable resume
+  (`buildOpencodeArgs({mode:"resume", sessionId})` already builds the argv).
 - Wake-handle shape: same row, `runtime:"opencode"`, `session_ref` the opencode
   session id. `resolveWakeCommand` returns
   `["opencode","run","--session",ref,prompt]`. The `wake_handles.runtime` CHECK

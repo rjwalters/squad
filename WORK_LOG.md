@@ -4,6 +4,10 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-04
 
+- **PR #256**: test: cover missing-binary 'not woken' line and backoff failure in runAgent
+- **PR #244**: feat: add AgentAdapter seam and squad agent <runtime> with Codex adapter
+- **Issue #245** (closed): Add automated test for 'not woken: <persona> -- <bin> not found' room line
+- **Issue #234** (closed): feat: squad agent <runtime> supervisor entry point with Codex adapter
 - **PR #254**: fix: record release commit via COMMIT file instead of unknown
 - **PR #252**: fix: adopt receipt-less v0.1.0 installs by historical artifact hash
 - **Issue #249** (closed): Release installs record commit "unknown" in install-metadata.json
