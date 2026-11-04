@@ -13,7 +13,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { envMinutes, findRepoRoot, openDb } from "./db.js";
+import { findRepoRoot, openDb } from "./db.js";
 import type { AgentAdapter } from "./agent.js";
 import {
   FALLBACK_JOIN_PROMPT,
@@ -25,10 +25,7 @@ import {
   type RolloutOutcome,
   type SuperviseSummary,
 } from "./codex-reentry.js";
-import {
-  DEFAULT_REENTRY_MAX_ATTEMPTS,
-  DEFAULT_REENTRY_TTL_MINUTES,
-} from "./reentry.js";
+import { parseAgentArgs } from "./agent-args.js";
 import { codexSessionFromRollout, upsertWakeHandle } from "./wake-handles.js";
 
 export const CODEX_REENTRY_USAGE =
@@ -193,72 +190,13 @@ export interface CodexReentryOptions {
   minRunIntervalMs?: number;
 }
 
-/**
- * `envMinutes`'s parsing rule (non-negative finite number, else the
- * fallback) for a var that counts things rather than minutes — same
- * leniency, honest name.
- */
-function envCount(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-
 export function parseCodexReentryArgs(rest: string[]): CodexReentryOptions {
-  const opts: CodexReentryOptions = {
-    persona: process.env.SQUAD_PERSONA || "codex",
-    bin: process.env.SQUAD_CODEX_BIN || "codex",
-    ttlMinutes: envMinutes("SQUAD_REENTRY_TTL_MINUTES", DEFAULT_REENTRY_TTL_MINUTES),
-    maxAttempts: envCount("SQUAD_REENTRY_MAX_ATTEMPTS", DEFAULT_REENTRY_MAX_ATTEMPTS),
-    allowResume: true,
-    extraArgs: [],
-  };
-  for (let i = 0; i < rest.length; i++) {
-    const flag = rest[i];
-    if (flag === "--") {
-      opts.extraArgs = rest.slice(i + 1);
-      break;
-    }
-    const needsValue = (): string => {
-      const value = rest[++i];
-      if (value === undefined) throw new Error(`${CODEX_REENTRY_USAGE} (${flag} needs a value)`);
-      return value;
-    };
-    switch (flag) {
-      case "--persona":
-        opts.persona = needsValue();
-        break;
-      case "--codex":
-        opts.bin = needsValue();
-        break;
-      case "--prompt":
-        opts.prompt = needsValue();
-        break;
-      case "--ttl-minutes": {
-        const n = Number(needsValue());
-        if (!Number.isFinite(n) || n < 0) {
-          throw new Error(`${CODEX_REENTRY_USAGE} (--ttl-minutes needs a non-negative number)`);
-        }
-        opts.ttlMinutes = n;
-        break;
-      }
-      case "--max-attempts": {
-        const n = Number(needsValue());
-        if (!Number.isFinite(n) || n < 0) {
-          throw new Error(`${CODEX_REENTRY_USAGE} (--max-attempts needs a non-negative number)`);
-        }
-        opts.maxAttempts = n;
-        break;
-      }
-      case "--no-resume":
-        opts.allowResume = false;
-        break;
-      default:
-        throw new Error(`${CODEX_REENTRY_USAGE} (unrecognized flag '${flag ?? ""}')`);
-    }
-  }
-  return opts;
+  return parseAgentArgs(rest, {
+    runtime: "codex",
+    binEnv: "SQUAD_CODEX_BIN",
+    binFlag: "--codex",
+    usage: CODEX_REENTRY_USAGE,
+  });
 }
 
 /** The Codex adapter: the existing helpers behind the `AgentAdapter` seam, no logic change. */

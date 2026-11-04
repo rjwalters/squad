@@ -12,10 +12,10 @@
  * are exported and unit tested.
  */
 import { spawn } from "node:child_process";
-import { envMinutes, openDb } from "./db.js";
+import { openDb } from "./db.js";
 import type { AgentAdapter, AgentOptions } from "./agent.js";
 import { FALLBACK_JOIN_PROMPT, resumePrompt, type RolloutOutcome } from "./codex-reentry.js";
-import { DEFAULT_REENTRY_MAX_ATTEMPTS, DEFAULT_REENTRY_TTL_MINUTES } from "./reentry.js";
+import { parseAgentArgs } from "./agent-args.js";
 import { upsertWakeHandle } from "./wake-handles.js";
 
 export const CLAUDE_REENTRY_USAGE =
@@ -86,64 +86,13 @@ export function buildClaudeArgs(opts: {
   return opts.mode === "resume" && opts.sessionId ? ["--resume", opts.sessionId, ...tail] : tail;
 }
 
-function envCount(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (!raw) return fallback;
-  const n = Number(raw);
-  return Number.isFinite(n) && n >= 0 ? n : fallback;
-}
-
 export function parseClaudeArgs(rest: string[]): AgentOptions {
-  const opts: AgentOptions = {
-    persona: process.env.SQUAD_PERSONA || "claude",
-    bin: process.env.SQUAD_CLAUDE_BIN || "claude",
-    ttlMinutes: envMinutes("SQUAD_REENTRY_TTL_MINUTES", DEFAULT_REENTRY_TTL_MINUTES),
-    maxAttempts: envCount("SQUAD_REENTRY_MAX_ATTEMPTS", DEFAULT_REENTRY_MAX_ATTEMPTS),
-    allowResume: true,
-    extraArgs: [],
-  };
-  for (let i = 0; i < rest.length; i++) {
-    const flag = rest[i];
-    if (flag === "--") {
-      opts.extraArgs = rest.slice(i + 1);
-      break;
-    }
-    const needsValue = (): string => {
-      const value = rest[++i];
-      if (value === undefined) throw new Error(`${CLAUDE_REENTRY_USAGE} (${flag} needs a value)`);
-      return value;
-    };
-    const number = (): number => {
-      const n = Number(needsValue());
-      if (!Number.isFinite(n) || n < 0) {
-        throw new Error(`${CLAUDE_REENTRY_USAGE} (${flag} needs a non-negative number)`);
-      }
-      return n;
-    };
-    switch (flag) {
-      case "--persona":
-        opts.persona = needsValue();
-        break;
-      case "--claude":
-        opts.bin = needsValue();
-        break;
-      case "--prompt":
-        opts.prompt = needsValue();
-        break;
-      case "--ttl-minutes":
-        opts.ttlMinutes = number();
-        break;
-      case "--max-attempts":
-        opts.maxAttempts = number();
-        break;
-      case "--no-resume":
-        opts.allowResume = false;
-        break;
-      default:
-        throw new Error(`${CLAUDE_REENTRY_USAGE} (unrecognized flag '${flag ?? ""}')`);
-    }
-  }
-  return opts;
+  return parseAgentArgs(rest, {
+    runtime: "claude",
+    binEnv: "SQUAD_CLAUDE_BIN",
+    binFlag: "--claude",
+    usage: CLAUDE_REENTRY_USAGE,
+  });
 }
 
 // One supervisor drives one run at a time per process, so the adapter keeps

@@ -11,10 +11,9 @@
  * source is confirmed on a live host, this adapter records none.
  */
 import { spawn } from "node:child_process";
-import { envMinutes } from "./db.js";
+import { parseAgentArgs } from "./agent-args.js";
 import type { AgentAdapter, AgentOptions } from "./agent.js";
 import { resumePrompt, type RolloutOutcome } from "./codex-reentry.js";
-import { DEFAULT_REENTRY_MAX_ATTEMPTS, DEFAULT_REENTRY_TTL_MINUTES } from "./reentry.js";
 
 export const OPENCODE_AGENT_USAGE =
   "usage: squad agent opencode [--persona <name>] [--opencode <bin>] [--prompt <text>]\n" +
@@ -43,60 +42,12 @@ export function buildOpencodeArgs(opts: {
 }
 
 export function parseOpencodeAgentArgs(rest: string[]): AgentOptions {
-  const countEnv = (name: string, fallback: number): number => {
-    const n = Number(process.env[name]);
-    return process.env[name] && Number.isFinite(n) && n >= 0 ? n : fallback;
-  };
-  const opts: AgentOptions = {
-    persona: process.env.SQUAD_PERSONA || "opencode",
-    bin: process.env.SQUAD_OPENCODE_BIN || "opencode",
-    ttlMinutes: envMinutes("SQUAD_REENTRY_TTL_MINUTES", DEFAULT_REENTRY_TTL_MINUTES),
-    maxAttempts: countEnv("SQUAD_REENTRY_MAX_ATTEMPTS", DEFAULT_REENTRY_MAX_ATTEMPTS),
-    allowResume: true,
-    extraArgs: [],
-  };
-  for (let i = 0; i < rest.length; i++) {
-    const flag = rest[i];
-    if (flag === "--") {
-      opts.extraArgs = rest.slice(i + 1);
-      break;
-    }
-    const needsValue = (): string => {
-      const value = rest[++i];
-      if (value === undefined) throw new Error(`${OPENCODE_AGENT_USAGE} (${flag} needs a value)`);
-      return value;
-    };
-    const needsCount = (): number => {
-      const n = Number(needsValue());
-      if (!Number.isFinite(n) || n < 0) {
-        throw new Error(`${OPENCODE_AGENT_USAGE} (${flag} needs a non-negative number)`);
-      }
-      return n;
-    };
-    switch (flag) {
-      case "--persona":
-        opts.persona = needsValue();
-        break;
-      case "--opencode":
-        opts.bin = needsValue();
-        break;
-      case "--prompt":
-        opts.prompt = needsValue();
-        break;
-      case "--ttl-minutes":
-        opts.ttlMinutes = needsCount();
-        break;
-      case "--max-attempts":
-        opts.maxAttempts = needsCount();
-        break;
-      case "--no-resume":
-        opts.allowResume = false;
-        break;
-      default:
-        throw new Error(`${OPENCODE_AGENT_USAGE} (unrecognized flag '${flag ?? ""}')`);
-    }
-  }
-  return opts;
+  return parseAgentArgs(rest, {
+    runtime: "opencode",
+    binEnv: "SQUAD_OPENCODE_BIN",
+    binFlag: "--opencode",
+    usage: OPENCODE_AGENT_USAGE,
+  });
 }
 
 function runOpencodeProcess(
