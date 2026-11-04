@@ -40,7 +40,7 @@ cp "$CLONE/pnpm-lock.yaml" "$stage/"
 if [ -d "$ROOT/$VERSION" ]; then mv "$ROOT/$VERSION" "$ROOT/.old-$VERSION-$$"; fi
 mv "$stage" "$ROOT/$VERSION"
 rm -rf -- "$ROOT/.old-$VERSION-$$"
-chmod +x "$ROOT/$VERSION/dist/index.js"
+chmod +x "$ROOT/$VERSION/dist/index.js" "$ROOT/$VERSION/install.sh" "$ROOT/$VERSION/uninstall.sh"
 ln -sfn "$VERSION" "$ROOT/.current.$$"
 swap_link "$ROOT/.current.$$" "$ROOT/current"
 ln -sfn "$ROOT/current/dist/index.js" "$BIN_DIR/.squad.$$"
