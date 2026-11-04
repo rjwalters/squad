@@ -6,6 +6,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+## 0.19.33
+
 - `squad codex-reentry` (#239): prints a one-line deprecation note to stderr
   pointing at `squad agent codex`; stdout, flags and exit codes unchanged.
   `squad doctor` now reports, per `squad agent` adapter, whether the runtime
