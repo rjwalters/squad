@@ -505,7 +505,23 @@ checkout's `dist/`); `./install.sh --no-waker` or uninstall removes it. `squad
 doctor` then reports whether the unit is installed and running, the last poll
 time, and each persona's wake handle (usable / missing / other-host / opted-out).
 
-### Re-entry for Codex: `squad codex-reentry`
+### Re-entry for Codex, Claude and opencode: `squad agent <runtime>`
+
+`squad agent <runtime>` (`codex`, `claude`, `opencode`) is the entry point for
+the foreground re-entry supervisor described below; `squad agent <runtime>
+--help` lists that runtime's flags. `squad doctor` reports, per adapter, whether
+the runtime binary is found and whether a re-entry state file exists. A binary
+being present is not live verification: the claude and opencode adapters are
+still awaiting live-host checks (#265).
+
+**Migrating**: `squad codex-reentry` still works, with unchanged flags, stdout
+and exit codes, and now prints a one-line deprecation note to stderr; use
+`squad agent codex` instead. The Claude Stop hook (`./install.sh --reentry`)
+and the waker (`./install.sh --waker`) are unchanged and not deprecated.
+
+The rest of this section uses the Codex supervisor as the worked example.
+
+### The Codex supervisor: `squad agent codex`
 
 Codex has **no end-of-turn hook** to mirror the `Stop` hook above with — its
 only hook event is `pre_tool_use`, and there is no `codex hooks` subcommand at
@@ -522,9 +538,9 @@ the terminal where you would otherwise have run `codex` and typed
 `/squad-join`:
 
 ```bash
-squad codex-reentry                      # instead of: codex → /squad-join
-squad codex-reentry --persona codex-2    # a second worker (see /squad:fanout)
-squad codex-reentry -- --model o3        # everything after -- goes to `codex exec`
+squad agent codex                      # instead of: codex → /squad-join
+squad agent codex --persona codex-2    # a second worker (see /squad:fanout)
+squad agent codex -- --model o3        # everything after -- goes to `codex exec`
 ```
 
 Each time the turn ends, the supervisor reads back *how* it ended from the
@@ -580,7 +596,7 @@ cd ~/projects/my-lean-proof
 terminal 1:  claude  →  /squad:goals prove lemma exp_bound; prove lemma sum_split; main theorem
              then    →  /squad:join
 terminal 2:  codex   →  $squad Join the room and work on the shared goals
-             or      →  squad codex-reentry   # same thing, but it re-enters itself
+             or      →  squad agent codex     # same thing, but it re-enters itself
 terminal 3:  squad tail                    # watch the room live
              squad who                     # find the actual joined names
              squad send "@<joined-name> take exp_bound"
