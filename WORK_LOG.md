@@ -4,6 +4,10 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-04
 
+- **PR #269**: refactor: remove unused runCodexReentry wrapper
+- **PR #267**: feat: deprecate codex-reentry on stderr and report agent adapters in doctor
+- **Issue #268** (closed): Remove dead runCodexReentry wrapper in codex-reentry-driver.ts
+- **Issue #239** (closed): docs: migration, deprecation note and doctor reporting for squad agent
 - **PR #264**: refactor: extract review-request domain from core.ts into reviews.ts
 - **PR #263**: refactor: share one agent arg parser across codex, opencode and claude adapters
 - **Issue #261** (closed): Dedupe agent adapter arg parsers: opencode copies the Codex parser
