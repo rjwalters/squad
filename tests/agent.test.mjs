@@ -160,3 +160,45 @@ test("opencode missing binary: 'not woken' lands in the room and the run counts 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("codex-reentry prints a deprecation note on stderr only; agent codex does not", () => {
+  const legacy = run(["codex-reentry", "--help"]);
+  const modern = run(["agent", "codex", "--help"]);
+  assert.equal(legacy.status, 0);
+  assert.match(legacy.stderr, /deprecated.*squad agent codex/);
+  assert.equal(legacy.stdout, modern.stdout);
+  assert.doesNotMatch(modern.stderr, /deprecated/);
+});
+
+test("inspectAgentAdapters reports binary and re-entry state per registered runtime", async () => {
+  const { mkdirSync, writeFileSync } = await import("node:fs");
+  const { inspectAgentAdapters, formatAgentAdapterLines, binResolves } = await import("../dist/agent-doctor.js");
+  const dir = mkdtempSync(join(tmpdir(), "squad-agent-doctor-"));
+  try {
+    const none = inspectAgentAdapters(dir, "/nonexistent-path");
+    assert.deepEqual(none.map((a) => a.runtime), registeredRuntimes());
+    assert.ok(none.every((a) => !a.binFound && !a.stateExists));
+    mkdirSync(join(dir, "reentry"), { recursive: true });
+    writeFileSync(join(dir, "reentry", "codex.json"), "{}");
+    const some = inspectAgentAdapters(dir, "/nonexistent-path");
+    assert.equal(some.find((a) => a.runtime === "codex").stateExists, true);
+    assert.match(formatAgentAdapterLines(some).join("\n"), /codex: binary 'codex' not found; re-entry state .* present/);
+    assert.equal(binResolves("node", dirname(process.execPath)), true);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("squad doctor lists agent adapters without failing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "squad-doctor-agents-"));
+  try {
+    const res = spawnSync(process.execPath, [entry, "doctor"], {
+      encoding: "utf8", cwd: root, env: { ...process.env, SQUAD_DIR: dir },
+    });
+    assert.equal(res.status, 0, res.stdout + res.stderr);
+    assert.match(res.stdout, /agent adapters/);
+    for (const r of ["codex", "claude", "opencode"]) assert.match(res.stdout, new RegExp(`  ${r}: binary`));
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

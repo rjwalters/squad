@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+- `squad codex-reentry` (#239): prints a one-line deprecation note to stderr
+  pointing at `squad agent codex`; stdout, flags and exit codes unchanged.
+  `squad doctor` now reports, per `squad agent` adapter, whether the runtime
+  binary is found and whether a re-entry state file exists (informational,
+  never fails doctor; not a live-verification claim). README re-entry section
+  leads with `squad agent <runtime>` and a migration note.
+
 ## 0.19.32
 
 - `squad agent claude` (#236, part of): Claude adapter for the re-entry

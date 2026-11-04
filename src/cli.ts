@@ -483,6 +483,17 @@ async function runDoctor(): Promise<void> {
     console.log("\nall checks passed.");
   }
   await reportWaker();
+  await reportAgentAdapters();
+}
+
+/** Per-adapter binary and re-entry state (#239); informational, never fails doctor. */
+async function reportAgentAdapters(): Promise<void> {
+  try {
+    const { inspectAgentAdapters, formatAgentAdapterLines } = await import("./agent-doctor.js");
+    console.log(`\n${formatAgentAdapterLines(inspectAgentAdapters(squadDir())).join("\n")}`);
+  } catch (err) {
+    console.log(`agent adapters: status unavailable (${err instanceof Error ? err.message : String(err)})`);
+  }
 }
 
 /** Waker unit health and per-persona wake-handle state (#175); informational, never fails doctor. */
@@ -950,6 +961,9 @@ export async function runCli(argv: string[]): Promise<void> {
     // holds the process for hours, so it opens its own connections.
     // `codex-reentry` is an alias for `agent codex`.
     const { runAgent, getAdapter, agentUsage } = await import("./agent.js");
+    if (cmd === "codex-reentry") {
+      console.error("note: `squad codex-reentry` is deprecated; use `squad agent codex`.");
+    }
     let runtime = "codex";
     let args = rest;
     if (cmd === "agent") {
