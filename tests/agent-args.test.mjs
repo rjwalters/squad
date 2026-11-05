@@ -1,4 +1,4 @@
-import { test, beforeEach, afterEach } from "node:test";
+import { test, beforeEach, afterEach, after } from "node:test";
 import assert from "node:assert/strict";
 import { parseAgentArgs, envCount } from "../dist/agent-args.js";
 import { parseOpencodeAgentArgs } from "../dist/opencode-agent.js";
@@ -16,6 +16,7 @@ const ENV_KEYS = [
   "SQUAD_CLAUDE_BIN",
   "SQUAD_CODEX_BIN",
 ];
+const INITIAL = Object.fromEntries(ENV_KEYS.map((k) => [k, process.env[k]]));
 let saved;
 
 beforeEach(() => {
@@ -28,6 +29,10 @@ afterEach(() => {
     if (saved[k] === undefined) delete process.env[k];
     else process.env[k] = saved[k];
   }
+});
+
+after(() => {
+  for (const k of ENV_KEYS) assert.equal(process.env[k], INITIAL[k], `${k} was not restored`);
 });
 
 const SPEC = {
@@ -184,6 +189,12 @@ for (const a of ADAPTERS) {
     process.env[a.binEnv] = "/env/bin";
     assert.equal(a.parse([]).bin, "/env/bin");
     assert.equal(a.parse([a.binFlag, "/flag/bin"]).bin, "/flag/bin");
+  });
+
+  test(`${a.name} wrapper: SQUAD_PERSONA sets the persona, --persona wins`, () => {
+    process.env.SQUAD_PERSONA = "envp";
+    assert.equal(a.parse([]).persona, "envp");
+    assert.equal(a.parse(["--persona", "p"]).persona, "p");
   });
 
   test(`${a.name} wrapper: shared flags and -- passthrough`, () => {
