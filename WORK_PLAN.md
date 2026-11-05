@@ -31,19 +31,19 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#274**: Unit-test the shared squad agent arg parser (parseAgentArgs, envCount)
+- **#276**: agent-args tests: assert persona env precedence per adapter and env restore
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-_None._
+- **#278**: test: cover per-adapter SQUAD_PERSONA precedence and env restoration
 
 ## Approved (Awaiting Merge)
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-- **#275**: test: cover shared agent arg parser and adapter wrappers
+_None._
 
 ## Proposed
 
@@ -68,8 +68,8 @@ _None._
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
 | In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 1 |
+| PRs awaiting review | 1 |
+| Approved PRs awaiting merge | 0 |
 | Curated | 1 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 0 |
