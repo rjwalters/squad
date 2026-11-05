@@ -31,13 +31,13 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-- **#276**: agent-args tests: assert persona env precedence per adapter and env restore
+_None._
 
 ## PRs Awaiting Review
 
 PRs waiting on Judge (`loom:review-requested`).
 
-- **#278**: test: cover per-adapter SQUAD_PERSONA precedence and env restoration
+_None._
 
 ## Approved (Awaiting Merge)
 
@@ -67,8 +67,8 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 1 |
-| PRs awaiting review | 1 |
+| In Progress (`loom:building`) | 0 |
+| PRs awaiting review | 0 |
 | Approved PRs awaiting merge | 0 |
 | Curated | 1 |
 | Architect / Hermit proposals | 0 |
