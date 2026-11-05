@@ -4,6 +4,8 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-04
 
+- **PR #271**: docs: point operator-facing strings at 'squad agent codex'
+- **Issue #270** (closed): Point remaining codex-reentry references at squad agent codex
 - **PR #269**: refactor: remove unused runCodexReentry wrapper
 - **PR #267**: feat: deprecate codex-reentry on stderr and report agent adapters in doctor
 - **Issue #268** (closed): Remove dead runCodexReentry wrapper in codex-reentry-driver.ts
