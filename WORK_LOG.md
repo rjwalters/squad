@@ -4,6 +4,8 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-05
 
+- **PR #278**: test: cover per-adapter SQUAD_PERSONA precedence and env restoration
+- **Issue #276** (closed): agent-args tests: assert persona env precedence per adapter and env restore
 - **PR #275**: test: cover shared agent arg parser and adapter wrappers
 - **Issue #274** (closed): Unit-test the shared squad agent arg parser (parseAgentArgs, envCount)
 
