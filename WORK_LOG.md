@@ -2,6 +2,11 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-05
+
+- **PR #275**: test: cover shared agent arg parser and adapter wrappers
+- **Issue #274** (closed): Unit-test the shared squad agent arg parser (parseAgentArgs, envCount)
+
 ### 2026-11-04
 
 - **PR #271**: docs: point operator-facing strings at 'squad agent codex'
