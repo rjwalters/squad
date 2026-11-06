@@ -2,6 +2,11 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-06
+
+- **PR #285**: docs: mark supervisor design note as implemented and update to shipped state
+- **Issue #283** (closed): Bring docs/supervisor.md up to date with the shipped `squad agent` supervisor
+
 ### 2026-11-05
 
 - **PR #278**: test: cover per-adapter SQUAD_PERSONA precedence and env restoration
