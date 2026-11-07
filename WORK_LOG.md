@@ -2,6 +2,10 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-07
+
+- **PR #288**: Bump Repo Skills 0.25.7 -> 0.25.10
+
 ### 2026-11-06
 
 - **PR #285**: docs: mark supervisor design note as implemented and update to shipped state
