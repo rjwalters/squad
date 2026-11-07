@@ -39,8 +39,12 @@ export function configuredEntries(
     const section = readFileSync(codexPath, "utf8").match(/^\[mcp_servers\.squad\]\s*\n((?:(?!\[).*\n?)*)/m);
     const arg = section?.[1]?.match(/^args\s*=\s*\[\s*"((?:[^"\\]|\\.)*)"/m)?.[1];
     if (arg) {
-      const runtime = JSON.parse(`"${arg}"`) as string;
-      if (isAbsolute(runtime)) entries.push({ source: codexPath, runtime });
+      try {
+        const runtime = JSON.parse(`"${arg}"`) as string;
+        if (isAbsolute(runtime)) entries.push({ source: codexPath, runtime });
+      } catch {
+        /* a TOML escape that is not valid JSON: skip it, like an unparseable .mcp.json */
+      }
     }
   }
   return entries;

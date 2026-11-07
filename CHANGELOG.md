@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.35
+
+- `squad doctor` no longer crashes when the Codex `config.toml` squad `args` path contains a
+  TOML escape that is not valid JSON (e.g. `\x41`); that entry is skipped, matching an
+  unparseable `.mcp.json`. Adds unit tests for `src/mcp-install.ts` (#290).
+
 ## 0.19.34
 
 - Point operator-facing strings (park announcement, README, capabilities, `--help`) at
