@@ -4,6 +4,8 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-07
 
+- **PR #291**: test: unit-cover mcp-install parsing; skip invalid Codex arg escapes
+- **Issue #290** (closed): Unit-test src/mcp-install.ts: Codex config.toml parsing, relative SQUAD_RUNTIME, missing runtime
 - **PR #288**: Bump Repo Skills 0.25.7 -> 0.25.10
 
 ### 2026-11-06
