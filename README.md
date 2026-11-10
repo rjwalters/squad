@@ -41,6 +41,8 @@ its existing global prompts as compatibility entry points. Regenerate checked-in
 aliases with `node scripts/generate-workflow-adapters.mjs`; use `--check` to detect
 stale output. Edit the shared references, never the generated adapters.
 
+**MCP server unavailable?** The `squad-mcp.mjs` launcher prints one stderr line at startup (runtime path, Node version, `SQUAD_DIR`) and a `squad: failed to load MCP runtime <path>: <message>` line if the runtime cannot be imported; run `squad doctor` to check the install. While the server is down the CLI covers every MCP tool (see the matrix below), and the room can be inspected read-only with `sqlite3 "file:.squad/squad.db?mode=ro"` — safe while servers hold it open, since the database is in WAL mode.
+
 See the [CLI/MCP capability matrix and two-agent walkthrough](docs/capabilities.md)
 for every supported operation, intentional interface differences, and verification
 evidence. CI checks generated aliases and tests collaboration through the actual
