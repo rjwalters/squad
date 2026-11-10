@@ -2,6 +2,13 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-10
+
+- **PR #298**: feat: add SQUAD_QUIET to silence send/read advisory stderr
+- **PR #297**: fix: reject flags and extra args in squad claim/release
+- **Issue #294** (closed): squad claim <path> -m "note" stores the note inside the claim path
+- **Issue #293** (closed): squad send prints two advisory lines on every call; add a quiet mode
+
 ### 2026-11-07
 
 - **PR #291**: test: unit-cover mcp-install parsing; skip invalid Codex arg escapes

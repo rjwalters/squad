@@ -31,7 +31,8 @@ _None._
 
 Issues currently being built (`loom:building`).
 
-_None._
+- **#295**: squad review request is not a verb; point users at review open
+- **#296**: Squad MCP server fails to connect in Claude Code while the CLI works
 
 ## PRs Awaiting Review
 
@@ -43,13 +44,16 @@ _None._
 
 PRs that passed review and are queued for Champion auto-merge (`loom:pr`).
 
-_None._
+- **#299**: feat: add MCP launcher startup diagnostic and load-failure message
+- **#300**: feat: accept 'squad review request' as alias of 'review open'
 
 ## Proposed
 
 Issues carrying `loom:curated`.
 
 - **#78**: Research integration: Validate a second research room for one week *(curated)*
+- **#295**: squad review request is not a verb; point users at review open *(curated)*
+- **#296**: Squad MCP server fails to connect in Claude Code while the CLI works *(curated)*
 
 ## Proposed (Architect / Hermit)
 
@@ -67,10 +71,10 @@ _None._
 | Very important | 0 |
 | Important | 0 |
 | Ready (`loom:issue`) | 0 |
-| In Progress (`loom:building`) | 0 |
+| In Progress (`loom:building`) | 2 |
 | PRs awaiting review | 0 |
-| Approved PRs awaiting merge | 0 |
-| Curated | 1 |
+| Approved PRs awaiting merge | 2 |
+| Curated | 3 |
 | Architect / Hermit proposals | 0 |
 | Active epics | 0 |
 <!-- guide:plan-body:end -->
