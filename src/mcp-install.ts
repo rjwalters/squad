@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { mainWorktreeRoot } from "./db.js";
 
 export interface McpInstallEntry {
   /** Where the configured runtime was found, for the report. */
@@ -28,8 +29,17 @@ export function configuredEntries(
   if (existsSync(mcpPath)) {
     try {
       const runtime = JSON.parse(readFileSync(mcpPath, "utf8"))?.mcpServers?.squad?.env?.SQUAD_RUNTIME;
-      if (typeof runtime === "string" && runtime)
-        entries.push({ source: mcpPath, runtime: resolve(dirname(mcpPath), runtime) });
+      if (typeof runtime === "string" && runtime) {
+        // Same order as hooks/squad-mcp.mjs: a relative path was recorded against
+        // the primary clone, so from a linked worktree look there first.
+        const own = resolve(dirname(mcpPath), runtime);
+        const primary = isAbsolute(runtime) ? null : mainWorktreeRoot(dirname(mcpPath));
+        const primaryPath = primary ? resolve(primary, runtime) : null;
+        entries.push({
+          source: mcpPath,
+          runtime: primaryPath && existsSync(primaryPath) ? primaryPath : own,
+        });
+      }
     } catch {
       /* unparseable config is not this check's finding */
     }

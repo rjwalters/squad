@@ -138,4 +138,15 @@ if (room && !isAbsolute(room))
       .map((root) => resolve(root, room))
       .find((path) => existsSync(path)) ?? resolve(primaryRoot, room);
 
-await import(pathToFileURL(runtime).href);
+// One startup line on stderr so a connect failure names its step: the harness
+// only reports "failed to connect". stdout stays untouched (MCP transport).
+console.error(
+  `squad: starting MCP runtime ${runtime} (node ${process.version}, SQUAD_DIR=${process.env.SQUAD_DIR ?? "(unset)"})`,
+);
+try {
+  await import(pathToFileURL(runtime).href);
+} catch (err) {
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`squad: failed to load MCP runtime ${runtime}: ${message}`);
+  process.exit(1);
+}

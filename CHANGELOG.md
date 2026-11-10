@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.38
+
+- The MCP launcher (`hooks/squad-mcp.mjs`) now prints one startup diagnostic line on stderr (runtime
+  path, Node version, resolved `SQUAD_DIR`) and reports a failed runtime import as
+  `squad: failed to load MCP runtime <path>: <message>` with exit 1. `squad doctor` resolves a
+  relative `SQUAD_RUNTIME` primary-clone-first, matching the launcher. README gains an
+  "MCP server unavailable?" fallback note (#296).
+
 ## 0.19.37
 
 - `squad claim` / `squad release` now reject flags and extra arguments instead of joining them

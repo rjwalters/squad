@@ -66,3 +66,27 @@ test("partial: SQUAD_RUNTIME from env, SQUAD_DIR from .mcp.json", () => {
   // The fallback relative SQUAD_DIR is anchored to the repo root, not the cwd.
   assert.match(r.stdout, /^dir=\/.*[\\/]\.squad-room$/m);
 });
+
+test("startup diagnostic goes to stderr, stdout stays the runtime's", () => {
+  const repo = setup({ SQUAD_RUNTIME: "real.mjs" });
+  const r = run(repo, {});
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout, "ran-real\n");
+  assert.match(r.stderr, /squad: starting MCP runtime .*real\.mjs \(node v[\d.]+, SQUAD_DIR=\(unset\)\)/);
+});
+
+test("runtime that throws on import: names the step and exits 1", () => {
+  const repo = setup({ SQUAD_RUNTIME: "real.mjs" });
+  writeFileSync(join(repo, "real.mjs"), `throw new Error("boom");\n`);
+  const r = run(repo, {});
+  assert.equal(r.status, 1);
+  assert.equal(r.stdout, "");
+  assert.match(r.stderr, /squad: failed to load MCP runtime .*real\.mjs: boom/);
+});
+
+test("missing runtime: existing message unchanged", () => {
+  const repo = setup({ SQUAD_RUNTIME: "nope.mjs" });
+  const r = run(repo, {});
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /MCP runtime not found; looked for/);
+});
