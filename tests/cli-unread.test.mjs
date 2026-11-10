@@ -71,3 +71,27 @@ test("a fresh persona's first send does not report the backlog", () => {
     rmSync(repo, { recursive: true, force: true });
   }
 });
+
+test("SQUAD_QUIET silences the unread notice without changing stdout or status", () => {
+  const repo = room();
+  try {
+    assert.equal(squad(["send", "a1"], "alice", repo).status, 0);
+    assert.equal(squad(["send", "b1"], "bob", repo).status, 0);
+    const loud = squad(["send", "a2"], "alice", repo);
+    assert.match(loud.stderr, NOTICE);
+    for (const v of ["1", "yes"]) {
+      const q = squad(["send", "a2"], "alice", repo, { SQUAD_QUIET: v });
+      assert.equal(q.status, 0, q.stderr);
+      assert.doesNotMatch(q.stderr, NOTICE);
+      assert.match(q.stdout, /a2/);
+    }
+    // 0 and empty behave as unset
+    for (const v of ["0", ""]) {
+      assert.match(squad(["send", "a3"], "alice", repo, { SQUAD_QUIET: v }).stderr, NOTICE);
+    }
+    // quiet send peeks nothing: unread still intact for read --unread
+    assert.match(squad(["read", "--unread"], "alice", repo).stdout, /b1/);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
