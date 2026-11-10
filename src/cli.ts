@@ -736,8 +736,15 @@ function guardImplicitHuman(): void {
   );
 }
 
+/** `SQUAD_QUIET` (any non-empty value other than "0") silences the advisory stderr lines in `send`/`read`. */
+function quiet(): boolean {
+  const v = process.env.SQUAD_QUIET;
+  return v !== undefined && v !== "" && v !== "0";
+}
+
 /** Warn once on stderr when this agent harness cannot receive replies in this repo (#204). */
 function warnReplyGap(): void {
+  if (quiet()) return;
   const line = replyGapWarning(AGENT_HARNESS_MARKERS);
   if (line) process.stderr.write(line);
 }
@@ -1283,7 +1290,7 @@ export async function runCli(argv: string[]): Promise<void> {
       console.log(fmt(m));
       // Peek only: the notice must never consume what it announces. stderr
       // keeps stdout pipe-clean.
-      const waiting = squad.check({ peek: true });
+      const waiting = quiet() ? [] : squad.check({ peek: true });
       if (waiting.length)
         process.stderr.write(
           `squad: ${waiting.length} unread message(s) waiting -- run 'squad read --unread'\n`,

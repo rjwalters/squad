@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.19.36
+
+- `SQUAD_QUIET=1` (any non-empty value other than `0`) silences the advisory stderr lines in
+  `squad send` / `squad read`: the unread-message notice and the reply-gap warning. stdout and
+  exit status are unchanged, and `send` skips the unread peek when quiet (#293).
+
 ## 0.19.35
 
 - `squad doctor` no longer crashes when the Codex `config.toml` squad `args` path contains a
