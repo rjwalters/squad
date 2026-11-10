@@ -4,6 +4,10 @@ Merged PRs and closed issues from the last 30 days when this log was initialized
 
 ### 2026-11-10
 
+- **PR #303**: refactor: extract divergence-round domain into src/diverge.ts
+- **PR #299**: feat: add MCP launcher startup diagnostic and load-failure message
+- **Issue #301** (closed): Extract the diverge domain from src/core.ts into its own module
+- **Issue #296** (closed): Squad MCP server fails to connect in Claude Code while the CLI works
 - **PR #298**: feat: add SQUAD_QUIET to silence send/read advisory stderr
 - **PR #297**: fix: reject flags and extra args in squad claim/release
 - **Issue #294** (closed): squad claim <path> -m "note" stores the note inside the claim path
