@@ -25,6 +25,8 @@ import { existsSync } from "node:fs";
 import { dirname } from "node:path";
 import { hostname } from "node:os";
 import { canonicalRoomDir, envMinutes, openExistingRoom, ROOM_TABLES, SCHEMA_VERSION } from "./db.js";
+import * as diverge from "./diverge.js";
+import type { DivergenceRound, DivergenceStatus, DivergenceSubmission } from "./diverge.js";
 import * as reviews from "./reviews.js";
 import type { ReviewPriority, ReviewRequestView, ReviewRow, ReviewStatus } from "./reviews.js";
 import { assertInboundAllowed, assertReplyAllowed, roomLabel } from "./routing.js";
@@ -470,47 +472,7 @@ export {
   type ReviewRequestView,
   type ReviewStatus,
 } from "./reviews.js";
-/**
- * A bounded window where each participant submits independently. Nobody's
- * submission is visible to anyone else (including the submitter checking
- * others') until the round closes — either explicitly via divergeClose or
- * automatically once every persona in expected_participants has submitted.
- */
-export interface DivergenceRound {
-  id: number;
-  /** Optional Science Card this round belongs to. Nullable, no enforced FK. */
-  card_id: number | null;
-  topic: string;
-  opened_by: string;
-  opened_ts: string;
-  /** Personas expected to submit; null means only an explicit close ends the round. */
-  expected_participants: string[] | null;
-  status: "open" | "closed";
-  closed_by: string | null;
-  closed_ts: string | null;
-}
-
-/** One persona's independent entry in a divergence round. */
-export interface DivergenceSubmission {
-  id: number;
-  round_id: number;
-  persona: string;
-  body: string;
-  submitted_ts: string;
-}
-
-/**
- * The caller's view of a round: metadata that is always safe to reveal (who
- * has submitted, never what) plus the caller's own submission. `submissions`
- * is null while the round is open — no one, not even the submitter, can read
- * a full list of bodies before close — and becomes the full list once closed.
- */
-export interface DivergenceStatus {
-  round: DivergenceRound;
-  submitted_personas: string[];
-  mine: DivergenceSubmission | null;
-  submissions: DivergenceSubmission[] | null;
-}
+export type { DivergenceRound, DivergenceStatus, DivergenceSubmission } from "./diverge.js";
 
 /**
  * Science Card phases. QUESTION..REPLICATE is the main investigative chain;
@@ -3280,159 +3242,35 @@ export class Squad {
     }
   }
 
-  private rowToDivergenceRound(row: {
-    id: number;
-    card_id: number | null;
-    topic: string;
-    opened_by: string;
-    opened_ts: string;
-    expected_participants: string | null;
-    status: string;
-    closed_by: string | null;
-    closed_ts: string | null;
-  }): DivergenceRound {
-    return {
-      id: row.id,
-      card_id: row.card_id,
-      topic: row.topic,
-      opened_by: row.opened_by,
-      opened_ts: row.opened_ts,
-      expected_participants: row.expected_participants ? JSON.parse(row.expected_participants) : null,
-      status: row.status === "closed" ? "closed" : "open",
-      closed_by: row.closed_by,
-      closed_ts: row.closed_ts,
-    };
-  }
-
-  private getDivergenceRound(roundId: number): DivergenceRound {
-    const row = this.db.prepare("SELECT * FROM divergence_rounds WHERE id = ?").get(roundId) as
-      | unknown
-      | undefined;
-    if (!row) throw new Error(`no divergence round with id ${roundId}`);
-    return this.rowToDivergenceRound(row as Parameters<typeof this.rowToDivergenceRound>[0]);
-  }
-
-  /**
-   * Open a divergence round and announce it to chat — the announcement
-   * carries only the topic, never a future submission body.
-   */
+  /** Open a divergence round; see `diverge.divergeOpen`. */
   divergeOpen(
     topic: string,
     opts: { cardId?: number; expectedParticipants?: string[] } = {},
   ): DivergenceRound {
     this.touch();
-    const ts = now();
-    const expected = opts.expectedParticipants ?? null;
-    const { lastInsertRowid } = this.db
-      .prepare(
-        `INSERT INTO divergence_rounds (card_id, topic, opened_by, opened_ts, expected_participants, status)
-         VALUES (?, ?, ?, ?, ?, 'open')`,
-      )
-      .run(opts.cardId ?? null, topic, this.persona, ts, expected ? JSON.stringify(expected) : null);
-    const id = Number(lastInsertRowid);
-    this.send(`${this.persona} opened divergence round #${id}: ${topic}`, "system");
-    return {
-      id,
-      card_id: opts.cardId ?? null,
-      topic,
-      opened_by: this.persona,
-      opened_ts: ts,
-      expected_participants: expected,
-      status: "open",
-      closed_by: null,
-      closed_ts: null,
-    };
+    return diverge.divergeOpen(this.divergeContext(), topic, opts);
   }
 
-  /**
-   * Record this persona's independent submission to an open round.
-   * Resubmission overwrites (idempotent per persona, no duplicate rows). The
-   * return value never includes another persona's submission.
-   */
+  /** Record this persona's independent submission; see `diverge.divergeSubmit`. */
   divergeSubmit(roundId: number, body: string): DivergenceSubmission {
     this.touch();
-    const round = this.getDivergenceRound(roundId);
-    if (round.status === "closed") {
-      throw new Error(`divergence round #${roundId} is already closed`);
-    }
-    const ts = now();
-    this.db
-      .prepare(
-        `INSERT INTO divergence_submissions (round_id, persona, body, submitted_ts) VALUES (?, ?, ?, ?)
-         ON CONFLICT(round_id, persona) DO UPDATE SET body = excluded.body, submitted_ts = excluded.submitted_ts`,
-      )
-      .run(roundId, this.persona, body, ts);
-    const mine = this.db
-      .prepare("SELECT * FROM divergence_submissions WHERE round_id = ? AND persona = ?")
-      .get(roundId, this.persona) as unknown as DivergenceSubmission;
-
-    // Auto-close once every expected participant has submitted. Only reads
-    // *who* has submitted (personas), never a submission body.
-    if (round.expected_participants && round.expected_participants.length > 0) {
-      const rows = this.db
-        .prepare("SELECT DISTINCT persona FROM divergence_submissions WHERE round_id = ?")
-        .all(roundId) as unknown as Array<{ persona: string }>;
-      const submitted = new Set(rows.map((r) => r.persona));
-      const allIn = round.expected_participants.every((p) => submitted.has(p));
-      if (allIn) this.closeDivergenceRound(round, this.persona, true);
-    }
-
-    return mine;
+    return diverge.divergeSubmit(this.divergeContext(), roundId, body);
   }
 
-  /**
-   * The caller's view of a round: while open, who has submitted (not what)
-   * plus the caller's own submission if made; while closed, every
-   * submission.
-   */
+  /** The caller's view of a round; see `diverge.divergeStatus`. */
   divergeStatus(roundId: number): DivergenceStatus {
     this.touch();
-    const round = this.getDivergenceRound(roundId);
-    const rows = this.db
-      .prepare("SELECT DISTINCT persona FROM divergence_submissions WHERE round_id = ?")
-      .all(roundId) as unknown as Array<{ persona: string }>;
-    const submitted_personas = rows.map((r) => r.persona);
-    const mineRow = this.db
-      .prepare("SELECT * FROM divergence_submissions WHERE round_id = ? AND persona = ?")
-      .get(roundId, this.persona) as unknown as DivergenceSubmission | undefined;
-    const mine = mineRow ?? null;
-
-    if (round.status !== "closed") {
-      return { round, submitted_personas, mine, submissions: null };
-    }
-    const submissions = this.db
-      .prepare("SELECT * FROM divergence_submissions WHERE round_id = ? ORDER BY id ASC")
-      .all(roundId) as unknown as DivergenceSubmission[];
-    return { round, submitted_personas, mine, submissions };
+    return diverge.divergeStatus(this.divergeContext(), roundId);
   }
 
-  private closeDivergenceRound(round: DivergenceRound, closedBy: string, auto: boolean): DivergenceRound {
-    const ts = now();
-    this.db
-      .prepare("UPDATE divergence_rounds SET status = 'closed', closed_by = ?, closed_ts = ? WHERE id = ?")
-      .run(closedBy, ts, round.id);
-    const { n: count } = this.db
-      .prepare("SELECT COUNT(*) AS n FROM divergence_submissions WHERE round_id = ?")
-      .get(round.id) as { n: number };
-    const how = auto ? "auto-closed (all expected participants submitted)" : "closed";
-    this.send(
-      `${closedBy} ${how} divergence round #${round.id}: ${round.topic} ` +
-        `(${count} submission${count === 1 ? "" : "s"} revealed)`,
-      "system",
-    );
-    return { ...round, status: "closed", closed_by: closedBy, closed_ts: ts };
-  }
-
-  /**
-   * Explicitly close a round: reveals every submission and announces the
-   * reveal to chat. Idempotent — a no-op returning the current state if the
-   * round is already closed.
-   */
+  /** Explicitly close a round; see `diverge.divergeClose`. */
   divergeClose(roundId: number): DivergenceRound {
     this.touch();
-    const round = this.getDivergenceRound(roundId);
-    if (round.status === "closed") return round;
-    return this.closeDivergenceRound(round, this.persona, false);
+    return diverge.divergeClose(this.divergeContext(), roundId);
+  }
+
+  private divergeContext(): diverge.DivergeContext {
+    return { db: this.db, persona: this.persona, send: (body, kind) => this.send(body, kind) };
   }
 
   /** One review request with its derived expiry. */
