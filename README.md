@@ -34,6 +34,10 @@ to add by hand. `SQUAD_OPENCODE_PERSONA` pins a persona for fresh configuration.
 `--no-opencode` skips the opencode files; uninstall removes the owned ones;
 `squad doctor` reports an informational `opencode:` line.
 
+`SQUAD_QUIET=1` (any non-empty value other than `0`) silences the advisory stderr lines
+`squad send` and `squad read` print (the unread-message notice and the reply-gap warning);
+stdout and exit status are unchanged.
+
 This follows the [Repo Skills shared-body/thin-adapter contract](https://github.com/rjwalters/repo/blob/main/skills/README.md):
 workflow semantics live in one skill bundle; aliases only route to its references.
 Squad uses repo-scoped `.agents/skills` for native Codex discovery, while retaining
