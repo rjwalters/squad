@@ -129,10 +129,18 @@ const JOIN_USAGE =
   "  line to use for later squad send / read / wait calls. Refuses 'human', reserved names,\n" +
   "  an existing persona's exact name, and a shell that already has SQUAD_PERSONA set.";
 
+/** claim/release take exactly one path token; flags and stray words are usage errors. */
+function singlePathArg(args: string[], usage: string): string {
+  if (args.length !== 1) throw new Error(usage);
+  const path = args[0].trim();
+  if (!path || path.startsWith("-")) throw new Error(usage);
+  return path;
+}
+
 const COMMAND_USAGE: Record<string, string> = {
   bank: "usage: squad bank <attempt-id> [--build-timeout-ms N]",
   card: "usage: squad card [create|list|show|transition|evidence|edit] ...",
-  claim: "usage: squad claim <path>",
+  claim: "usage: squad claim <path> (exactly one path argument; quote paths containing spaces)",
   claims: "usage: squad claims (show advisory file claims -- who is working on what)",
   clear:
     "usage: squad clear (wipe messages, goals, claims, cursors, members, presence " +
@@ -153,7 +161,7 @@ const COMMAND_USAGE: Record<string, string> = {
     "usage: squad outline render|status [path]|publish <request-key> [path] [--build-timeout-ms N]",
   path: "usage: squad path (print the database path)",
   read: "usage: squad read [-n N | --unread] (show the last N messages, default 30; stateless -- or, with --unread, only other senders' messages since your last read, advancing the cursor)",
-  release: "usage: squad release <path>",
+  release: "usage: squad release <path> (exactly one path argument; quote paths containing spaces)",
   review: "usage: squad review [open|list|show|claim|resolve|cancel] ...",
   send:
     "usage: squad send [--room <repo-path>] <text...> | squad send --reply <message-id> <text...> | " +
@@ -1363,15 +1371,13 @@ export async function runCli(argv: string[]): Promise<void> {
       break;
     }
     case "claim": {
-      const path = rest.join(" ").trim();
-      if (!path) throw new Error(COMMAND_USAGE.claim);
+      const path = singlePathArg(rest, COMMAND_USAGE.claim);
       const c = squad.claim(path);
       console.log(`claimed ${c.path} (${c.persona})`);
       break;
     }
     case "release": {
-      const path = rest.join(" ").trim();
-      if (!path) throw new Error(COMMAND_USAGE.release);
+      const path = singlePathArg(rest, COMMAND_USAGE.release);
       const released = squad.release(path);
       if (released.length === 0) console.log(`no claim on ${path}`);
       else console.log(`released ${path} (was ${released.map((c) => c.persona).join(", ")})`);
