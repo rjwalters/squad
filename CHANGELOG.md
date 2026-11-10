@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `squad: failed to load MCP runtime <path>: <message>` with exit 1. `squad doctor` resolves a
   relative `SQUAD_RUNTIME` primary-clone-first, matching the launcher. README gains an
   "MCP server unavailable?" fallback note (#296).
+- `squad claim` / `squad release` now reject flags and extra arguments instead of joining them
+  into the claimed path (#294).
 
 ## 0.19.36
 
