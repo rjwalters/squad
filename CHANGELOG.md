@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## 0.19.37
 
 - `squad review request` is now accepted as an alias of `squad review open` (#295).
+- `squad claim` / `squad release` now reject flags and extra arguments instead of joining them
+  into the claimed path (#294).
 
 ## 0.19.36
 
