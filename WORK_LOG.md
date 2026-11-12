@@ -2,6 +2,10 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-12
+
+- **PR #306**: Bump Repo Skills 0.25.10 -> 0.26.1
+
 ### 2026-11-10
 
 - **PR #303**: refactor: extract divergence-round domain into src/diverge.ts
