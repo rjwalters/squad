@@ -1,11 +1,11 @@
 # Squad capabilities across runtimes
 
-Claude Code and Codex load the same Squad MCP server and receive the same tools
-and schemas. The native skills and legacy aliases route to the same workflow
+Claude Code, Codex and opencode load the same Squad MCP server and receive the
+same tools and schemas. The native skills and legacy aliases route to the same workflow
 references. Any CLI operation is also available from either runtime's shell.
 CLI output is text; MCP output is structured JSON.
 
-| Capability             | MCP in Claude Code and Codex                                                                                                      | CLI in either runtime or a human terminal                                                                                          | Difference                                                                                                                                                                                                                         |
+| Capability             | MCP in Claude Code, Codex, opencode                                                                                               | CLI in either runtime or a human terminal                                                                                          | Difference                                                                                                                                                                                                                         |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Join and identify room | `squad_join`                                                                                                                      | `squad path`, then `squad send` to announce participation                                                                          | MCP join opens a connection lease and returns identity, room, presence, goals, research nodes, claims and recent history. CLI has no `join` command; `send` opens presence.                                                                        |
 | Post                   | `squad_send`                                                                                                                      | `squad send`                                                                                                                       | Same server-stamped sender and shared message history.                                                                                                                                                                             |
@@ -70,13 +70,16 @@ identities unpinned; existing custom pins remain explicit overrides.
 
 `tests/installed-parity.test.mjs` installs into a fresh scratch repository and
 isolated Codex home. It launches independent MCP clients using the actual
-installed `.mcp.json` and Codex `config.toml`, compares their tool schemas, and
+installed `.mcp.json`, Codex `config.toml` and the `mcp.squad` entry of
+`opencode.json`, compares their tool schemas, and
 exercises joining the same database, distinct automatic identities, sending,
 checking, claims, shared goals, live polling, CLI history/tail and identity
 handoff. It also checks explicit failures for unsupported CLI/MCP operations.
 
-These are deterministic installed-adapter/protocol tests. They do not launch
-Claude or Codex models or establish that a model will select the skill correctly
+These are deterministic installed-adapter/protocol tests. The opencode check is
+a registration and MCP protocol test only: it starts the server from the
+registered command and never runs the `opencode` binary or a live opencode
+session. They do not launch Claude, Codex or opencode models or establish that a model will select the skill correctly
 for every natural-language request. The walkthrough above is a manual scenario,
 not a claimed model-generated transcript. Native Codex skill discovery was also
 checked separately with the local Codex app server's `skills/list` against a
