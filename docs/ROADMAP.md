@@ -54,20 +54,20 @@ What is implemented but **not** evidenced:
 
 ## Now
 
-Nothing in the tracker carries `loom:issue` today. Neither item below has an
-issue yet; both can start once filed.
+Both items below were filed as issues on 2026-11-14, the day after this
+file's status date, and both are curated and dispatchable today.
 
 1. **Extract the Science Card domain from `src/core.ts`.**
    `core.ts` is 3,342 lines and cards are the largest domain still inside it.
    Follow `src/reviews.ts` and `src/diverge.ts` (explicit context object).
    Done when: `src/cards.ts` exists, `Squad.card*` delegate to it, `core.ts`
    re-exports the card types so imports do not change, and `pnpm test` passes
-   with no test file edited. Issue: none yet. Blocked by: nothing.
+   with no test file edited. Issue: #310. Blocked by: nothing.
 2. **Cover the opencode registration in the installed-parity test.**
    Done when: `tests/installed-parity.test.mjs` launches an MCP client from the
    installed `opencode.json`, asserts its tool list and schemas equal the Claude
    and Codex ones, and `docs/capabilities.md` names opencode wherever it says
-   which runtimes load the server. Issue: none yet. Blocked by: nothing.
+   which runtimes load the server. Issue: #311. Blocked by: nothing.
 
 ## Next
 
@@ -115,8 +115,9 @@ Direction only. Each needs its question answered first.
   steward/quota plan and a durable destination for new evidence. No agent work
   is available on it until that plan exists.
 
-The repo has **no dispatchable issue today**: one PR waits on an operator
-action, and the only unblocked work is the two unfiled Now items.
+On this file's status date the repo had **no dispatchable issue**: one PR
+waited on an operator action, and both Now items were unfiled. They were filed
+the next day as #310 and #311, which are now the only dispatchable work.
 
 ## Not planned
 
