@@ -2,6 +2,14 @@
 
 Merged PRs and closed issues from the last 30 days when this log was initialized. Guide appends subsequent unrecorded events.
 
+### 2026-11-14
+
+- **PR #314**: refactor: extract Science Card domain from core.ts into cards.ts
+- **PR #313**: test: cover opencode registration in installed-parity test
+- **PR #309**: docs: roadmap as of 2026-11-13
+- **Issue #311** (closed): Cover the opencode registration in the installed-parity test and capability doc
+- **Issue #310** (closed): Extract the Science Card domain from src/core.ts into its own module
+
 ### 2026-11-12
 
 - **PR #306**: Bump Repo Skills 0.25.10 -> 0.26.1
