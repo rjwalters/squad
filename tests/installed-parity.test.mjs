@@ -17,10 +17,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { parse } from "smol-toml";
 
 // These are protocol clients launched from the actual installed runtime config.
-// They do not represent model-driven Claude Code or Codex sessions.
+// They do not represent model-driven Claude Code, Codex or opencode sessions.
 //
-// This single test covers a lot of ground end-to-end: install.sh, two MCP
-// server processes (Claude + Codex), and several CLI subprocess flows (git
+// This single test covers a lot of ground end-to-end: install.sh, three MCP
+// server processes (Claude + Codex + opencode), and several CLI subprocess flows (git
 // integration, bank, review, tail). Observed real cost is ~30-31s on a
 // normal host but 40-45s+ from a nested Loom worktree, which leaves no
 // margin under node:test's implicit 30s default (or the previous explicit
@@ -28,7 +28,7 @@ import { parse } from "smol-toml";
 // headroom over that observed range, since a loaded or nested-worktree
 // host can run slower still.
 test(
-  "installed Claude and Codex entry points collaborate in one room",
+  "installed Claude, Codex and opencode entry points collaborate in one room",
   { timeout: 90000 },
   async () => {
     const scratch = realpathSync(
@@ -151,11 +151,23 @@ test(
         assert.match(conv, /repos where squad is not installed/, runtime);
         assert.match(conv, /Mirror what you receive/, runtime);
       }
+      // opencode's registration has its own shape: one `command` array and an
+      // `environment` map. Normalize it to the command/args/env the Claude and
+      // Codex entries use. Registration only; no opencode binary is launched.
+      const opencodeEntry = JSON.parse(
+        readFileSync(join(repo, "opencode.json"), "utf8"),
+      ).mcp.squad;
+      assert.ok(Array.isArray(opencodeEntry.command), "opencode command array");
       const configs = [
         JSON.parse(readFileSync(join(repo, ".mcp.json"), "utf8")).mcpServers
           .squad,
         parse(readFileSync(join(codexHome, "config.toml"), "utf8")).mcp_servers
           .squad,
+        {
+          command: opencodeEntry.command[0],
+          args: opencodeEntry.command.slice(1),
+          env: opencodeEntry.environment,
+        },
       ];
       const joined = [];
       for (const [index, config] of configs.entries()) {
@@ -179,13 +191,18 @@ test(
         );
         joined.push(await call(client, "squad_join"));
       }
-      assert.equal(
-        resolve(repo, joined[0].db),
-        resolve(repo, joined[1].db),
-        "both installed configurations select the same room",
-      );
+      for (const identity of joined.slice(1))
+        assert.equal(
+          resolve(repo, joined[0].db),
+          resolve(repo, identity.db),
+          "all installed configurations select the same room",
+        );
       assert.equal(resolve(repo, joined[0].db), resolve(repo, cli(["path"]).trim()));
-      assert.notEqual(joined[0].persona, joined[1].persona);
+      assert.equal(
+        new Set(joined.map((identity) => identity.persona)).size,
+        joined.length,
+        "each installed runtime receives its own identity",
+      );
       assert.ok(
         joined.every(
           (identity) =>
@@ -193,10 +210,9 @@ test(
             identity.identity_id !== identity.session_id,
         ),
       );
-      assert.deepEqual(
-        (await clients[0].listTools()).tools,
-        (await clients[1].listTools()).tools,
-      );
+      const claudeSchemas = (await clients[0].listTools()).tools;
+      for (const client of clients.slice(1))
+        assert.deepEqual((await client.listTools()).tools, claudeSchemas);
       const matrixTools = readFileSync("docs/capabilities.md", "utf8")
         .split("\n")
         .filter((line) => line.startsWith("|"))
@@ -457,7 +473,7 @@ test(
         ),
       );
       for (const [index, client] of clients.entries()) {
-        const peer = clients[1 - index];
+        const peer = clients[(index + 1) % clients.length];
         const identityEnv = { SQUAD_SESSION_ID: joined[index].identity_id };
         const path = `participant-${index}.md`;
         await call(client, "squad_claim", { path });
