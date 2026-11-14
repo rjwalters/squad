@@ -209,3 +209,20 @@ test("squad help documents the review command family", () => {
   assert.match(res.stdout, /squad review open --to <persona>/);
   assert.match(res.stdout, /squad review claim <id>/);
 });
+
+test("squad review request is an alias of review open", () => {
+  const dir = freshDir();
+  try {
+    const noBody = runCli(["review", "request", "--to", "codex"], { SQUAD_DIR: dir });
+    assert.notEqual(noBody.status, 0);
+    assert.match(noBody.stderr, /usage: squad review open/);
+
+    const opened = runCli(["review", "request", "--to", "codex", "--priority", "high", "x"], {
+      SQUAD_DIR: dir,
+    });
+    assert.equal(opened.status, 0, opened.stderr);
+    assert.match(opened.stdout, /opened review #1 for codex \[high\]: x/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

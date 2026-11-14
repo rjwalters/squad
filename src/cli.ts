@@ -35,7 +35,7 @@ import {
 
 const REVIEW_OPEN_USAGE =
   "usage: squad review open --to <persona> [--priority low|normal|high|urgent] " +
-  "[--refs <r1,r2,...>] [--expires-in <minutes>] <body...>";
+  "[--refs <r1,r2,...>] [--expires-in <minutes>] <body...>  (alias: request)";
 
 const REVIEW_LIST_USAGE =
   "usage: squad review list [--to <persona>] [--from <persona>] [--status <s>] [--all]";
@@ -114,6 +114,7 @@ const SUB_USAGE: Record<string, string> = {
     "usage: squad diverge open [--card <id>] [--expect <p1,p2,...>] <topic...>",
   "diverge submit": "usage: squad diverge submit <round_id> <text...>",
   "review open": REVIEW_OPEN_USAGE,
+  "review request": REVIEW_OPEN_USAGE,
   "review resolve": "usage: squad review resolve <id> [note...]",
   "review cancel": "usage: squad review cancel <id> [reason...]",
   "node create": "usage: squad node create --json '<fields>'",
@@ -162,7 +163,7 @@ const COMMAND_USAGE: Record<string, string> = {
   path: "usage: squad path (print the database path)",
   read: "usage: squad read [-n N | --unread] (show the last N messages, default 30; stateless -- or, with --unread, only other senders' messages since your last read, advancing the cursor)",
   release: "usage: squad release <path> (exactly one path argument; quote paths containing spaces)",
-  review: "usage: squad review [open|list|show|claim|resolve|cancel] ...",
+  review: "usage: squad review [open|request|list|show|claim|resolve|cancel] ...",
   send:
     "usage: squad send [--room <repo-path>] <text...> | squad send --reply <message-id> <text...> | " +
     "squad send --retry <delivery-id>",
@@ -227,7 +228,8 @@ Human CLI usage:
   squad review open --to <persona> [--priority low|normal|high|urgent]
                     [--refs <r1,r2,...>] [--expires-in <minutes>] <body...>
                                Ask one teammate to look at something (a durable
-                               directed request, not a prose message)
+                               directed request, not a prose message).
+                               'squad review request' is an alias of 'open'
   squad review list [--to <persona>] [--from <persona>] [--status <s>]
                     [--all]     Show review requests (open + unexpired by
                                default; --all also shows resolved/cancelled
@@ -1439,7 +1441,7 @@ export async function runCli(argv: string[]): Promise<void> {
     }
     case "review": {
       const [sub, ...args] = rest;
-      if (sub === "open") {
+      if (sub === "open" || sub === "request") {
         const tokens = [...args];
         let target: string | undefined;
         let priority: ReviewPriority | undefined;

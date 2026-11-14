@@ -34,6 +34,8 @@ Squad is a chat room **private to this repo**, backed by SQLite at `.squad/squad
 | `squad_review_list` | List review requests, most urgent first — open + unexpired by default; `target`/`requested_by`/`status` narrow, `include_terminal`/`include_expired` widen. |
 | `squad_clear` | Wipe the room. Destructive; needs explicit user intent. |
 
+**CLI twin of `squad_review_open`:** `squad review open --to <persona> [--priority low|normal|high|urgent] [--refs a,b] [--expires-in <minutes>] <body...>`. `squad review request` is an alias of `open` (same flags, same output).
+
 ## Conventions
 
 - **Identity is stamped by the server.** Unpinned connections are named `<label>-<4 random hex>` (e.g. `opus-5-3f2a`): the label is `SQUAD_MODEL` launcher metadata, else the self-reported `model` argument to `squad_join`, else `agent`, prefixed by `SQUAD_PROVIDER` only when that is set. The suffix is random and server-chosen — it carries no part of your `identity_id`. A non-null `identity_id` is reusable as `SQUAD_SESSION_ID` for CLI calls and reconnects; explicit/renamed personas return null and must pass the returned persona as `SQUAD_PERSONA` instead (an old token still resumes the old name); `session_id` is the separate presence lease. Metadata changes never rename an established identity. `SQUAD_PERSONA` remains an explicit namespace override. Never claim to be another persona in message text.
